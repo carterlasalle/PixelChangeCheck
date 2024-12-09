@@ -55,18 +55,44 @@ impl Renderer {
                 .context("Failed to set VideoToolbox options")?;
         }
         
+        #[cfg(target_os = "windows")]
+        {
+            // Use NVENC or AMF on Windows if available
+            if let Ok(_) = codec.set_encoder("h264_nvenc") {
+                let mut opts = ffmpeg::Dictionary::new();
+                opts.set("preset", "llhp");
+                opts.set("zerolatency", "1");
+                codec.set_options(opts)?;
+            } else if let Ok(_) = codec.set_encoder("h264_amf") {
+                let mut opts = ffmpeg::Dictionary::new();
+                opts.set("usage", "lowlatency");
+                codec.set_options(opts)?;
+            } else {
+                // Fallback to software encoding
+                codec.set_encoder("libx264")?;
+                let mut opts = ffmpeg::Dictionary::new();
+                opts.set("preset", "ultrafast");
+                opts.set("tune", "zerolatency");
+                codec.set_options(opts)?;
+            }
+        }
+        
         #[cfg(target_os = "linux")]
         {
-            // Use VAAPI for hardware acceleration on Linux
-            codec.set_encoder("h264_vaapi")
-                .context("Failed to set VAAPI encoder")?;
-            
-            // Set VAAPI-specific options
-            let mut opts = ffmpeg::Dictionary::new();
-            opts.set("low_power", "1"); // Use low power mode if available
-            opts.set("idr_interval", "30"); // Set IDR frame interval
-            codec.set_options(opts)
-                .context("Failed to set VAAPI options")?;
+            // Try to use hardware encoders on Linux, fallback to software
+            if let Ok(_) = codec.set_encoder("h264_nvenc") {
+                let mut opts = ffmpeg::Dictionary::new();
+                opts.set("preset", "llhp");
+                opts.set("zerolatency", "1");
+                codec.set_options(opts)?;
+            } else {
+                // Fallback to software encoding
+                codec.set_encoder("libx264")?;
+                let mut opts = ffmpeg::Dictionary::new();
+                opts.set("preset", "ultrafast");
+                opts.set("tune", "zerolatency");
+                codec.set_options(opts)?;
+            }
         }
         
         // Open codec

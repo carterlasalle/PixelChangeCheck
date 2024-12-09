@@ -7,34 +7,60 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
         /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
 
-    # Install FFmpeg with VideoToolbox support
-    echo "Installing FFmpeg with VideoToolbox support..."
-    brew install ffmpeg --with-videotoolbox
+    # Remove any existing FFmpeg installation
+    brew uninstall ffmpeg || true
     
-    # Install pkg-config for build configuration
+    # Install FFmpeg with VideoToolbox support
+    echo "Installing FFmpeg..."
+    brew install ffmpeg
+
+    # Install pkg-config
     brew install pkg-config
 
-    # Set up environment variables for FFmpeg
-    export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"
-    export FFMPEG_LIB_DIR="/opt/homebrew/lib"
-    export FFMPEG_INCLUDE_DIR="/opt/homebrew/include"
+    # Create local include directory
+    mkdir -p include
     
-    # Verify VideoToolbox support
-    echo "Verifying FFmpeg VideoToolbox support..."
-    ffmpeg -encoders 2>/dev/null | grep videotoolbox
+    # Set up environment variables for FFmpeg
+    FFMPEG_PREFIX="$(brew --prefix ffmpeg)"
+    export PKG_CONFIG_PATH="${FFMPEG_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export LIBRARY_PATH="${FFMPEG_PREFIX}/lib:${LIBRARY_PATH:-}"
+    export CPATH="${FFMPEG_PREFIX}/include:${CPATH:-}"
+    export MACOSX_DEPLOYMENT_TARGET=11.0
+    
+    # Create symbolic links for headers
+    echo "Setting up header files..."
+    ln -sf "${FFMPEG_PREFIX}/include/libavcodec" include/
+    ln -sf "${FFMPEG_PREFIX}/include/libavformat" include/
+    ln -sf "${FFMPEG_PREFIX}/include/libavutil" include/
+    ln -sf "${FFMPEG_PREFIX}/include/libswscale" include/
+    
+    # Verify FFmpeg installation and capabilities
+    echo "Verifying FFmpeg capabilities..."
+    ffmpeg -encoders | grep videotoolbox
     
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    # Install FFmpeg on Linux with VAAPI support
-    echo "Installing FFmpeg with VAAPI support..."
+    # Install FFmpeg on Linux with minimal configuration
+    echo "Installing FFmpeg..."
     sudo apt-get update
-    sudo apt-get install -y ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev pkg-config vainfo
-    
-    # Verify VAAPI support
-    echo "Verifying VAAPI support..."
-    vainfo
+    sudo apt-get install -y \
+        ffmpeg \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libswscale-dev \
+        pkg-config
 fi
 
 # Clean and build
 echo "Building project..."
+
+# Remove target directory to ensure clean build
+rm -rf target/
+
+# Set environment variables for build
+export FFMPEG_NO_VAAPI=1    # Disable VAAPI dependency
+export FFMPEG_NO_VDPAU=1    # Disable VDPAU dependency
+
+# Build project
 cargo clean
 cargo build --example simple_screen_share
