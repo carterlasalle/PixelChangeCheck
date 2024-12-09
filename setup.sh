@@ -7,36 +7,34 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
         /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
 
-    # Remove any existing FFmpeg installation
+    echo "Removing existing FFmpeg installation..."
     brew uninstall ffmpeg || true
-    
-    # Install FFmpeg with VideoToolbox support
+
     echo "Installing FFmpeg..."
     brew install ffmpeg
 
-    # Install pkg-config
-    brew install pkg-config
+    echo "Creating cargo config..."
+    mkdir -p ~/.cargo
+    cat > ~/.cargo/config.toml << EOF
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-args=-L/opt/homebrew/lib",
+    "-C", "link-args=-framework",
+    "-C", "link-args=VideoToolbox",
+    "-C", "link-args=-framework",
+    "-C", "link-args=CoreMedia",
+    "-C", "link-args=-framework",
+    "-C", "link-args=CoreFoundation"
+]
+EOF
 
-    # Create local include directory
-    mkdir -p include
+    echo "Setting up environment variables..."
+    export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
+    export FFMPEG_LIB_DIR="/opt/homebrew/lib"
+    export FFMPEG_INCLUDE_DIR="/opt/homebrew/include"
     
-    # Set up environment variables for FFmpeg
-    FFMPEG_PREFIX="$(brew --prefix ffmpeg)"
-    export PKG_CONFIG_PATH="${FFMPEG_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-    export LIBRARY_PATH="${FFMPEG_PREFIX}/lib:${LIBRARY_PATH:-}"
-    export CPATH="${FFMPEG_PREFIX}/include:${CPATH:-}"
-    export MACOSX_DEPLOYMENT_TARGET=11.0
-    
-    # Create symbolic links for headers
-    echo "Setting up header files..."
-    ln -sf "${FFMPEG_PREFIX}/include/libavcodec" include/
-    ln -sf "${FFMPEG_PREFIX}/include/libavformat" include/
-    ln -sf "${FFMPEG_PREFIX}/include/libavutil" include/
-    ln -sf "${FFMPEG_PREFIX}/include/libswscale" include/
-    
-    # Verify FFmpeg installation and capabilities
     echo "Verifying FFmpeg capabilities..."
-    ffmpeg -encoders | grep videotoolbox
+    ffmpeg -encoders 2>/dev/null | grep videotoolbox
     
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     # Install FFmpeg on Linux with minimal configuration
@@ -56,10 +54,6 @@ echo "Building project..."
 
 # Remove target directory to ensure clean build
 rm -rf target/
-
-# Set environment variables for build
-export FFMPEG_NO_VAAPI=1    # Disable VAAPI dependency
-export FFMPEG_NO_VDPAU=1    # Disable VDPAU dependency
 
 # Build project
 cargo clean

@@ -20,7 +20,8 @@ rgb = "0.8"
 jpeg-encoder = { version = "0.5", features = ["simd"] }
 
 # Video processing
-ffmpeg-next = { version = "4.4", features = ["build"] }
+ffmpeg-next = "6.0"
+ffmpeg-sys-next = { version = "6.0", features = ["build"] }
 
 # Compression
 lz4_flex = "0.11"
@@ -49,9 +50,8 @@ thiserror = "1.0"
 # System info
 num_cpus = "1.16"
 
-[features]
-default = []
-build = []
+[build-dependencies]
+pkg-config = "0.3"
 
 [profile.release]
 opt-level = 3
