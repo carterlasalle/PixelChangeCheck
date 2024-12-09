@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use rustls::{ClientConfig, ServerConfig};
+use rcgen::generate_simple_self_signed;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -23,10 +25,26 @@ impl Default for NetworkConfig {
 }
 
 impl NetworkConfig {
-    pub fn crypto_config(&self) -> rustls::ClientConfig {
-        rustls::ClientConfig::builder()
+    pub fn client_crypto_config(&self) -> ClientConfig {
+        ClientConfig::builder()
             .with_safe_defaults()
             .with_native_roots()
             .with_no_client_auth()
+    }
+
+    pub fn server_crypto_config(&self) -> ServerConfig {
+        // Generate a self-signed certificate for testing
+        let cert = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let key_der = cert.serialize_private_key_der();
+        let cert_der = cert.serialize_der().unwrap();
+        
+        let mut server_crypto = ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(vec![rustls::Certificate(cert_der)], rustls::PrivateKey(key_der))
+            .unwrap();
+            
+        server_crypto.alpn_protocols = vec![b"pcc".to_vec()];
+        server_crypto
     }
 } 
