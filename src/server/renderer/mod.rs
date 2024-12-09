@@ -5,109 +5,62 @@ use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 pub struct Renderer {
     buffer: Arc<FrameBuffer>,
     context: Arc<Mutex<ffmpeg::format::context::Output>>,
-    stream: ffmpeg::format::stream::Stream,
+    stream_index: usize,
     frame_interval: Duration,
 }
 
 impl Renderer {
     pub async fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
-        // Initialize FFmpeg with all available formats and codecs
+        // Initialize FFmpeg
         ffmpeg::init().context("Failed to initialize FFmpeg")?;
         
         // Create frame buffer
         let buffer = Arc::new(FrameBuffer::new(width, height));
         
-        // Set up output context for display
-        let context = ffmpeg::format::output(&format!("sdl2://PCC Display"))
-            .context("Failed to create FFmpeg output context")?;
-        let stream = context.add_stream()
-            .context("Failed to add video stream")?;
+        // Create output context
+        let mut context = ffmpeg::format::output(&format!("sdl2://PCC Display"))?;
         
-        // Configure stream
-        let mut codec = stream.codec().encoder().video()
-            .context("Failed to create video encoder")?;
-            
-        // Set codec parameters
-        codec.set_width(width);
-        codec.set_height(height);
-        codec.set_format(ffmpeg::format::Pixel::RGB24);
-        codec.set_frame_rate(Some((fps as i32, 1)));
-        codec.set_time_base(Some((1, fps as i32)));
+        // Create encoder
+        let encoder = ffmpeg::encoder::find(ffmpeg::codec::Id::H264)?;
+        let stream_index = context.add_stream(encoder)?;
+        let mut stream = context.stream_mut(stream_index);
         
-        // Configure hardware acceleration based on platform
+        {
+            let enc = stream.parameters_mut();
+            enc.set_width(width);
+            enc.set_height(height);
+            enc.set_format(ffmpeg::format::Pixel::RGB24);
+            enc.set_frame_rate(Some((fps as i32, 1)));
+            enc.set_time_base(Some((1, fps as i32)));
+        }
+        
         #[cfg(target_os = "macos")]
         {
-            // Use VideoToolbox for hardware acceleration on macOS
-            codec.set_encoder("h264_videotoolbox")
-                .context("Failed to set VideoToolbox encoder")?;
+            let enc = stream.parameters_mut();
+            enc.set_codec_id(ffmpeg::codec::Id::H264);
+            enc.set_codec_tag(ffmpeg::codec::tag::NONE);
             
             // Set VideoToolbox-specific options
             let mut opts = ffmpeg::Dictionary::new();
             opts.set("allow_sw", "1"); // Allow fallback to software encoding
             opts.set("realtime", "1"); // Enable realtime encoding
             opts.set("profile", "high"); // Use high profile for better quality
-            codec.set_options(opts)
-                .context("Failed to set VideoToolbox options")?;
+            stream.set_parameters_mut().set_options(opts)?;
         }
-        
-        #[cfg(target_os = "windows")]
-        {
-            // Use NVENC or AMF on Windows if available
-            if let Ok(_) = codec.set_encoder("h264_nvenc") {
-                let mut opts = ffmpeg::Dictionary::new();
-                opts.set("preset", "llhp");
-                opts.set("zerolatency", "1");
-                codec.set_options(opts)?;
-            } else if let Ok(_) = codec.set_encoder("h264_amf") {
-                let mut opts = ffmpeg::Dictionary::new();
-                opts.set("usage", "lowlatency");
-                codec.set_options(opts)?;
-            } else {
-                // Fallback to software encoding
-                codec.set_encoder("libx264")?;
-                let mut opts = ffmpeg::Dictionary::new();
-                opts.set("preset", "ultrafast");
-                opts.set("tune", "zerolatency");
-                codec.set_options(opts)?;
-            }
-        }
-        
-        #[cfg(target_os = "linux")]
-        {
-            // Try to use hardware encoders on Linux, fallback to software
-            if let Ok(_) = codec.set_encoder("h264_nvenc") {
-                let mut opts = ffmpeg::Dictionary::new();
-                opts.set("preset", "llhp");
-                opts.set("zerolatency", "1");
-                codec.set_options(opts)?;
-            } else {
-                // Fallback to software encoding
-                codec.set_encoder("libx264")?;
-                let mut opts = ffmpeg::Dictionary::new();
-                opts.set("preset", "ultrafast");
-                opts.set("tune", "zerolatency");
-                codec.set_options(opts)?;
-            }
-        }
-        
-        // Open codec
-        codec.open_as(codec.id())
-            .context("Failed to open video codec")?;
         
         Ok(Self {
-            buffer: buffer.clone(),
+            buffer,
             context: Arc::new(Mutex::new(context)),
-            stream,
+            stream_index,
             frame_interval: Duration::from_secs(1) / fps,
         })
     }
     
-    // Start the rendering loop
     pub async fn start(&self) -> Result<()> {
         info!("Starting renderer");
         
@@ -127,11 +80,14 @@ impl Renderer {
         }
     }
     
-    // Render a single frame
     async fn render_frame(&self, frame: &buffer::BufferedFrame) -> Result<()> {
         let mut context = self.context.lock().await;
+        let stream = context.stream(self.stream_index);
         
-        // Create FFmpeg frame
+        let mut encoder = stream.parameters().encoder()?;
+        let mut packet = ffmpeg::Packet::empty();
+        
+        // Create video frame
         let mut video_frame = ffmpeg::frame::Video::new(
             ffmpeg::format::Pixel::RGB24,
             frame.width,
@@ -141,24 +97,15 @@ impl Renderer {
         // Copy frame data
         video_frame.data_mut(0).copy_from_slice(&frame.data);
         
-        // Write frame to output
-        let mut packet = ffmpeg::packet::Packet::empty();
-        self.stream.codec().encoder().video()?
-            .send_frame(&video_frame)
-            .context("Failed to send frame to encoder")?;
-            
-        while self.stream.codec().encoder().video()?
-            .receive_packet(&mut packet)
-            .is_ok() 
-        {
-            context.write_packet(&packet)
-                .context("Failed to write packet")?;
+        // Encode and write frame
+        encoder.send_frame(&video_frame)?;
+        while encoder.receive_packet(&mut packet)? {
+            context.write(&packet)?;
         }
         
         Ok(())
     }
     
-    // Clean up resources
     pub async fn shutdown(&self) -> Result<()> {
         let mut context = self.context.lock().await;
         context.flush()?;
@@ -167,7 +114,6 @@ impl Renderer {
     }
 }
 
-// Tests
 #[cfg(test)]
 mod tests {
     use super::*;

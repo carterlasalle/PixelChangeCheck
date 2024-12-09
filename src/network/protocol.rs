@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -16,7 +16,7 @@ pub enum Message {
     FrameData {
         frame_id: u64,
         timestamp: SystemTime,
-        data: Bytes,
+        data: Vec<u8>,
     },
     FrameAck {
         frame_id: u64,
@@ -30,7 +30,7 @@ pub enum Message {
 
 impl Message {
     // Serialize message to bytes
-    pub fn serialize(&self) -> Result<Bytes> {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
         let mut buf = BytesMut::with_capacity(1024);
         
         // Write protocol version
@@ -46,11 +46,11 @@ impl Message {
         buf.put_u32_le(serialized.len() as u32);
         buf.extend_from_slice(&serialized);
         
-        Ok(buf.freeze())
+        Ok(buf.to_vec())
     }
     
     // Deserialize message from bytes
-    pub fn deserialize(mut bytes: Bytes) -> Result<Self> {
+    pub fn deserialize(mut bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 5 {
             anyhow::bail!("Message too short");
         }
@@ -78,16 +78,16 @@ pub struct FrameProtocol;
 
 impl FrameProtocol {
     // Encode a frame for transmission
-    pub fn encode_frame(frame: &crate::pcc::Frame) -> Result<Vec<Bytes>> {
+    pub fn encode_frame(frame: &crate::pcc::Frame) -> Result<Vec<Vec<u8>>> {
         let mut chunks = Vec::new();
-        let data = Bytes::from(frame.data.clone());
+        let data = frame.data.as_slice();
         
         // Split large frames into chunks
         for chunk in data.chunks(MAX_FRAME_SIZE) {
             let message = Message::FrameData {
                 frame_id: frame.id,
                 timestamp: frame.timestamp,
-                data: Bytes::copy_from_slice(chunk),
+                data: chunk.to_vec(),
             };
             
             chunks.push(message.serialize()?);
@@ -98,7 +98,7 @@ impl FrameProtocol {
     
     // Decode received frame data
     pub fn decode_frame(messages: Vec<Message>) -> Result<crate::pcc::Frame> {
-        let mut frame_data = BytesMut::new();
+        let mut frame_data = Vec::new();
         let mut frame_id = None;
         let mut timestamp = None;
         
@@ -118,7 +118,7 @@ impl FrameProtocol {
                 timestamp: ts,
                 width: 0, // These need to be set by the caller
                 height: 0,
-                data: frame_data.to_vec(),
+                data: frame_data,
             })
         } else {
             anyhow::bail!("Incomplete frame data");
