@@ -1,5 +1,6 @@
 use anyhow::Result;
-use pixel_change_check_client::{
+use std::sync::Arc;
+use crate::{
     capture::ScreenCapture,
     encoder::FrameEncoder,
     network::{NetworkConfig, QUICTransport, ResilienceConfig},
@@ -21,7 +22,9 @@ async fn main() -> Result<()> {
 
     // Initialize components
     let capture = ScreenCapture::new()?;
-    let display_info = display_info::DisplayInfo::from_primary()?;
+    
+    // Get primary display info using available API
+    let display_info = display_info::DisplayInfo::from_point(0, 0)?;
     let width = display_info.width();
     let height = display_info.height();
 
@@ -95,8 +98,13 @@ async fn main() -> Result<()> {
 }
 
 async fn create_client_endpoint() -> Result<quinn::Endpoint> {
-    let mut client_config = quinn::ClientConfig::default();
-    let transport_config = quinn::TransportConfig::default();
+    let crypto = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_native_roots()
+        .with_no_client_auth();
+        
+    let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
+    let mut transport_config = quinn::TransportConfig::default();
     client_config.transport_config(Arc::new(transport_config));
 
     let addr = "0.0.0.0:0".parse()?;
