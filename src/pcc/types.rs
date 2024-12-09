@@ -11,6 +11,16 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
+impl Frame {
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PixelChange {
     pub x: u32,

@@ -3,32 +3,27 @@ use crate::pcc::QualityConfig;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
-use jpeg_encoder::{Encoder, ColorType, EncodingConfig};
+use jpeg_encoder::{Encoder, ColorType};
 
 pub struct FrameEncoder {
     config: QualityConfig,
     width: u32,
     height: u32,
-    encoder_config: EncodingConfig,
 }
 
 impl FrameEncoder {
     pub fn new(width: u32, height: u32, config: QualityConfig) -> Result<Self> {
-        let mut encoder_config = EncodingConfig::new();
-        encoder_config.quality = (config.quality * 100.0) as u8;
-        encoder_config.optimize_huffman_tables = true;
-        
         Ok(Self {
             config,
             width,
             height,
-            encoder_config,
         })
     }
     
     // Encode a frame using optimized JPEG compression
     pub async fn encode_frame(&self, frame: &[u8]) -> Result<Vec<u8>> {
-        let encoder = Encoder::new_with_config(self.encoder_config.clone());
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.set_quality((self.config.quality * 100.0) as u8);
         
         // Log compression start for performance tracking
         let start = std::time::Instant::now();
@@ -54,7 +49,6 @@ impl FrameEncoder {
     // Reconfigure encoder with new settings
     pub async fn reconfigure(&mut self, config: QualityConfig) -> Result<()> {
         self.config = config;
-        self.encoder_config.quality = (config.quality * 100.0) as u8;
         Ok(())
     }
 }
