@@ -3,128 +3,85 @@ use crate::pcc::QualityConfig;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
-use vpx_encode::{Config, Encoder, Frame, VideoFormat};
+use jpeg_encoder::{Encoder, ColorType, EncodingConfig};
 
 pub struct FrameEncoder {
-    encoder: Arc<Mutex<Encoder>>,
     config: QualityConfig,
     width: u32,
     height: u32,
+    encoder_config: EncodingConfig,
 }
 
 impl FrameEncoder {
     pub fn new(width: u32, height: u32, config: QualityConfig) -> Result<Self> {
-        // Configure VP9 encoder
-        let mut vpx_config = Config::new(width, height)
-            .context("Failed to create VP9 config")?;
-            
-        // Set encoding parameters
-        vpx_config
-            .set_threads(num_cpus::get() as u32)
-            .set_timebase(1, config.target_fps as u32)
-            .set_target_bitrate((width * height * config.target_fps / 100) as u32) // Rough estimate
-            .set_speed(8) // Faster encoding
-            .set_video_format(VideoFormat::I420);
-            
-        // Create encoder
-        let encoder = Encoder::new(&vpx_config)
-            .context("Failed to create VP9 encoder")?;
-            
+        let mut encoder_config = EncodingConfig::new();
+        encoder_config.quality = (config.quality * 100.0) as u8;
+        encoder_config.optimize_huffman_tables = true;
+        
         Ok(Self {
-            encoder: Arc::new(Mutex::new(encoder)),
             config,
             width,
             height,
+            encoder_config,
         })
     }
     
-    // Encode a frame
+    // Encode a frame using optimized JPEG compression
     pub async fn encode_frame(&self, frame: &[u8]) -> Result<Vec<u8>> {
-        let mut encoder = self.encoder.lock().await;
+        let encoder = Encoder::new_with_config(self.encoder_config.clone());
         
-        // Convert RGB to I420
-        let yuv = Self::rgb_to_i420(frame, self.width, self.height)?;
+        // Log compression start for performance tracking
+        let start = std::time::Instant::now();
         
-        // Create VP9 frame
-        let mut vpx_frame = Frame::new(self.width, self.height);
-        vpx_frame.data.copy_from_slice(&yuv);
+        let encoded = encoder.encode(
+            frame,
+            self.width as u16,
+            self.height as u16,
+            ColorType::Rgb,
+        )?;
         
-        // Encode frame
-        let packet = encoder.encode(&vpx_frame, true)?;
+        // Log compression stats
+        let duration = start.elapsed();
+        let compression_ratio = frame.len() as f32 / encoded.len() as f32;
+        debug!(
+            "Frame encoded: {}x{} in {:?}, ratio: {:.2}:1",
+            self.width, self.height, duration, compression_ratio
+        );
         
-        Ok(packet.data)
+        Ok(encoded)
     }
     
     // Reconfigure encoder with new settings
     pub async fn reconfigure(&mut self, config: QualityConfig) -> Result<()> {
-        let mut encoder = self.encoder.lock().await;
-        
-        // Update bitrate based on quality
-        let target_bitrate = (self.width * self.height * config.target_fps / 100) as u32;
-        encoder.control().set_target_bitrate(target_bitrate)?;
-        
         self.config = config;
+        self.encoder_config.quality = (config.quality * 100.0) as u8;
         Ok(())
-    }
-    
-    // Convert RGB to I420 (YUV420) color space
-    fn rgb_to_i420(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
-        let pixels = width * height;
-        let mut yuv = vec![0u8; (pixels * 3 / 2) as usize];
-        
-        for y in 0..height {
-            for x in 0..width {
-                let rgb_idx = ((y * width + x) * 3) as usize;
-                let y_idx = (y * width + x) as usize;
-                let u_idx = (pixels + (y / 2 * width / 2 + x / 2)) as usize;
-                let v_idx = (pixels + pixels / 4 + (y / 2 * width / 2 + x / 2)) as usize;
-                
-                let r = rgb[rgb_idx] as f32;
-                let g = rgb[rgb_idx + 1] as f32;
-                let b = rgb[rgb_idx + 2] as f32;
-                
-                // RGB to YUV conversion
-                let y_val = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
-                let u_val = (128.0 + (-0.169 * r - 0.331 * g + 0.5 * b)) as u8;
-                let v_val = (128.0 + (0.5 * r - 0.419 * g - 0.081 * b)) as u8;
-                
-                yuv[y_idx] = y_val;
-                if x % 2 == 0 && y % 2 == 0 {
-                    yuv[u_idx] = u_val;
-                    yuv[v_idx] = v_val;
-                }
-            }
-        }
-        
-        Ok(yuv)
     }
 }
 
-// Frame compression utilities
+// Frame compression utilities for small regions
 pub mod compression {
     use super::*;
-    use flate2::{write::ZlibEncoder, read::ZlibDecoder, Compression};
-    use std::io::prelude::*;
+    use lz4_flex::compress_prepend_size;
+    use lz4_flex::decompress_size_prepended;
     
-    pub fn compress_frame(frame: &[u8], quality: f32) -> Result<Vec<u8>> {
-        let mut compressed = Vec::new();
-        let mut encoder = ZlibEncoder::new(
-            &mut compressed,
-            Compression::new((9.0 * quality) as u32),
-        );
+    pub fn compress_frame(frame: &[u8], _quality: f32) -> Result<Vec<u8>> {
+        let start = std::time::Instant::now();
+        let compressed = compress_prepend_size(frame);
+        let duration = start.elapsed();
         
-        encoder.write_all(frame)?;
-        encoder.finish()?;
+        debug!(
+            "Region compressed: {} -> {} bytes in {:?}, ratio: {:.2}:1",
+            frame.len(),
+            compressed.len(),
+            duration,
+            frame.len() as f32 / compressed.len() as f32
+        );
         
         Ok(compressed)
     }
     
     pub fn decompress_frame(compressed: &[u8]) -> Result<Vec<u8>> {
-        let mut decompressed = Vec::new();
-        let mut decoder = ZlibDecoder::new(compressed);
-        
-        decoder.read_to_end(&mut decompressed)?;
-        
-        Ok(decompressed)
+        Ok(decompress_size_prepended(compressed)?)
     }
 }
