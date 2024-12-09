@@ -21,6 +21,9 @@ image = { version = "0.24", features = ["jpeg", "png"] }
 rgb = "0.8"           # RGB/pixel manipulation
 jpeg-encoder = { version = "0.5", features = ["simd"] }  # Fast JPEG encoding
 
+# Video processing
+ffmpeg-next = "4.4"   # FFmpeg bindings for video processing
+
 # Compression
 lz4_flex = "0.11"     # Fast LZ4 compression
 

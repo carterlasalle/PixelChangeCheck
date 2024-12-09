@@ -1,6 +1,6 @@
 use crate::network::{NetworkConfig, ResilienceConfig};
 use crate::pcc::types::Frame;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use quinn::Endpoint;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -54,14 +54,19 @@ impl ServerNetwork {
     async fn handle_connection(connection: quinn::Connection, frame_tx: mpsc::Sender<Frame>) -> Result<()> {
         while let Ok((mut send, mut recv)) = connection.accept_bi().await {
             let mut buf = vec![0u8; 65535];
-            match recv.read(&mut buf).await? {
-                Some(n) => {
-                    buf.truncate(n);
+            
+            let n = recv.read(&mut buf)
+                .await
+                .context("Failed to receive frame data")?;
+            
+            match n {
+                Some(size) => {
+                    buf.truncate(size);
                     if let Ok(frame) = Frame::decode(&buf) {
                         frame_tx.send(frame).await?;
                     }
                 }
-                None => break,
+                None => break, // Connection closed
             }
         }
         Ok(())

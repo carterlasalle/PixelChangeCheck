@@ -1,6 +1,5 @@
 use super::types::{Frame, PixelChange, PixelChangeDetector, QualityConfig};
 use anyhow::{Context, Result};
-use std::simd::{u8x32, Simd};
 
 pub struct PCCDetector {
     config: QualityConfig,
@@ -13,7 +12,7 @@ impl Default for PCCDetector {
         Self {
             config: QualityConfig::default(),
             threshold: 5,  // Default difference threshold
-            block_size: 32, // Size of blocks to compare (matches SIMD width)
+            block_size: 32, // Size of blocks to compare
         }
     }
 }
@@ -28,20 +27,19 @@ impl PCCDetector {
         }
     }
 
-    /// Compare two blocks of pixels using SIMD
+    /// Compare two blocks of pixels using direct comparison
     #[inline]
     fn compare_blocks(&self, prev: &[u8], curr: &[u8]) -> bool {
-        debug_assert!(prev.len() >= 32 && curr.len() >= 32);
+        debug_assert_eq!(prev.len(), curr.len(), "Block sizes must match");
         
-        // Load 32 bytes at a time using SIMD
-        let prev_simd: u8x32 = Simd::from_slice(&prev[..32]);
-        let curr_simd: u8x32 = Simd::from_slice(&curr[..32]);
+        // Compare bytes directly
+        for (p, c) in prev.iter().zip(curr.iter()) {
+            if (*p as i16 - *c as i16).abs() > self.threshold as i16 {
+                return true;
+            }
+        }
         
-        // Calculate absolute differences
-        let diff = prev_simd.abs_diff(curr_simd);
-        
-        // Check if any difference exceeds threshold
-        diff.lanes_gt(Simd::splat(self.threshold)).any()
+        false
     }
 
     /// Find the bounds of changed region in a block
@@ -106,7 +104,7 @@ impl PixelChangeDetector for PCCDetector {
                     })
                     .collect();
 
-                // Compare blocks using SIMD
+                // Compare blocks
                 if self.compare_blocks(&prev_block, &curr_block) {
                     // Find exact bounds of the change within the block
                     if let Some((min_x, min_y, max_x, max_y)) = 

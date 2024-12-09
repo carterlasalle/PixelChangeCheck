@@ -1,7 +1,7 @@
 mod buffer;
 pub use buffer::FrameBuffer;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ffmpeg_next as ffmpeg;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time};
@@ -16,23 +16,30 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
-        // Initialize FFmpeg
-        ffmpeg::init()?;
+        // Initialize FFmpeg with all available formats and codecs
+        ffmpeg::init().context("Failed to initialize FFmpeg")?;
         
         // Create frame buffer
         let buffer = Arc::new(FrameBuffer::new(width, height));
         
         // Set up output context for display
-        let context = ffmpeg::format::output(&format!("sdl2://PCC Display"))?;
-        let stream = context.add_stream()?;
+        let context = ffmpeg::format::output(&format!("sdl2://PCC Display"))
+            .context("Failed to create FFmpeg output context")?;
+        let stream = context.add_stream()
+            .context("Failed to add video stream")?;
         
         // Configure stream
-        let mut codec = stream.codec().encoder().video()?;
+        let mut codec = stream.codec().encoder().video()
+            .context("Failed to create video encoder")?;
         codec.set_width(width);
         codec.set_height(height);
         codec.set_format(ffmpeg::format::Pixel::RGB24);
         codec.set_frame_rate(Some((fps as i32, 1)));
         codec.set_time_base(Some((1, fps as i32)));
+        
+        // Open codec
+        codec.open_as(codec.id())
+            .context("Failed to open video codec")?;
         
         Ok(Self {
             buffer: buffer.clone(),
@@ -53,7 +60,11 @@ impl Renderer {
             
             // Get next frame from buffer
             if let Some(frame) = self.buffer.next_frame().await? {
-                self.render_frame(&frame).await?;
+                if let Err(e) = self.render_frame(&frame).await {
+                    error!("Failed to render frame: {}", e);
+                    // Continue rendering next frame instead of breaking
+                    continue;
+                }
             }
         }
     }
@@ -74,9 +85,16 @@ impl Renderer {
         
         // Write frame to output
         let mut packet = ffmpeg::packet::Packet::empty();
-        self.stream.codec().encoder().video()?.send_frame(&video_frame)?;
-        while self.stream.codec().encoder().video()?.receive_packet(&mut packet).is_ok() {
-            context.write_packet(&packet)?;
+        self.stream.codec().encoder().video()?
+            .send_frame(&video_frame)
+            .context("Failed to send frame to encoder")?;
+            
+        while self.stream.codec().encoder().video()?
+            .receive_packet(&mut packet)
+            .is_ok() 
+        {
+            context.write_packet(&packet)
+                .context("Failed to write packet")?;
         }
         
         Ok(())
