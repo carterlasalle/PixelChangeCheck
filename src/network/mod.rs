@@ -6,8 +6,13 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 mod config;
+mod transport;
+mod resilience;
 mod protocol;
-pub use config::*;
+
+pub use config::NetworkConfig;
+pub use transport::QUICTransport;
+pub use resilience::ResilienceConfig;
 pub use protocol::*;
 
 const DEFAULT_PORT: u16 = 5800;

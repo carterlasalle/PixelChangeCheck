@@ -2,27 +2,28 @@ use anyhow::Result;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time};
 use tracing::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
 
 // Retry configuration
 const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResilienceConfig {
     pub max_retries: u32,
-    pub base_backoff: Duration,
-    pub max_backoff: Duration,
-    pub connection_timeout: Duration,
+    pub retry_delay: Duration,
+    pub jitter_buffer_size: usize,
+    pub error_correction_enabled: bool,
 }
 
 impl Default for ResilienceConfig {
     fn default() -> Self {
         Self {
-            max_retries: MAX_RETRIES,
-            base_backoff: BASE_BACKOFF,
-            max_backoff: MAX_BACKOFF,
-            connection_timeout: Duration::from_secs(30),
+            max_retries: 3,
+            retry_delay: Duration::from_millis(100),
+            jitter_buffer_size: 5,
+            error_correction_enabled: true,
         }
     }
 }
@@ -49,7 +50,7 @@ impl NetworkResilience {
         F: Fn() -> Result<T> + Send + Sync,
     {
         let mut current_retry = 0;
-        let mut backoff = self.config.base_backoff;
+        let mut backoff = self.config.retry_delay;
 
         loop {
             match operation() {
@@ -66,7 +67,7 @@ impl NetworkResilience {
 
                     warn!("Operation failed, retrying in {:?}: {}", backoff, e);
                     time::sleep(backoff).await;
-                    backoff = std::cmp::min(backoff * 2, self.config.max_backoff);
+                    backoff = std::cmp::min(backoff * 2, self.config.retry_delay * 2);
                 }
             }
         }
