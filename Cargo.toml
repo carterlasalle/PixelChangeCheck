@@ -5,6 +5,10 @@ edition = "2021"
 authors = ["Carter LaSalle"]
 description = "High-performance screen capture client with PCC (Pixel Change Check)"
 
+[[example]]
+name = "simple_screen_share"
+path = "examples/simple_screen_share.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -16,8 +20,9 @@ display-info = "0.4.3" # Display information
 image = "0.24"         # Image processing utilities
 rgb = "0.8"           # RGB/pixel manipulation
 
-# FFmpeg bindings
-ffmpeg-next = "6.1.1" # FFmpeg bindings for encoding
+# Video encoding
+vpx-encode = { version = "0.5.0", features = ["generate"] }  # VP8/VP9 encoding
+env-libvpx-sys = { version = "5.1.3", features = ["generate"] }
 
 # Compression
 flate2 = "1.0"        # ZLIB compression
@@ -42,6 +47,9 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1.0"
 thiserror = "1.0"
+
+# System info
+num_cpus = "1.16"     # CPU count detection
 
 [profile.release]
 opt-level = 3         # Maximum optimization
