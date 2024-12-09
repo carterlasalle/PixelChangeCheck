@@ -74,9 +74,11 @@ async fn main() -> Result<()> {
             if !changes.is_empty() {
                 info!("Detected {} changed regions", changes.len());
                 
-                // Encode and send changes
-                let encoded = encoder.encode_frame(&frame.data).await?;
-                transport.send_frame(&encoded).await?;
+                // Encode frame before sending
+                let encoded_frame = encoder.encode_frame(&frame.data)?;
+                
+                // Send encoded frame with changes
+                transport.send_frame(&encoded_frame).await?;
             }
         }
         

@@ -4,6 +4,7 @@ use quinn::{ClientConfig, Endpoint, ServerConfig};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
+use crate::pcc::types::Frame;
 
 mod config;
 mod transport;
@@ -24,7 +25,7 @@ pub struct NetworkManager {
 
 impl NetworkManager {
     pub async fn new_client(config: NetworkConfig) -> Result<Self> {
-        let client_config = ClientConfig::new(Arc::new(config.crypto_config()));
+        let client_config = ClientConfig::new(Arc::new(config.client_crypto_config()));
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
 
@@ -32,7 +33,7 @@ impl NetworkManager {
     }
 
     pub async fn new_server(config: NetworkConfig) -> Result<Self> {
-        let server_config = ServerConfig::with_crypto(Arc::new(config.crypto_config()));
+        let server_config = ServerConfig::with_crypto(Arc::new(config.server_crypto_config()));
         let endpoint = Endpoint::server(
             server_config,
             format!("0.0.0.0:{}", config.port.unwrap_or(DEFAULT_PORT)).parse()?,
@@ -92,8 +93,8 @@ impl Connection {
         })
     }
 
-    pub async fn send_frame(&mut self, frame: Frame) -> Result<()> {
-        let encoded = frame.encode()?;
+    pub async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        let encoded: Vec<u8> = frame.encode()?;
         self.send_stream
             .write_all(&encoded)
             .await
@@ -108,8 +109,13 @@ impl Connection {
             .read(&mut buf)
             .await
             .context("Failed to receive frame")?;
+            
+        let n = match n {
+            Some(size) => size,
+            None => return Err(anyhow::anyhow!("Connection closed")),
+        };
+        
         buf.truncate(n);
-
         Frame::decode(&buf).context("Failed to decode frame")
     }
 
@@ -122,7 +128,7 @@ impl Connection {
             loop {
                 let mut buf = vec![0u8; 8192];
                 match recv_stream.read(&mut buf).await {
-                    Ok(n) if n > 0 => {
+                    Ok(Some(n)) if n > 0 => {
                         buf.truncate(n);
                         if let Ok(frame) = Frame::decode(&buf) {
                             if frame_tx.send(frame).await.is_err() {

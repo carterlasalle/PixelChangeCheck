@@ -37,25 +37,34 @@ impl QUICTransport {
         Ok(())
     }
 
-    pub async fn send_frame(&mut self, frame_data: &[u8]) -> Result<()> {
+    pub async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         if let Some(conn) = &mut self.connection {
+            let encoded: Vec<u8> = frame.encode()?;
             let (mut send, _) = conn.open_bi().await?;
-            send.write_all(frame_data).await?;
+            send.write_all(&encoded).await?;
             send.finish().await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Not connected"))
         }
-        Ok(())
     }
 
-    pub async fn receive_frame(&mut self) -> Result<Vec<u8>> {
+    pub async fn receive_frame(&mut self) -> Result<Frame> {
         if let Some(conn) = &mut self.connection {
             let (_, mut recv) = conn.accept_bi().await?;
             let mut buf = vec![0u8; self.config.max_packet_size];
-            let n = match recv.read(&mut buf).await? {
-                Some(n) => n,
+            
+            let n = recv.read(&mut buf)
+                .await
+                .context("Failed to receive frame")?;
+            
+            let n = match n {
+                Some(size) => size,
                 None => return Err(anyhow::anyhow!("Connection closed")),
             };
+            
             buf.truncate(n);
-            Ok(buf)
+            Frame::decode(&buf).context("Failed to decode frame")
         } else {
             Err(anyhow::anyhow!("Not connected"))
         }
