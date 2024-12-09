@@ -31,11 +31,43 @@ impl Renderer {
         // Configure stream
         let mut codec = stream.codec().encoder().video()
             .context("Failed to create video encoder")?;
+            
+        // Set codec parameters
         codec.set_width(width);
         codec.set_height(height);
         codec.set_format(ffmpeg::format::Pixel::RGB24);
         codec.set_frame_rate(Some((fps as i32, 1)));
         codec.set_time_base(Some((1, fps as i32)));
+        
+        // Configure hardware acceleration based on platform
+        #[cfg(target_os = "macos")]
+        {
+            // Use VideoToolbox for hardware acceleration on macOS
+            codec.set_encoder("h264_videotoolbox")
+                .context("Failed to set VideoToolbox encoder")?;
+            
+            // Set VideoToolbox-specific options
+            let mut opts = ffmpeg::Dictionary::new();
+            opts.set("allow_sw", "1"); // Allow fallback to software encoding
+            opts.set("realtime", "1"); // Enable realtime encoding
+            opts.set("profile", "high"); // Use high profile for better quality
+            codec.set_options(opts)
+                .context("Failed to set VideoToolbox options")?;
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            // Use VAAPI for hardware acceleration on Linux
+            codec.set_encoder("h264_vaapi")
+                .context("Failed to set VAAPI encoder")?;
+            
+            // Set VAAPI-specific options
+            let mut opts = ffmpeg::Dictionary::new();
+            opts.set("low_power", "1"); // Use low power mode if available
+            opts.set("idr_interval", "30"); // Set IDR frame interval
+            codec.set_options(opts)
+                .context("Failed to set VAAPI options")?;
+        }
         
         // Open codec
         codec.open_as(codec.id())
