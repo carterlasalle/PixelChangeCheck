@@ -10,7 +10,6 @@ use pixel_change_check_client::{
 use std::time::Duration;
 use tokio::time;
 use tracing::{info, Level};
-use rustls;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -52,7 +51,7 @@ async fn main() -> Result<()> {
     // Create client transport
     info!("Starting client...");
     let mut transport = QUICTransport::new(
-        create_client_endpoint().await?,
+        create_client_endpoint(&network_config).await?,
         network_config,
     );
 
@@ -98,18 +97,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn create_client_endpoint() -> Result<quinn::Endpoint> {
-    let crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_native_roots()
-        .with_no_client_auth();
-        
-    let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
+async fn create_client_endpoint(config: &NetworkConfig) -> Result<quinn::Endpoint> {
+    let client_config = quinn::ClientConfig::new(Arc::new(config.client_crypto_config()));
     let mut transport_config = quinn::TransportConfig::default();
-    client_config.transport_config(Arc::new(transport_config));
-
-    let addr = "0.0.0.0:0".parse()?;
-    let endpoint = quinn::Endpoint::client(addr)?;
+    transport_config.keep_alive_interval(Some(config.keepalive_interval));
+    transport_config.max_idle_timeout(Some(config.connection_timeout.try_into()?));
+    
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
 
     Ok(endpoint)

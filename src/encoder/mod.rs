@@ -22,13 +22,13 @@ impl FrameEncoder {
     
     // Encode a frame using optimized JPEG compression
     pub async fn encode_frame(&self, frame: &[u8]) -> Result<Vec<u8>> {
-        let mut encoder = Encoder::new(Vec::new());
-        encoder.set_quality((self.config.quality * 100.0) as u8);
-        
         // Log compression start for performance tracking
         let start = std::time::Instant::now();
         
-        let encoded = encoder.encode(
+        let mut output = Vec::new();
+        let quality = (self.config.quality * 100.0) as u8;
+        let mut encoder = Encoder::new(&mut output, quality);
+        encoder.encode(
             frame,
             self.width as u16,
             self.height as u16,
@@ -37,13 +37,13 @@ impl FrameEncoder {
         
         // Log compression stats
         let duration = start.elapsed();
-        let compression_ratio = frame.len() as f32 / encoded.len() as f32;
+        let compression_ratio = frame.len() as f32 / output.len() as f32;
         debug!(
             "Frame encoded: {}x{} in {:?}, ratio: {:.2}:1",
             self.width, self.height, duration, compression_ratio
         );
         
-        Ok(encoded)
+        Ok(output)
     }
     
     // Reconfigure encoder with new settings
