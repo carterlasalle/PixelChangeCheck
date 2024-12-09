@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
-use crate::{
+use pixel_change_check_client::{
     capture::ScreenCapture,
     encoder::FrameEncoder,
     network::{NetworkConfig, QUICTransport, ResilienceConfig},
@@ -10,6 +10,7 @@ use crate::{
 use std::time::Duration;
 use tokio::time;
 use tracing::{info, Level};
+use rustls;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -75,7 +76,7 @@ async fn main() -> Result<()> {
                 info!("Detected {} changed regions", changes.len());
                 
                 // Encode and send changes
-                let encoded = encoder.encode_frame(&frame.into()).await?;
+                let encoded = encoder.encode_frame(&frame.data).await?;
                 transport.send_frame(&encoded).await?;
             }
         }
