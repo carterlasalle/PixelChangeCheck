@@ -17,15 +17,12 @@ screenshots = "0.8.5"  # Cross-platform screen capture
 display-info = "0.4.3" # Display information
 
 # Image processing
-image = "0.24"         # Image processing utilities
+image = { version = "0.24", features = ["jpeg", "png"] }
 rgb = "0.8"           # RGB/pixel manipulation
-
-# Video encoding
-vpx-encode = { version = "0.5.0", features = ["generate"] }  # VP8/VP9 encoding
-env-libvpx-sys = { version = "5.1.3", features = ["generate"] }
+jpeg-encoder = { version = "0.5", features = ["simd"] }  # Fast JPEG encoding
 
 # Compression
-flate2 = "1.0"        # ZLIB compression
+lz4_flex = "0.11"     # Fast LZ4 compression
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
