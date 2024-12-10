@@ -34,7 +34,7 @@ async-trait = "0.1"
 quinn = "0.10"
 bytes = "1.5"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
-rustls-native-certs = { version = "0.6" }
+rustls-native-certs = "0.6" # Correctly listed as a separate dependency
 rcgen = "0.12"
 
 # Serialization
@@ -50,8 +50,6 @@ thiserror = "1.0"
 
 # System info
 num_cpus = "1.16"
-
-[build-dependencies]
 
 [profile.release]
 opt-level = 3
