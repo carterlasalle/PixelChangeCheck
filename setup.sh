@@ -7,9 +7,6 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
         /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
 
-    echo "Removing existing FFmpeg installation..."
-    brew uninstall ffmpeg || true
-
     echo "Installing FFmpeg..."
     brew install ffmpeg
 

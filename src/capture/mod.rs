@@ -26,10 +26,10 @@ impl ScreenCapture {
         // Set up FFmpeg capture format
         let mut options = ffmpeg::Dictionary::new();
         options.set("framerate", &format!("{}", QualityConfig::default().target_fps));
-        options.set("video_size", &format!("{}x{}", display_info.width(), display_info.height()));
+        options.set("video_size", &format!("{}x{}", display_info.width, display_info.height));
         
         #[cfg(target_os = "macos")]
-        let input_context = ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", display_info.id()), options)
+        let input_context = ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", display_info.id), options)
             .context("Failed to create input context for macOS screen capture")?;
             
         #[cfg(target_os = "windows")]
@@ -58,11 +58,12 @@ impl ScreenCapture {
     
     async fn read_frame(&mut self) -> Result<ffmpeg::frame::Video> {
         let mut input = self.input_context.lock().await;
-        let decoder = input
+        let codec_params = input
             .stream(self.video_stream_index)
             .context("Failed to get video stream")?
-            .codec()
-            .decoder();
+            .parameters();
+        let decoder = ffmpeg::codec::decoder::Decoder::from_parameters(codec_params)
+            .context("Failed to create decoder")?;
         
         let mut video_decoder = decoder.video()
             .context("Failed to get video decoder")?;
@@ -144,7 +145,7 @@ impl FrameCapture for ScreenCapture {
             // Recreate input context with new settings
             #[cfg(target_os = "macos")]
             {
-                *input = ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", self.display_info.id()), options)
+                *input = ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", self.display_info.id), options)
                     .context("Failed to update macOS screen capture settings")?;
             }
             
