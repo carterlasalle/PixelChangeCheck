@@ -20,8 +20,8 @@ rgb = "0.8"
 jpeg-encoder = { version = "0.5", features = ["simd"] }
 
 # Video processing
-ffmpeg-next = "6.0"
-ffmpeg-sys-next = { version = "6.0", features = ["build"] }
+ffmpeg-next = "5.0"
+ffmpeg-sys-next = { version = "5.0", features = ["build"] }
 
 # Compression
 lz4_flex = "0.11"
@@ -34,6 +34,7 @@ async-trait = "0.1"
 quinn = "0.10"
 bytes = "1.5"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
+rustls-native-certs = { version = "0.6" }
 rcgen = "0.12"
 
 # Serialization
@@ -51,7 +52,6 @@ thiserror = "1.0"
 num_cpus = "1.16"
 
 [build-dependencies]
-pkg-config = "0.3"
 
 [profile.release]
 opt-level = 3

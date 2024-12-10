@@ -37,16 +37,16 @@ impl Renderer {
             
             // Configure input options for screen capture
             let mut options = ffmpeg::Dictionary::new();
-            options.set("framerate", &fps.to_string())?;
-            options.set("capture_cursor", "1")?;
-            options.set("pixel_format", "rgb24")?;
+            options.set("framerate", &fps.to_string());
+            options.set("capture_cursor", "1");
+            options.set("pixel_format", "rgb24");
             
             // Get primary display coordinates (0, 0)
             let display_info = DisplayInfo::from_point(0, 0)
                 .context("Failed to get display info")?;
             
             // Open input context with screen capture device
-            ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", display_info.id()), options)
+            ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", display_info.id), options)
                 .context("Failed to open screen capture device")?
         };
         
@@ -60,16 +60,18 @@ impl Renderer {
             .context("Failed to get input stream")?;
         let codec_params = input_stream.parameters();
         
-        let mut decoder = codec_params.decoder()
+        let mut decoder = ffmpeg::codec::decoder::Decoder::from_parameters(codec_params)
+            .context("Failed to create video decoder")?
             .video()
             .context("Failed to create video decoder")?;
         
         decoder.set_format(ffmpeg::format::Pixel::RGB24);
         
         // Create output format context with SDL2 output
-        let output_format = ffmpeg::format::output_format("sdl2")
-            .context("Failed to find SDL2 output format")?;
-        let output_context = ffmpeg::format::output_with_format("PCC Display", output_format)
+        let output_format = ffmpeg::format::output("sdl2", "")
+            .context("Failed to find SDL2 output format")?
+            .format();
+        let output_context = ffmpeg::format::output("PCC Display")
             .context("Failed to create output context")?;
         
         // Find H264 encoder
@@ -84,15 +86,14 @@ impl Renderer {
         stream.parameters_mut().set_width(width);
         stream.parameters_mut().set_height(height);
         stream.parameters_mut().set_format(ffmpeg::format::Pixel::RGB24);
-        stream.parameters_mut().set_codec_tag(ffmpeg::codec::tag::NONE);
+        stream.parameters_mut().set_codec_tag(0);
         stream.set_time_base((1, fps as i32));
         
         // Create and configure encoder context
         let codec_id = stream.parameters().codec_id();
-        let codec = ffmpeg::encoder::find(codec_id)
+        let encoder_codec = ffmpeg::encoder::find(codec_id)
             .ok_or_else(|| anyhow::anyhow!("Could not find encoder"))?;
-        
-        let mut encoder = codec.encoder().video()
+        let mut encoder = ffmpeg::encoder::video(codec_id)
             .ok_or_else(|| anyhow::anyhow!("Failed to create video encoder"))?;
         
         // Configure encoder
@@ -110,7 +111,7 @@ impl Renderer {
         }
         
         // Open encoder with codec
-        let mut encoder_context = encoder.open_as(codec)?;
+        let mut encoder_context = encoder.open_as(encoder_codec)?;
         
         #[cfg(target_os = "macos")]
         {
@@ -166,7 +167,6 @@ impl Renderer {
     }
     
     async fn render_frame(&self, frame: &buffer::BufferedFrame) -> Result<()> {
-        let mut context = self.output_context.lock().await;
         let mut encoder = self.encoder.lock().await;
         
         // Create video frame
@@ -187,27 +187,35 @@ impl Renderer {
             packet.set_stream(self._stream_index);
             
             // Write packet with proper interleaving
-            context.write_interleaved(&packet)
-                .context("Failed to write packet")?;
+            {
+                let mut context = self.output_context.lock().await;
+                context.write_interleaved(&packet)
+                    .context("Failed to write packet")?;
+            }
         }
         
         Ok(())
     }
     
     pub async fn shutdown(&self) -> Result<()> {
-        let mut context = self.output_context.lock().await;
         let mut encoder = self.encoder.lock().await;
         
         // Flush encoder
         encoder.send_eof()?;
         let mut packet = ffmpeg::packet::Packet::empty();
         while encoder.receive_packet(&mut packet).is_ok() {
-            context.write_interleaved(&packet)?;
+            {
+                let mut context = self.output_context.lock().await;
+                context.write_interleaved(&packet)?;
+            }
         }
         
         // Write trailer and clean up
-        context.write_trailer()
-            .context("Failed to write output format trailer")?;
+        {
+            let mut context = self.output_context.lock().await;
+            context.write_trailer()
+                .context("Failed to write output format trailer")?;
+        }
         
         self.buffer.clear().await;
         Ok(())
