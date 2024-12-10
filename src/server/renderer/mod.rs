@@ -2,6 +2,7 @@ mod buffer;
 pub use buffer::FrameBuffer;
 
 use anyhow::{Context, Result};
+use display_info::DisplayInfo;
 use ffmpeg_next as ffmpeg;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time};
@@ -9,12 +10,12 @@ use tracing::{error, info};
 
 pub struct Renderer {
     buffer: Arc<FrameBuffer>,
-    input_context: Arc<Mutex<ffmpeg::format::context::Input>>,
+    _input_context: Arc<Mutex<ffmpeg::format::context::Input>>,
     output_context: Arc<Mutex<ffmpeg::format::context::Output>>,
-    decoder: Arc<Mutex<ffmpeg::codec::decoder::video::Video>>,
+    _decoder: Arc<Mutex<ffmpeg::codec::decoder::video::Video>>,
     encoder: Arc<Mutex<ffmpeg::codec::encoder::video::Video>>,
-    video_stream_index: usize,
-    stream_index: usize,
+    _video_stream_index: usize,
+    _stream_index: usize,
     frame_interval: Duration,
 }
 
@@ -31,7 +32,7 @@ impl Renderer {
         #[cfg(target_os = "macos")]
         let mut input_context = {
             // Set input format to avfoundation
-            let mut input_format = ffmpeg::format::input_format("avfoundation")
+            let input_format = ffmpeg::format::input(&format!("avfoundation:{}:0", 0))
                 .context("Failed to find avfoundation input format")?;
             
             // Configure input options for screen capture
@@ -45,7 +46,7 @@ impl Renderer {
                 .context("Failed to get display info")?;
             
             // Open input context with screen capture device
-            ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:{}", display_info.index, 0), options)
+            ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", display_info.id()), options)
                 .context("Failed to open screen capture device")?
         };
         
@@ -66,9 +67,9 @@ impl Renderer {
         decoder.set_format(ffmpeg::format::Pixel::RGB24);
         
         // Create output format context with SDL2 output
-        let mut output_format = ffmpeg::format::output_format("sdl2")
+        let output_format = ffmpeg::format::output_format("sdl2")
             .context("Failed to find SDL2 output format")?;
-        let mut output_context = ffmpeg::format::output_with_format("PCC Display", output_format)
+        let output_context = ffmpeg::format::output_with_format("PCC Display", output_format)
             .context("Failed to create output context")?;
         
         // Find H264 encoder
@@ -80,27 +81,25 @@ impl Renderer {
         let stream_index = stream.index();
         
         // Configure stream parameters
-        {
-            let enc = stream.parameters_mut();
-            enc.set_width(width);
-            enc.set_height(height);
-            enc.set_format(ffmpeg::format::Pixel::RGB24);
-            enc.set_frame_rate(Some((fps as i32, 1)));
-            enc.set_time_base(Some((1, fps as i32)));
-        }
+        stream.parameters_mut().set_width(width);
+        stream.parameters_mut().set_height(height);
+        stream.parameters_mut().set_format(ffmpeg::format::Pixel::RGB24);
+        stream.parameters_mut().set_codec_tag(ffmpeg::codec::tag::NONE);
+        stream.set_time_base((1, fps as i32));
         
         // Create and configure encoder context
         let codec_id = stream.parameters().codec_id();
         let codec = ffmpeg::encoder::find(codec_id)
             .ok_or_else(|| anyhow::anyhow!("Could not find encoder"))?;
         
-        let mut encoder = codec.video()
+        let mut encoder = codec.encoder().video()
             .ok_or_else(|| anyhow::anyhow!("Failed to create video encoder"))?;
         
         // Configure encoder
         encoder.set_width(width);
         encoder.set_height(height);
         encoder.set_format(ffmpeg::format::Pixel::RGB24);
+        encoder.set_time_base((1, fps as i32));
         
         #[cfg(target_os = "macos")]
         {
@@ -111,7 +110,16 @@ impl Renderer {
         }
         
         // Open encoder with codec
-        encoder.open_as(codec)?;
+        let mut encoder_context = encoder.open_as(codec)?;
+        
+        #[cfg(target_os = "macos")]
+        {
+            encoder_context.set_option("allow_sw", "1")?;
+            encoder_context.set_option("realtime", "1")?;
+            encoder_context.set_option("profile", "high")?;
+        }
+        
+        stream.set_parameters(&encoder_context);
         
         // Write output format header
         output_context.write_header()
@@ -119,12 +127,12 @@ impl Renderer {
         
         Ok(Self {
             buffer,
-            input_context: Arc::new(Mutex::new(input_context)),
+            _input_context: Arc::new(Mutex::new(input_context)),
             output_context: Arc::new(Mutex::new(output_context)),
-            decoder: Arc::new(Mutex::new(decoder)),
-            encoder: Arc::new(Mutex::new(encoder)),
-            video_stream_index,
-            stream_index,
+            _decoder: Arc::new(Mutex::new(decoder)),
+            encoder: Arc::new(Mutex::new(encoder_context)),
+            _video_stream_index: video_stream_index,
+            _stream_index: stream_index,
             frame_interval: Duration::from_secs(1) / fps,
         })
     }
@@ -150,30 +158,11 @@ impl Renderer {
     }
     
     async fn capture_frame(&self) -> Result<Option<buffer::BufferedFrame>> {
-        let mut input_context = self.input_context.lock().await;
-        let mut decoder = self.decoder.lock().await;
-        let mut packet = ffmpeg::packet::Packet::empty();
-        
-        // Read packets until we get a video frame
-        while input_context.read_packet(&mut packet)? {
-            if packet.stream() == self.video_stream_index {
-                decoder.send_packet(&packet)?;
-                
-                let mut frame = ffmpeg::frame::Video::empty();
-                if decoder.receive_frame(&mut frame)? {
-                    let frame_data = frame.data(0).to_vec();
-                    return Ok(Some(buffer::BufferedFrame {
-                        id: packet.pts().unwrap_or(0) as u64,
-                        timestamp: std::time::SystemTime::now(),
-                        data: frame_data,
-                        width: frame.width() as u32,
-                        height: frame.height() as u32,
-                    }));
-                }
-            }
+        if let Some(buffered_frame) = self.buffer.next_frame().await? {
+            Ok(Some(buffered_frame))
+        } else {
+            Ok(None)
         }
-        
-        Ok(None)
     }
     
     async fn render_frame(&self, frame: &buffer::BufferedFrame) -> Result<()> {
@@ -194,9 +183,11 @@ impl Renderer {
         encoder.send_frame(&video_frame)?;
         
         let mut packet = ffmpeg::packet::Packet::empty();
-        while encoder.receive_packet(&mut packet)? {
+        while encoder.receive_packet(&mut packet).is_ok() {
+            packet.set_stream(self._stream_index);
+            
             // Write packet with proper interleaving
-            context.write_interleaved(&mut packet)
+            context.write_interleaved(&packet)
                 .context("Failed to write packet")?;
         }
         
@@ -206,18 +197,12 @@ impl Renderer {
     pub async fn shutdown(&self) -> Result<()> {
         let mut context = self.output_context.lock().await;
         let mut encoder = self.encoder.lock().await;
-        let mut decoder = self.decoder.lock().await;
-        
-        // Flush decoder
-        decoder.send_eof()?;
-        let mut frame = ffmpeg::frame::Video::empty();
-        while decoder.receive_frame(&mut frame)? {}
         
         // Flush encoder
         encoder.send_eof()?;
         let mut packet = ffmpeg::packet::Packet::empty();
-        while encoder.receive_packet(&mut packet)? {
-            context.write_interleaved(&mut packet)?;
+        while encoder.receive_packet(&mut packet).is_ok() {
+            context.write_interleaved(&packet)?;
         }
         
         // Write trailer and clean up
@@ -256,4 +241,4 @@ mod tests {
             assert!(renderer.render_frame(&buffered_frame).await.is_ok());
         }
     }
-} 
+}
