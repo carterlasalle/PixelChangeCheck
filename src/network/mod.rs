@@ -1,3 +1,4 @@
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use quinn::{ClientConfig, Endpoint, ServerConfig};
@@ -120,11 +121,12 @@ impl Connection {
     }
 
     pub async fn start_frame_processing(mut self) -> Result<()> {
-        let (mut send_stream, mut recv_stream) = self.quinn_conn.open_bi().await?;
+        let (send_stream, recv_stream) = self.quinn_conn.open_bi().await?;
 
         // Spawn receive task
         let frame_tx = self.frame_tx.clone();
         tokio::spawn(async move {
+            let mut recv_stream = recv_stream;
             loop {
                 let mut buf = vec![0u8; 8192];
                 match recv_stream.read(&mut buf).await {
@@ -143,6 +145,7 @@ impl Connection {
 
         // Spawn send task
         let mut frame_rx = self.frame_rx;
+        let mut send_stream = send_stream;
         tokio::spawn(async move {
             while let Some(frame) = frame_rx.recv().await {
                 if let Ok(encoded) = frame.encode() {

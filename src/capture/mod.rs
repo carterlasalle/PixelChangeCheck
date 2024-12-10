@@ -20,7 +20,7 @@ impl ScreenCapture {
         ffmpeg::init().context("Failed to initialize FFmpeg")?;
         
         // Get primary display info
-        let display_info = DisplayInfo::from_primary()
+        let display_info = DisplayInfo::from_point(0, 0)
             .context("Failed to get primary display info")?;
             
         // Set up FFmpeg capture format
@@ -29,7 +29,7 @@ impl ScreenCapture {
         options.set("video_size", &format!("{}x{}", display_info.width(), display_info.height()));
         
         #[cfg(target_os = "macos")]
-        let input_context = ffmpeg::format::input_with_dictionary("avfoundation:1", options)
+        let input_context = ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", display_info.id()), options)
             .context("Failed to create input context for macOS screen capture")?;
             
         #[cfg(target_os = "windows")]
@@ -58,17 +58,27 @@ impl ScreenCapture {
     
     async fn read_frame(&mut self) -> Result<ffmpeg::frame::Video> {
         let mut input = self.input_context.lock().await;
-        let mut decoder = input
+        let decoder = input
             .stream(self.video_stream_index)
             .context("Failed to get video stream")?
             .codec()
-            .decoder()
-            .video()
+            .decoder();
+        
+        let mut video_decoder = decoder.video()
             .context("Failed to get video decoder")?;
             
         let mut frame = ffmpeg::frame::Video::empty();
-        decoder.receive_frame(&mut frame)?;
-        Ok(frame)
+        
+        while let Some((stream, packet)) = input.packets().next() {
+            if stream.index() == self.video_stream_index {
+                video_decoder.send_packet(&packet)?;
+                while video_decoder.receive_frame(&mut frame).is_ok() {
+                    return Ok(frame);
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("End of stream"))
     }
 }
 
@@ -134,7 +144,7 @@ impl FrameCapture for ScreenCapture {
             // Recreate input context with new settings
             #[cfg(target_os = "macos")]
             {
-                *input = ffmpeg::format::input_with_dictionary("avfoundation:1", options)
+                *input = ffmpeg::format::input_with_dictionary(&format!("avfoundation:{}:0", self.display_info.id()), options)
                     .context("Failed to update macOS screen capture settings")?;
             }
             
