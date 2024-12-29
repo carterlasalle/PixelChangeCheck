@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Carter LaSalle"]
 description = "High-performance screen capture client with PCC (Pixel Change Check)"
+build = "build.rs"
 
 [[example]]
 name = "simple_screen_share"
@@ -50,6 +51,9 @@ thiserror = "1.0"
 
 # System info
 num_cpus = "1.16"
+
+[build-dependencies]
+bindgen = "0.71.1"
 
 [profile.release]
 opt-level = 3
