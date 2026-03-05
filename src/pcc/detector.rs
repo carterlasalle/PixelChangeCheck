@@ -1,5 +1,5 @@
 use super::types::{Frame, PixelChange, PixelChangeDetector, QualityConfig};
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 pub struct PCCDetector {
     config: QualityConfig,

@@ -7,6 +7,6 @@ pub mod server;
 // Re-export commonly used types
 pub use capture::ScreenCapture;
 pub use encoder::FrameEncoder;
-pub use network::{NetworkConfig, QUICTransport, ResilienceConfig};
+pub use network::{NetworkConfig, QUICTransport, ResilienceConfig, NetworkResilience};
 pub use pcc::{PCCDetector, QualityConfig};
 pub use server::renderer::Renderer; 

@@ -1,8 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crate::pcc::QualityConfig;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::debug;
 use jpeg_encoder::{Encoder, ColorType};
 
 pub struct FrameEncoder {
@@ -27,7 +25,7 @@ impl FrameEncoder {
         
         let mut output = Vec::new();
         let quality = (self.config.quality * 100.0) as u8;
-        let mut encoder = Encoder::new(&mut output, quality);
+        let encoder = Encoder::new(&mut output, quality);
         encoder.encode(
             frame,
             self.width as u16,

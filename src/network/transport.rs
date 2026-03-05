@@ -2,9 +2,7 @@ use crate::network::NetworkConfig;
 use crate::pcc::types::Frame;
 use anyhow::{Context, Result};
 use quinn::{Endpoint, Connection};
-use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
 
 pub struct QUICTransport {
     endpoint: Endpoint,

@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Carter LaSalle"]
 description = "High-performance screen capture client with PCC (Pixel Change Check)"
-build = "build.rs"
 
 [[example]]
 name = "simple_screen_share"
 path = "examples/simple_screen_share.rs"
+
+[[example]]
+name = "benchmarks"
+path = "benches/benchmarks.rs"
 
 [dependencies]
 # Screen capture
@@ -19,10 +22,6 @@ display-info = "0.4.3"
 image = { version = "0.24", features = ["jpeg", "png"] }
 rgb = "0.8"
 jpeg-encoder = { version = "0.5", features = ["simd"] }
-
-# Video processing
-ffmpeg-next = "5.0"
-ffmpeg-sys-next = { version = "5.0", features = ["build"] }
 
 # Compression
 lz4_flex = "0.11"
@@ -35,7 +34,7 @@ async-trait = "0.1"
 quinn = "0.10"
 bytes = "1.5"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
-rustls-native-certs = "0.6" # Correctly listed as a separate dependency
+rustls-native-certs = "0.6"
 rcgen = "0.12"
 
 # Serialization
@@ -51,9 +50,6 @@ thiserror = "1.0"
 
 # System info
 num_cpus = "1.16"
-
-[build-dependencies]
-bindgen = "0.71.1"
 
 [profile.release]
 opt-level = 3
