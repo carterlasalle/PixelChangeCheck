@@ -79,6 +79,12 @@ async fn main() -> Result<()> {
                 height: fh,
                 data,
             } => {
+                if data.len() != full_frame_bytes {
+                    warn!(
+                        "Keyframe size mismatch: expected {} bytes, got {} ({}x{} vs {}x{})",
+                        full_frame_bytes, data.len(), width, height, fw, fh
+                    );
+                }
                 let copy_len = data.len().min(frame_data.len());
                 frame_data[..copy_len].copy_from_slice(&data[..copy_len]);
                 total_wire_bytes += data.len() as u64;
