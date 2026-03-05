@@ -272,12 +272,12 @@ async fn test_pcc_multiblock_changes() -> Result<()> {
     let mut frame2 = frame1.clone();
     frame2.id = 2;
 
-    let px1 = (5 * w + 5) as usize * 3;
+    let px1 = ((5 * w + 5) * 3) as usize;
     frame2.data[px1] = 200;
     frame2.data[px1 + 1] = 200;
     frame2.data[px1 + 2] = 200;
 
-    let px2 = (5 * w + 40) as usize * 3;
+    let px2 = ((5 * w + 40) * 3) as usize;
     frame2.data[px2] = 100;
     frame2.data[px2 + 1] = 100;
     frame2.data[px2 + 2] = 100;
