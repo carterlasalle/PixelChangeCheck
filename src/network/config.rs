@@ -26,7 +26,8 @@ impl Default for NetworkConfig {
 }
 
 /// A certificate verifier that accepts any certificate.
-/// Used for localhost testing only.
+/// WARNING: This skips TLS certificate verification and should ONLY be used
+/// for localhost testing and development. Do not use in production.
 struct SkipServerVerification;
 
 impl ServerCertVerifier for SkipServerVerification {
