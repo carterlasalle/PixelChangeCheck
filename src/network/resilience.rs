@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time};
-use tracing::{debug, error, info, warn};
+use tracing::{error, warn};
 use serde::{Deserialize, Serialize};
 
 // Retry configuration
@@ -151,12 +151,14 @@ pub trait Resilient {
     // Retry an async operation with backoff
     async fn retry_async<F, T>(&self, operation: F) -> Result<T>
     where
-        F: Fn() -> Result<T> + Send + Sync;
+        F: Fn() -> Result<T> + Send + Sync,
+        T: Send;
 
     // Execute with timeout
     async fn with_timeout<F, T>(&self, duration: Duration, operation: F) -> Result<T>
     where
-        F: std::future::Future<Output = Result<T>> + Send;
+        F: std::future::Future<Output = Result<T>> + Send,
+        T: Send;
 }
 
 #[async_trait::async_trait]
@@ -164,6 +166,7 @@ impl Resilient for NetworkResilience {
     async fn retry_async<F, T>(&self, operation: F) -> Result<T>
     where
         F: Fn() -> Result<T> + Send + Sync,
+        T: Send,
     {
         self.with_retry(operation).await
     }
@@ -171,6 +174,7 @@ impl Resilient for NetworkResilience {
     async fn with_timeout<F, T>(&self, duration: Duration, operation: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>> + Send,
+        T: Send,
     {
         tokio::time::timeout(duration, operation)
             .await

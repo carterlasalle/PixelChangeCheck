@@ -1,17 +1,11 @@
-#![feature(test)]
-extern crate test;
-
-use anyhow::Result;
 use pixel_change_check_client::{
-    capture::ScreenCapture,
     encoder::{self, FrameEncoder},
-    pcc::{PCCDetector, Frame, QualityConfig},
+    pcc::{PCCDetector, Frame, QualityConfig, PixelChangeDetector},
 };
-use test::Bencher;
 use tokio::runtime::Runtime;
 
-const BENCH_WIDTH: u32 = 1920;
-const BENCH_HEIGHT: u32 = 1080;
+const BENCH_WIDTH: u32 = 640;
+const BENCH_HEIGHT: u32 = 480;
 
 // Helper function to create test frame
 fn create_test_frame(id: u64) -> Frame {
@@ -28,127 +22,122 @@ fn create_test_frame(id: u64) -> Frame {
 fn create_modified_frame(original: &Frame, change_percentage: f32) -> Frame {
     let mut new_frame = original.clone();
     let change_pixels = ((BENCH_WIDTH * BENCH_HEIGHT) as f32 * change_percentage) as usize;
-    
-    for i in 0..change_pixels * 3 {
-        new_frame.data[i] = 255; // Change some pixels to white
+
+    for i in 0..(change_pixels * 3).min(new_frame.data.len()) {
+        new_frame.data[i] = 255;
     }
-    
+
     new_frame
 }
 
-#[bench]
-fn bench_pcc_detection(b: &mut Bencher) {
+/// Run PCC detection benchmark
+fn bench_pcc_detection() {
     let detector = PCCDetector::default();
     let frame1 = create_test_frame(1);
-    let frame2 = create_modified_frame(&frame1, 0.1); // 10% change
-    
-    b.iter(|| {
-        detector.detect_changes(&frame1, &frame2).unwrap()
-    });
+    let frame2 = create_modified_frame(&frame1, 0.1);
+
+    let start = std::time::Instant::now();
+    let iterations = 100;
+
+    for _ in 0..iterations {
+        let _changes = detector.detect_changes(&frame1, &frame2).unwrap();
+    }
+
+    let elapsed = start.elapsed();
+    println!(
+        "PCC detection: {:.2}ms avg ({} iterations in {:.2}ms)",
+        elapsed.as_millis() as f64 / iterations as f64,
+        iterations,
+        elapsed.as_millis()
+    );
 }
 
-#[bench]
-fn bench_frame_encoding(b: &mut Bencher) {
+/// Run frame encoding benchmark
+fn bench_frame_encoding() {
     let rt = Runtime::new().unwrap();
-    let encoder = rt.block_on(async {
-        FrameEncoder::new(BENCH_WIDTH, BENCH_HEIGHT, QualityConfig::default()).unwrap()
-    });
+    let encoder = FrameEncoder::new(BENCH_WIDTH, BENCH_HEIGHT, QualityConfig::default()).unwrap();
     let frame = create_test_frame(1);
-    
-    b.iter(|| {
+
+    let start = std::time::Instant::now();
+    let iterations = 50;
+
+    for _ in 0..iterations {
         rt.block_on(async {
-            encoder.encode_frame(&frame.into()).await.unwrap()
-        })
-    });
+            encoder.encode_frame(&frame.data).await.unwrap();
+        });
+    }
+
+    let elapsed = start.elapsed();
+    println!(
+        "Frame encoding: {:.2}ms avg ({} iterations in {:.2}ms)",
+        elapsed.as_millis() as f64 / iterations as f64,
+        iterations,
+        elapsed.as_millis()
+    );
 }
 
-#[bench]
-fn bench_frame_compression(b: &mut Bencher) {
+/// Run frame compression benchmark
+fn bench_frame_compression() {
     let frame = create_test_frame(1);
-    
-    b.iter(|| {
-        encoder::compression::compress_frame(&frame.data, 0.8).unwrap()
-    });
+
+    let start = std::time::Instant::now();
+    let iterations = 100;
+
+    for _ in 0..iterations {
+        let compressed = encoder::compression::compress_frame(&frame.data, 0.8).unwrap();
+        let _decompressed = encoder::compression::decompress_frame(&compressed).unwrap();
+    }
+
+    let elapsed = start.elapsed();
+    println!(
+        "Frame compress+decompress: {:.2}ms avg ({} iterations in {:.2}ms)",
+        elapsed.as_millis() as f64 / iterations as f64,
+        iterations,
+        elapsed.as_millis()
+    );
 }
 
-#[bench]
-fn bench_screen_capture(b: &mut Bencher) {
-    let capture = ScreenCapture::new().unwrap();
-    
-    b.iter(|| {
-        capture.capture_frame().unwrap()
-    });
-}
-
-#[bench]
-fn bench_full_pipeline(b: &mut Bencher) {
+/// Run full pipeline benchmark
+fn bench_full_pipeline() {
     let rt = Runtime::new().unwrap();
-    
-    // Initialize components
-    let capture = ScreenCapture::new().unwrap();
-    let encoder = rt.block_on(async {
-        FrameEncoder::new(BENCH_WIDTH, BENCH_HEIGHT, QualityConfig::default()).unwrap()
-    });
+    let encoder = FrameEncoder::new(BENCH_WIDTH, BENCH_HEIGHT, QualityConfig::default()).unwrap();
     let detector = PCCDetector::default();
-    
-    let mut previous_frame = None;
-    
-    b.iter(|| {
+
+    let frame1 = create_test_frame(1);
+    let frame2 = create_modified_frame(&frame1, 0.1);
+
+    let start = std::time::Instant::now();
+    let iterations = 50;
+
+    for _ in 0..iterations {
+        // Detect changes
+        let _changes = detector.detect_changes(&frame1, &frame2).unwrap();
+
+        // Encode
         rt.block_on(async {
-            // Capture
-            let frame = capture.capture_frame().unwrap();
-            
-            // Detect changes
-            if let Some(prev) = &previous_frame {
-                let _changes = detector.detect_changes(prev, &frame).unwrap();
-            }
-            
-            // Encode
-            let _encoded = encoder.encode_frame(&frame.into()).await.unwrap();
-            
-            previous_frame = Some(frame);
-        })
-    });
+            encoder.encode_frame(&frame2.data).await.unwrap();
+        });
+    }
+
+    let elapsed = start.elapsed();
+    println!(
+        "Full pipeline (detect+encode): {:.2}ms avg ({} iterations in {:.2}ms)",
+        elapsed.as_millis() as f64 / iterations as f64,
+        iterations,
+        elapsed.as_millis()
+    );
 }
 
-// Memory benchmarks
-#[bench]
-fn bench_memory_usage(b: &mut Bencher) {
-    let frame = create_test_frame(1);
-    let modified = create_modified_frame(&frame, 0.1);
-    let detector = PCCDetector::default();
-    
-    b.iter(|| {
-        // Measure memory allocation during change detection
-        let changes = detector.detect_changes(&frame, &modified).unwrap();
-        
-        // Force memory usage calculation
-        let total_change_size: usize = changes.iter()
-            .map(|c| c.data.len())
-            .sum();
-        
-        total_change_size
-    });
-}
+fn main() {
+    println!("=== PixelChangeCheck Benchmarks ===");
+    println!("Resolution: {}x{}", BENCH_WIDTH, BENCH_HEIGHT);
+    println!();
 
-// Latency benchmarks
-#[bench]
-fn bench_end_to_end_latency(b: &mut Bencher) {
-    let rt = Runtime::new().unwrap();
-    let capture = ScreenCapture::new().unwrap();
-    let encoder = rt.block_on(async {
-        FrameEncoder::new(BENCH_WIDTH, BENCH_HEIGHT, QualityConfig::default()).unwrap()
-    });
-    
-    b.iter(|| {
-        rt.block_on(async {
-            let start = std::time::Instant::now();
-            
-            // Capture and encode
-            let frame = capture.capture_frame().unwrap();
-            let _encoded = encoder.encode_frame(&frame.into()).await.unwrap();
-            
-            start.elapsed()
-        })
-    });
+    bench_pcc_detection();
+    bench_frame_encoding();
+    bench_frame_compression();
+    bench_full_pipeline();
+
+    println!();
+    println!("=== Benchmarks complete ===");
 } 

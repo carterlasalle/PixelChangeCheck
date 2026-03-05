@@ -1,20 +1,17 @@
-
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
 use crate::pcc::types::Frame;
 
 mod config;
 mod transport;
-mod resilience;
+pub mod resilience;
 mod protocol;
 
 pub use config::NetworkConfig;
 pub use transport::QUICTransport;
-pub use resilience::ResilienceConfig;
+pub use resilience::{ResilienceConfig, NetworkResilience};
 pub use protocol::*;
 
 const DEFAULT_PORT: u16 = 5800;
@@ -83,7 +80,7 @@ impl Connection {
             .await
             .context("Failed to open bidirectional stream")?;
 
-        let (frame_tx, frame_rx) = mpsc::channel(32); // Buffer size for frame queue
+        let (frame_tx, frame_rx) = mpsc::channel(32);
 
         Ok(Self {
             quinn_conn,
@@ -104,23 +101,23 @@ impl Connection {
     }
 
     pub async fn receive_frame(&mut self) -> Result<Frame> {
-        let mut buf = vec![0u8; 8192]; // Initial buffer size
+        let mut buf = vec![0u8; 8192];
         let n = self
             .recv_stream
             .read(&mut buf)
             .await
             .context("Failed to receive frame")?;
-            
+
         let n = match n {
             Some(size) => size,
             None => return Err(anyhow::anyhow!("Connection closed")),
         };
-        
+
         buf.truncate(n);
         Frame::decode(&buf).context("Failed to decode frame")
     }
 
-    pub async fn start_frame_processing(mut self) -> Result<()> {
+    pub async fn start_frame_processing(self) -> Result<()> {
         let (send_stream, recv_stream) = self.quinn_conn.open_bi().await?;
 
         // Spawn receive task
