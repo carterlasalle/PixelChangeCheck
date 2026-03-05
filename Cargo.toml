@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Carter LaSalle"]
 description = "High-performance screen capture client with PCC (Pixel Change Check)"
+autobenches = false
 
 [[example]]
 name = "simple_screen_share"
