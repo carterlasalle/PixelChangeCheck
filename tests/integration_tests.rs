@@ -1,12 +1,11 @@
 use anyhow::Result;
 use pixel_change_check_client::{
     encoder::FrameEncoder,
-    network::{NetworkConfig, ResilienceConfig, NetworkResilience},
+    network::{ResilienceConfig, NetworkResilience, ScreenShareMessage, send_message, recv_message},
     pcc::{PCCDetector, QualityConfig, Frame, PixelChangeDetector},
     server::renderer::FrameBuffer,
 };
 use std::time::Duration;
-use tokio::time;
 
 // Test configurations
 const TEST_WIDTH: u32 = 1920;
@@ -205,6 +204,100 @@ async fn test_compression() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_pcc_rgb_data_correctness() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    // Use a small frame that spans multiple blocks (block_size = 32)
+    let w = 64u32;
+    let h = 64u32;
+
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: w,
+        height: h,
+        data: vec![0u8; (w * h * 3) as usize],
+    };
+
+    // Modify a single pixel at (10, 5) — set RGB to white
+    let mut frame2 = frame1.clone();
+    frame2.id = 2;
+    let pixel_offset = (5 * w + 10) as usize * 3;
+    frame2.data[pixel_offset] = 255;     // R
+    frame2.data[pixel_offset + 1] = 255; // G
+    frame2.data[pixel_offset + 2] = 255; // B
+
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert!(!changes.is_empty(), "Should detect the changed pixel");
+
+    // Should detect exactly one changed region (single pixel in one block)
+    assert_eq!(changes.len(), 1, "Should detect exactly one changed region");
+
+    let change = &changes[0];
+    // Exact bounds: single pixel at (10, 5)
+    assert_eq!(change.x, 10, "Change x should be 10");
+    assert_eq!(change.y, 5, "Change y should be 5");
+    assert_eq!(change.width, 1, "Change width should be 1 pixel");
+    assert_eq!(change.height, 1, "Change height should be 1 pixel");
+
+    // Verify data has correct RGB format (3 bytes per pixel)
+    assert_eq!(
+        change.data.len(),
+        (change.width * change.height * 3) as usize,
+        "Change data should have 3 bytes per pixel"
+    );
+    assert_eq!(change.data, vec![255, 255, 255], "Changed pixel data should be white");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pcc_multiblock_changes() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    let w = 128u32;
+    let h = 64u32;
+
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: w,
+        height: h,
+        data: vec![0u8; (w * h * 3) as usize],
+    };
+
+    // Modify pixels in two separate blocks:
+    // Pixel (5, 5) is in block (0, 0)
+    // Pixel (40, 5) is in block (32, 0)
+    let mut frame2 = frame1.clone();
+    frame2.id = 2;
+
+    let px1 = ((5 * w + 5) * 3) as usize;
+    frame2.data[px1] = 200;
+    frame2.data[px1 + 1] = 200;
+    frame2.data[px1 + 2] = 200;
+
+    let px2 = ((5 * w + 40) * 3) as usize;
+    frame2.data[px2] = 100;
+    frame2.data[px2 + 1] = 100;
+    frame2.data[px2 + 2] = 100;
+
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert_eq!(changes.len(), 2, "Should detect changes in two separate blocks");
+
+    // Verify each change has correct RGB data size
+    for change in &changes {
+        assert_eq!(
+            change.data.len(),
+            (change.width * change.height * 3) as usize,
+            "Each change region should have 3 bytes per pixel"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_renderer_creation() -> Result<()> {
     let renderer = pixel_change_check_client::server::renderer::Renderer::new(
         TEST_WIDTH, TEST_HEIGHT, 30,
@@ -229,4 +322,188 @@ async fn test_renderer_creation() -> Result<()> {
 
     renderer.shutdown().await?;
     Ok(())
-} 
+}
+
+#[tokio::test]
+async fn test_pcc_bandwidth_savings() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    let w = 1920u32;
+    let h = 1080u32;
+    let full_frame_bytes = (w * h * 3) as usize;
+
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: w,
+        height: h,
+        data: vec![0u8; full_frame_bytes],
+    };
+
+    // Change ~1% of the frame (a 192x108 region at top-left)
+    let mut frame2 = frame1.clone();
+    frame2.id = 2;
+    let change_region_w = 192u32;
+    let change_region_h = 108u32;
+    for y in 0..change_region_h {
+        for x in 0..change_region_w {
+            let offset = ((y * w + x) * 3) as usize;
+            frame2.data[offset] = 255;
+            frame2.data[offset + 1] = 255;
+            frame2.data[offset + 2] = 255;
+        }
+    }
+
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert!(!changes.is_empty(), "Should detect changes");
+
+    // Calculate bandwidth: only the changed region data should be sent
+    let region_bytes: usize = changes.iter().map(|c| c.data.len()).sum();
+
+    // The changed region is ~1% of the frame, so region data should be much smaller
+    assert!(
+        region_bytes < full_frame_bytes / 10,
+        "Region data ({} bytes) should be <10% of full frame ({} bytes)",
+        region_bytes,
+        full_frame_bytes,
+    );
+
+    // Verify savings are significant (>90%)
+    let savings_pct = 100.0 * (1.0 - region_bytes as f64 / full_frame_bytes as f64);
+    assert!(
+        savings_pct > 90.0,
+        "Bandwidth savings should be >90%, got {:.1}%",
+        savings_pct,
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_apply_updates_reconstructs_frame() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    let w = 128u32;
+    let h = 64u32;
+    let buffer = FrameBuffer::new(w, h);
+
+    // Push initial keyframe (all black)
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: w,
+        height: h,
+        data: vec![0u8; (w * h * 3) as usize],
+    };
+    buffer.push_frame(frame1.clone()).await?;
+    buffer.next_frame().await?; // move to current_frame
+
+    // Create frame2 with a white pixel at (10, 5)
+    let mut frame2 = frame1.clone();
+    frame2.id = 2;
+    let pixel_offset = ((5 * w + 10) * 3) as usize;
+    frame2.data[pixel_offset] = 255;
+    frame2.data[pixel_offset + 1] = 255;
+    frame2.data[pixel_offset + 2] = 255;
+
+    // Detect changes and apply as updates
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert!(!changes.is_empty(), "Should detect changes");
+
+    buffer.apply_updates(changes).await?;
+
+    // Verify the pixel was updated in the buffer's current frame
+    let current = buffer.current_frame().await;
+    assert!(current.is_some(), "Should have current frame after updates");
+    let current = current.unwrap();
+    assert_eq!(current.data[pixel_offset], 255, "R channel should be updated");
+    assert_eq!(current.data[pixel_offset + 1], 255, "G channel should be updated");
+    assert_eq!(current.data[pixel_offset + 2], 255, "B channel should be updated");
+
+    // Verify unchanged pixels remain black
+    assert_eq!(current.data[0], 0, "Unchanged pixels should remain 0");
+    assert_eq!(current.data[1], 0, "Unchanged pixels should remain 0");
+    assert_eq!(current.data[2], 0, "Unchanged pixels should remain 0");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_screen_share_protocol_roundtrip() -> Result<()> {
+    // Test all three message types through send_message/recv_message
+
+    // Create a duplex stream (in-memory bidirectional pipe)
+    let (mut client, mut server) = tokio::io::duplex(4 * 1024 * 1024);
+
+    // Test Hello message
+    let msg = ScreenShareMessage::Hello {
+        width: 1920,
+        height: 1080,
+    };
+    send_message(&mut client, &msg).await?;
+    let received = recv_message(&mut server).await?;
+    match received {
+        ScreenShareMessage::Hello { width, height } => {
+            assert_eq!(width, 1920);
+            assert_eq!(height, 1080);
+        }
+        _ => panic!("Expected Hello message"),
+    }
+
+    // Test Delta message with pixel changes
+    let changes = vec![pixel_change_check_client::pcc::PixelChange {
+        x: 10,
+        y: 20,
+        width: 32,
+        height: 32,
+        data: vec![255; 32 * 32 * 3],
+    }];
+    let msg = ScreenShareMessage::Delta {
+        frame_id: 42,
+        changes,
+    };
+    send_message(&mut client, &msg).await?;
+    let received = recv_message(&mut server).await?;
+    match received {
+        ScreenShareMessage::Delta {
+            frame_id,
+            changes,
+        } => {
+            assert_eq!(frame_id, 42);
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].x, 10);
+            assert_eq!(changes[0].y, 20);
+            assert_eq!(changes[0].width, 32);
+            assert_eq!(changes[0].height, 32);
+            assert_eq!(changes[0].data.len(), 32 * 32 * 3);
+        }
+        _ => panic!("Expected Delta message"),
+    }
+
+    // Test Keyframe message (large payload)
+    let data = vec![128u8; 640 * 480 * 3];
+    let msg = ScreenShareMessage::Keyframe {
+        id: 1,
+        width: 640,
+        height: 480,
+        data: data.clone(),
+    };
+    send_message(&mut client, &msg).await?;
+    let received = recv_message(&mut server).await?;
+    match received {
+        ScreenShareMessage::Keyframe {
+            id,
+            width,
+            height,
+            data: received_data,
+        } => {
+            assert_eq!(id, 1);
+            assert_eq!(width, 640);
+            assert_eq!(height, 480);
+            assert_eq!(received_data, data);
+        }
+        _ => panic!("Expected Keyframe message"),
+    }
+
+    Ok(())
+}

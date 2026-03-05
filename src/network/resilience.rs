@@ -5,8 +5,11 @@ use tracing::{error, warn};
 use serde::{Deserialize, Serialize};
 
 // Retry configuration
+#[allow(dead_code)]
 const MAX_RETRIES: u32 = 3;
+#[allow(dead_code)]
 const BASE_BACKOFF: Duration = Duration::from_millis(100);
+#[allow(dead_code)]
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

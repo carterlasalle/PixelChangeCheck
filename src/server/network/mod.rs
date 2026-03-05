@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
 
+#[allow(dead_code)]
 pub struct ServerNetwork {
     endpoint: Endpoint,
     config: NetworkConfig,

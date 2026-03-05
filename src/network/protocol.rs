@@ -73,6 +73,65 @@ impl Message {
     }
 }
 
+// --- PCC Screen Sharing Wire Protocol ---
+
+/// Messages for the PCC screen sharing wire protocol.
+/// Used by screen_sender and screen_receiver to stream screens across the network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ScreenShareMessage {
+    /// Initial handshake with screen dimensions
+    Hello {
+        width: u32,
+        height: u32,
+    },
+    /// Full frame (sent initially and periodically for resync)
+    Keyframe {
+        id: u64,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    },
+    /// Only the changed regions since last frame
+    Delta {
+        frame_id: u64,
+        changes: Vec<crate::pcc::PixelChange>,
+    },
+}
+
+// Maximum accepted wire message size (100MB) to prevent OOM
+const MAX_WIRE_MESSAGE_SIZE: usize = 100 * 1024 * 1024;
+
+/// Send a length-prefixed, LZ4-compressed screen share message.
+/// Returns the number of bytes written to the wire.
+pub async fn send_message<W: tokio::io::AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    msg: &ScreenShareMessage,
+) -> Result<usize> {
+    let serialized = bincode::serialize(msg)?;
+    let compressed = lz4_flex::compress_prepend_size(&serialized);
+    let len = compressed.len() as u32;
+    writer.write_all(&len.to_le_bytes()).await?;
+    writer.write_all(&compressed).await?;
+    writer.flush().await?;
+    Ok(4 + compressed.len())
+}
+
+/// Receive a length-prefixed, LZ4-compressed screen share message.
+pub async fn recv_message<R: tokio::io::AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<ScreenShareMessage> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_WIRE_MESSAGE_SIZE {
+        anyhow::bail!("Message too large: {} bytes (max {})", len, MAX_WIRE_MESSAGE_SIZE);
+    }
+    let mut compressed = vec![0u8; len];
+    reader.read_exact(&mut compressed).await?;
+    let decompressed = lz4_flex::decompress_size_prepended(&compressed)?;
+    Ok(bincode::deserialize(&decompressed)?)
+}
+
 // Frame-specific protocol handling
 pub struct FrameProtocol;
 

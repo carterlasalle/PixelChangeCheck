@@ -11,6 +11,7 @@ const MAX_BUFFER_SIZE: usize = 3; // Maximum number of frames to keep in buffer
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct FrameBuffer {
     frames: Arc<Mutex<VecDeque<BufferedFrame>>>,
     current_frame: Arc<Mutex<Option<BufferedFrame>>>,

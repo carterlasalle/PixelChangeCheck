@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use quinn::{Endpoint, Connection};
 use tokio::sync::mpsc;
 
+#[allow(dead_code)]
 pub struct QUICTransport {
     endpoint: Endpoint,
     config: NetworkConfig,

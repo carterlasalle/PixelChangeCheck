@@ -11,6 +11,14 @@ name = "simple_screen_share"
 path = "examples/simple_screen_share.rs"
 
 [[example]]
+name = "screen_sender"
+path = "examples/screen_sender.rs"
+
+[[example]]
+name = "screen_receiver"
+path = "examples/screen_receiver.rs"
+
+[[example]]
 name = "benchmarks"
 path = "benches/benchmarks.rs"
 

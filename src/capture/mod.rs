@@ -9,6 +9,10 @@ pub struct ScreenCapture {
     config: QualityConfig,
     screen: Screen,
     frame_counter: AtomicU64,
+    /// Actual captured image width in pixels (accounts for display scaling)
+    capture_width: u32,
+    /// Actual captured image height in pixels (accounts for display scaling)
+    capture_height: u32,
 }
 
 impl ScreenCapture {
@@ -21,28 +25,37 @@ impl ScreenCapture {
             .next()
             .context("No screens found")?;
 
+        // Determine actual capture dimensions (physical pixels, accounting for HiDPI)
+        let scale = screen.display_info.scale_factor;
+        let capture_width = (screen.display_info.width as f32 * scale) as u32;
+        let capture_height = (screen.display_info.height as f32 * scale) as u32;
+
         info!(
-            "Screen capture initialized: {}x{} (scale: {})",
+            "Screen capture initialized: {}x{} (display: {}x{}, scale: {})",
+            capture_width,
+            capture_height,
             screen.display_info.width,
             screen.display_info.height,
-            screen.display_info.scale_factor,
+            scale,
         );
 
         Ok(Self {
             config: QualityConfig::default(),
             screen,
             frame_counter: AtomicU64::new(0),
+            capture_width,
+            capture_height,
         })
     }
 
-    /// Get the width of the captured screen
+    /// Get the width of captured frames in pixels (physical resolution)
     pub fn width(&self) -> u32 {
-        self.screen.display_info.width
+        self.capture_width
     }
 
-    /// Get the height of the captured screen
+    /// Get the height of captured frames in pixels (physical resolution)
     pub fn height(&self) -> u32 {
-        self.screen.display_info.height
+        self.capture_height
     }
 }
 
