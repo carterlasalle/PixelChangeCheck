@@ -83,9 +83,11 @@ async fn main() -> Result<()> {
 
     info!("Self-test complete. All components working.");
     info!("Next steps:");
-    info!("  cargo run --example simple_screen_share  - Full screen sharing demo with bandwidth stats");
-    info!("  cargo bench                              - Detailed benchmarks");
-    info!("  cargo test                               - Run test suite");
+    info!("  cargo run --example screen_sender              - Share your screen over the network");
+    info!("  cargo run --example screen_receiver -- <ip>    - View a shared screen from another device");
+    info!("  cargo run --example simple_screen_share        - Local screen sharing demo with bandwidth stats");
+    info!("  cargo bench                                    - Detailed benchmarks");
+    info!("  cargo test                                     - Run test suite");
 
     Ok(())
 }

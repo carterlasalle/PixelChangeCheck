@@ -1,7 +1,7 @@
 use anyhow::Result;
 use pixel_change_check_client::{
     encoder::FrameEncoder,
-    network::{ResilienceConfig, NetworkResilience},
+    network::{ResilienceConfig, NetworkResilience, ScreenShareMessage, send_message, recv_message},
     pcc::{PCCDetector, QualityConfig, Frame, PixelChangeDetector},
     server::renderer::FrameBuffer,
 };
@@ -426,4 +426,84 @@ async fn test_apply_updates_reconstructs_frame() -> Result<()> {
     assert_eq!(current.data[2], 0, "Unchanged pixels should remain 0");
 
     Ok(())
-} 
+}
+
+#[tokio::test]
+async fn test_screen_share_protocol_roundtrip() -> Result<()> {
+    // Test all three message types through send_message/recv_message
+
+    // Create a duplex stream (in-memory bidirectional pipe)
+    let (mut client, mut server) = tokio::io::duplex(4 * 1024 * 1024);
+
+    // Test Hello message
+    let msg = ScreenShareMessage::Hello {
+        width: 1920,
+        height: 1080,
+    };
+    send_message(&mut client, &msg).await?;
+    let received = recv_message(&mut server).await?;
+    match received {
+        ScreenShareMessage::Hello { width, height } => {
+            assert_eq!(width, 1920);
+            assert_eq!(height, 1080);
+        }
+        _ => panic!("Expected Hello message"),
+    }
+
+    // Test Delta message with pixel changes
+    let changes = vec![pixel_change_check_client::pcc::PixelChange {
+        x: 10,
+        y: 20,
+        width: 32,
+        height: 32,
+        data: vec![255; 32 * 32 * 3],
+    }];
+    let msg = ScreenShareMessage::Delta {
+        frame_id: 42,
+        changes,
+    };
+    send_message(&mut client, &msg).await?;
+    let received = recv_message(&mut server).await?;
+    match received {
+        ScreenShareMessage::Delta {
+            frame_id,
+            changes,
+        } => {
+            assert_eq!(frame_id, 42);
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].x, 10);
+            assert_eq!(changes[0].y, 20);
+            assert_eq!(changes[0].width, 32);
+            assert_eq!(changes[0].height, 32);
+            assert_eq!(changes[0].data.len(), 32 * 32 * 3);
+        }
+        _ => panic!("Expected Delta message"),
+    }
+
+    // Test Keyframe message (large payload)
+    let data = vec![128u8; 640 * 480 * 3];
+    let msg = ScreenShareMessage::Keyframe {
+        id: 1,
+        width: 640,
+        height: 480,
+        data: data.clone(),
+    };
+    send_message(&mut client, &msg).await?;
+    let received = recv_message(&mut server).await?;
+    match received {
+        ScreenShareMessage::Keyframe {
+            id,
+            width,
+            height,
+            data: received_data,
+        } => {
+            assert_eq!(id, 1);
+            assert_eq!(width, 640);
+            assert_eq!(height, 480);
+            assert_eq!(received_data, data);
+        }
+        _ => panic!("Expected Keyframe message"),
+    }
+
+    Ok(())
+}
