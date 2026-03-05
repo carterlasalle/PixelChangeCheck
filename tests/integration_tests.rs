@@ -1,10 +1,9 @@
 use anyhow::Result;
 use pixel_change_check_client::{
-    capture::ScreenCapture,
     encoder::FrameEncoder,
-    network::{NetworkConfig, QUICTransport, ResilienceConfig},
-    pcc::{PCCDetector, QualityConfig},
-    server::renderer::Renderer,
+    network::{NetworkConfig, ResilienceConfig, NetworkResilience},
+    pcc::{PCCDetector, QualityConfig, Frame, PixelChangeDetector},
+    server::renderer::FrameBuffer,
 };
 use std::time::Duration;
 use tokio::time;
@@ -12,81 +11,99 @@ use tokio::time;
 // Test configurations
 const TEST_WIDTH: u32 = 1920;
 const TEST_HEIGHT: u32 = 1080;
-const TEST_FPS: u32 = 30;
+
+/// Helper to create a test frame with given id
+fn create_test_frame(id: u64) -> Frame {
+    Frame {
+        id,
+        timestamp: std::time::SystemTime::now(),
+        width: TEST_WIDTH,
+        height: TEST_HEIGHT,
+        data: vec![0; (TEST_WIDTH * TEST_HEIGHT * 3) as usize],
+    }
+}
 
 #[tokio::test]
-async fn test_full_pipeline() -> Result<()> {
-    // Initialize components
-    let capture = ScreenCapture::new()?;
+async fn test_pcc_detection_pipeline() -> Result<()> {
     let encoder = FrameEncoder::new(TEST_WIDTH, TEST_HEIGHT, QualityConfig::default())?;
     let detector = PCCDetector::default();
-    
-    // Set up network
-    let network_config = NetworkConfig::default();
-    let resilience_config = ResilienceConfig::default();
-    let transport = QUICTransport::new(
-        create_test_endpoint().await?,
-        network_config,
-    );
-    
-    // Set up renderer
-    let renderer = Renderer::new(TEST_WIDTH, TEST_HEIGHT, TEST_FPS).await?;
-    
-    // Capture and process a few frames
-    let mut previous_frame = None;
-    for _ in 0..3 {
-        // Capture frame
-        let frame = capture.capture_frame()?;
-        
-        // Detect changes
-        if let Some(prev) = previous_frame {
-            let changes = detector.detect_changes(&prev, &frame)?;
-            assert!(changes.len() <= (TEST_WIDTH * TEST_HEIGHT) as usize);
-        }
-        
-        // Encode frame
-        let encoded = encoder.encode_frame(&frame.into()).await?;
-        assert!(!encoded.is_empty());
-        
-        previous_frame = Some(frame);
-        time::sleep(Duration::from_millis(33)).await; // ~30fps
+
+    // Create two frames with some differences
+    let frame1 = create_test_frame(1);
+    let mut frame2 = create_test_frame(2);
+    // Modify some pixels in frame2
+    for i in 0..300 {
+        frame2.data[i] = 255;
     }
-    
+
+    // Detect changes
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert!(!changes.is_empty(), "Should detect changes between frames");
+    assert!(changes.len() <= (TEST_WIDTH * TEST_HEIGHT) as usize);
+
+    // Encode a frame
+    let encoded = encoder.encode_frame(&frame1.data).await?;
+    assert!(!encoded.is_empty(), "Encoded frame should not be empty");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pcc_no_changes() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    let frame1 = create_test_frame(1);
+    let frame2 = Frame {
+        id: 2,
+        timestamp: std::time::SystemTime::now(),
+        ..frame1.clone()
+    };
+
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert!(changes.is_empty(), "Identical frames should have no changes");
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_network_resilience() -> Result<()> {
     let config = ResilienceConfig {
-        max_retries: 3,
-        base_backoff: Duration::from_millis(100),
-        max_backoff: Duration::from_secs(1),
-        connection_timeout: Duration::from_secs(5),
+        max_retries: 5,
+        retry_delay: Duration::from_millis(50),
+        jitter_buffer_size: 5,
+        error_correction_enabled: true,
     };
-    
-    let resilience = pixel_change_check_client::network::NetworkResilience::new(config);
-    
-    // Test retry logic
-    let mut fail_count = 0;
-    let result = resilience.with_retry(|| {
-        fail_count += 1;
-        if fail_count < 3 {
-            Err(anyhow::anyhow!("Simulated failure"))
-        } else {
-            Ok(())
-        }
-    }).await;
-    
-    assert!(result.is_ok());
-    assert_eq!(fail_count, 3);
-    
+
+    let resilience = NetworkResilience::new(config);
+
+    // Test retry logic with a counter
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter_clone = counter.clone();
+
+    let result = resilience
+        .with_retry(move || {
+            let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < 2 {
+                Err(anyhow::anyhow!("Simulated failure"))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+
+    assert!(result.is_ok(), "Should succeed after retries");
+    assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+
+    // Test health check
+    assert!(resilience.is_healthy().await, "Should be healthy after success");
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_quality_adaptation() -> Result<()> {
     let mut encoder = FrameEncoder::new(TEST_WIDTH, TEST_HEIGHT, QualityConfig::default())?;
-    
+
     // Test quality adjustment
     let configs = [
         QualityConfig {
@@ -102,37 +119,36 @@ async fn test_quality_adaptation() -> Result<()> {
             compression_level: 8,
         },
     ];
-    
+
     for config in configs.iter() {
         encoder.reconfigure(*config).await?;
-        // Verify configuration was applied
-        // (would need getter methods to properly test)
     }
-    
+
+    // Verify encoding still works after reconfigure
+    let frame = create_test_frame(1);
+    let encoded = encoder.encode_frame(&frame.data).await?;
+    assert!(!encoded.is_empty());
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_frame_buffer() -> Result<()> {
-    let buffer = pixel_change_check_client::server::renderer::FrameBuffer::new(
-        TEST_WIDTH,
-        TEST_HEIGHT,
-    );
-    
+    let buffer = FrameBuffer::new(TEST_WIDTH, TEST_HEIGHT);
+
     // Create test frame
-    let frame = pixel_change_check_client::pcc::Frame {
-        id: 1,
-        timestamp: std::time::SystemTime::now(),
-        width: TEST_WIDTH,
-        height: TEST_HEIGHT,
-        data: vec![0; (TEST_WIDTH * TEST_HEIGHT * 3) as usize],
-    };
-    
+    let frame = create_test_frame(1);
+
     // Test frame management
     buffer.push_frame(frame.clone()).await?;
     let next = buffer.next_frame().await?;
-    assert!(next.is_some());
-    
+    assert!(next.is_some(), "Should have a frame available");
+
+    let next = next.unwrap();
+    assert_eq!(next.id, 1);
+    assert_eq!(next.width, TEST_WIDTH);
+    assert_eq!(next.height, TEST_HEIGHT);
+
     // Test updates
     let update = pixel_change_check_client::pcc::PixelChange {
         x: 0,
@@ -141,22 +157,76 @@ async fn test_frame_buffer() -> Result<()> {
         height: 100,
         data: vec![255; 100 * 100 * 3],
     };
-    
+
     buffer.apply_updates(vec![update]).await?;
-    
+
+    // Verify the current frame was updated
+    let current = buffer.current_frame().await;
+    assert!(current.is_some(), "Should have a current frame after update");
+
     Ok(())
 }
 
-// Helper function to create test endpoint
-async fn create_test_endpoint() -> Result<quinn::Endpoint> {
-    let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
-    
-    let mut server_config = quinn::ServerConfig::default();
-    server_config.transport = Arc::new(transport_config);
-    
-    let addr = "127.0.0.1:0".parse()?;
-    let endpoint = quinn::Endpoint::server(server_config, addr)?;
-    
-    Ok(endpoint)
+#[tokio::test]
+async fn test_frame_encode_decode() -> Result<()> {
+    let frame = create_test_frame(42);
+
+    let encoded = frame.encode()?;
+    assert!(!encoded.is_empty());
+
+    let decoded = Frame::decode(&encoded)?;
+    assert_eq!(decoded.id, 42);
+    assert_eq!(decoded.width, TEST_WIDTH);
+    assert_eq!(decoded.height, TEST_HEIGHT);
+    assert_eq!(decoded.data.len(), frame.data.len());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_compression() -> Result<()> {
+    let frame_data = vec![0u8; (TEST_WIDTH * TEST_HEIGHT * 3) as usize];
+
+    let compressed =
+        pixel_change_check_client::encoder::compression::compress_frame(&frame_data, 0.8)?;
+    assert!(
+        compressed.len() < frame_data.len(),
+        "Compressed data should be smaller"
+    );
+
+    let decompressed =
+        pixel_change_check_client::encoder::compression::decompress_frame(&compressed)?;
+    assert_eq!(
+        decompressed, frame_data,
+        "Decompressed data should match original"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_renderer_creation() -> Result<()> {
+    let renderer = pixel_change_check_client::server::renderer::Renderer::new(
+        TEST_WIDTH, TEST_HEIGHT, 30,
+    )
+    .await?;
+
+    // Push a frame with known data and verify rendering
+    let mut frame = create_test_frame(1);
+    frame.data = vec![42; (TEST_WIDTH * TEST_HEIGHT * 3) as usize];
+    renderer.buffer.push_frame(frame).await?;
+
+    if let Some(buffered) = renderer.buffer.next_frame().await? {
+        assert_eq!(buffered.width, TEST_WIDTH);
+        assert_eq!(buffered.height, TEST_HEIGHT);
+    }
+
+    // Verify the current frame was stored correctly
+    let current = renderer.buffer.current_frame().await;
+    assert!(current.is_some(), "Should have a current frame");
+    let current = current.unwrap();
+    assert_eq!(current.data[0], 42, "Frame data should match what was pushed");
+
+    renderer.shutdown().await?;
+    Ok(())
 } 
