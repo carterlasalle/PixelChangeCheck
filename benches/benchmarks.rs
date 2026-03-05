@@ -4,6 +4,8 @@ use pixel_change_check_client::{
 };
 use tokio::runtime::Runtime;
 
+// Use a smaller resolution for faster benchmarks.
+// For real-world performance testing, increase to 1920x1080.
 const BENCH_WIDTH: u32 = 640;
 const BENCH_HEIGHT: u32 = 480;
 

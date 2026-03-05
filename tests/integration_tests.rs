@@ -211,14 +211,21 @@ async fn test_renderer_creation() -> Result<()> {
     )
     .await?;
 
-    // Push a frame and render it
-    let frame = create_test_frame(1);
+    // Push a frame with known data and verify rendering
+    let mut frame = create_test_frame(1);
+    frame.data = vec![42; (TEST_WIDTH * TEST_HEIGHT * 3) as usize];
     renderer.buffer.push_frame(frame).await?;
 
     if let Some(buffered) = renderer.buffer.next_frame().await? {
         assert_eq!(buffered.width, TEST_WIDTH);
         assert_eq!(buffered.height, TEST_HEIGHT);
     }
+
+    // Verify the current frame was stored correctly
+    let current = renderer.buffer.current_frame().await;
+    assert!(current.is_some(), "Should have a current frame");
+    let current = current.unwrap();
+    assert_eq!(current.data[0], 42, "Frame data should match what was pushed");
 
     renderer.shutdown().await?;
     Ok(())
