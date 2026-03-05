@@ -26,49 +26,6 @@ impl PCCDetector {
             block_size,
         }
     }
-
-    /// Compare two blocks of pixels using direct comparison
-    #[inline]
-    fn compare_blocks(&self, prev: &[u8], curr: &[u8]) -> bool {
-        debug_assert_eq!(prev.len(), curr.len(), "Block sizes must match");
-        
-        // Compare bytes directly
-        for (p, c) in prev.iter().zip(curr.iter()) {
-            if (*p as i16 - *c as i16).abs() > self.threshold as i16 {
-                return true;
-            }
-        }
-        
-        false
-    }
-
-    /// Find the bounds of changed region in a block
-    fn find_change_bounds(&self, prev: &[u8], curr: &[u8], width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
-        let mut min_x = width;
-        let mut min_y = height;
-        let mut max_x = 0;
-        let mut max_y = 0;
-        let mut found_change = false;
-
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) as usize;
-                if (prev[idx] as i16 - curr[idx] as i16).abs() > self.threshold as i16 {
-                    min_x = min_x.min(x);
-                    min_y = min_y.min(y);
-                    max_x = max_x.max(x);
-                    max_y = max_y.max(y);
-                    found_change = true;
-                }
-            }
-        }
-
-        if found_change {
-            Some((min_x, min_y, max_x + 1, max_y + 1))
-        } else {
-            None
-        }
-    }
 }
 
 impl PixelChangeDetector for PCCDetector {
@@ -80,55 +37,74 @@ impl PixelChangeDetector for PCCDetector {
         let mut changes = Vec::new();
         let width = previous.width;
         let height = previous.height;
-        
+        let row_stride = width as usize * 3; // 3 bytes per pixel (RGB)
+        let threshold = self.threshold as i16;
+
         // Process frame in blocks
-        for y in (0..height).step_by(self.block_size as usize) {
-            for x in (0..width).step_by(self.block_size as usize) {
-                let block_width = std::cmp::min(self.block_size, width - x);
-                let block_height = std::cmp::min(self.block_size, height - y);
-                
-                // Extract blocks from both frames
-                let prev_block: Vec<u8> = (0..block_height)
-                    .flat_map(|dy| {
-                        let start = ((y + dy) * width + x) as usize;
-                        let end = start + block_width as usize;
-                        previous.data[start..end].iter().copied()
-                    })
-                    .collect();
+        for by in (0..height).step_by(self.block_size as usize) {
+            for bx in (0..width).step_by(self.block_size as usize) {
+                let block_w = std::cmp::min(self.block_size, width - bx);
+                let block_h = std::cmp::min(self.block_size, height - by);
 
-                let curr_block: Vec<u8> = (0..block_height)
-                    .flat_map(|dy| {
-                        let start = ((y + dy) * width + x) as usize;
-                        let end = start + block_width as usize;
-                        current.data[start..end].iter().copied()
-                    })
-                    .collect();
+                // Fast path: skip block if bytes are identical (memcmp is SIMD-optimized)
+                let block_identical = (0..block_h).all(|dy| {
+                    let offset = (by + dy) as usize * row_stride + bx as usize * 3;
+                    let len = block_w as usize * 3;
+                    previous.data[offset..offset + len] == current.data[offset..offset + len]
+                });
 
-                // Compare blocks
-                if self.compare_blocks(&prev_block, &curr_block) {
-                    // Find exact bounds of the change within the block
-                    if let Some((min_x, min_y, max_x, max_y)) = 
-                        self.find_change_bounds(&prev_block, &curr_block, block_width, block_height) {
-                        
-                        let change_width = max_x - min_x;
-                        let change_height = max_y - min_y;
-                        
-                        // Extract changed region
-                        let mut change_data = Vec::with_capacity((change_width * change_height) as usize);
-                        for dy in min_y..max_y {
-                            let start = (dy * block_width + min_x) as usize;
-                            let end = start + change_width as usize;
-                            change_data.extend_from_slice(&curr_block[start..end]);
+                if block_identical {
+                    continue;
+                }
+
+                // Single pass: detect changes and find bounds simultaneously
+                let mut min_x = block_w;
+                let mut min_y = block_h;
+                let mut max_x = 0u32;
+                let mut max_y = 0u32;
+                let mut has_change = false;
+
+                for dy in 0..block_h {
+                    let row_offset = (by + dy) as usize * row_stride + bx as usize * 3;
+                    let row_len = block_w as usize * 3;
+                    let prev_row = &previous.data[row_offset..row_offset + row_len];
+                    let curr_row = &current.data[row_offset..row_offset + row_len];
+
+                    for px in 0..block_w {
+                        let i = px as usize * 3;
+                        // Check if any RGB channel differs beyond threshold
+                        if (prev_row[i] as i16 - curr_row[i] as i16).abs() > threshold
+                            || (prev_row[i + 1] as i16 - curr_row[i + 1] as i16).abs() > threshold
+                            || (prev_row[i + 2] as i16 - curr_row[i + 2] as i16).abs() > threshold
+                        {
+                            min_x = min_x.min(px);
+                            min_y = min_y.min(dy);
+                            max_x = max_x.max(px);
+                            max_y = max_y.max(dy);
+                            has_change = true;
                         }
-
-                        changes.push(PixelChange {
-                            x: x + min_x,
-                            y: y + min_y,
-                            width: change_width,
-                            height: change_height,
-                            data: change_data,
-                        });
                     }
+                }
+
+                if has_change {
+                    let change_w = max_x - min_x + 1;
+                    let change_h = max_y - min_y + 1;
+
+                    // Extract changed region's pixel data (RGB)
+                    let mut change_data = Vec::with_capacity((change_w * change_h * 3) as usize);
+                    for dy in min_y..=max_y {
+                        let src = (by + dy) as usize * row_stride + (bx + min_x) as usize * 3;
+                        let len = change_w as usize * 3;
+                        change_data.extend_from_slice(&current.data[src..src + len]);
+                    }
+
+                    changes.push(PixelChange {
+                        x: bx + min_x,
+                        y: by + min_y,
+                        width: change_w,
+                        height: change_h,
+                        data: change_data,
+                    });
                 }
             }
         }

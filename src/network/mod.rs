@@ -16,6 +16,7 @@ pub use protocol::*;
 
 const DEFAULT_PORT: u16 = 5800;
 
+#[allow(dead_code)]
 pub struct NetworkManager {
     endpoint: Endpoint,
     config: NetworkConfig,

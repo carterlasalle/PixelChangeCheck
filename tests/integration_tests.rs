@@ -1,12 +1,11 @@
 use anyhow::Result;
 use pixel_change_check_client::{
     encoder::FrameEncoder,
-    network::{NetworkConfig, ResilienceConfig, NetworkResilience},
+    network::{ResilienceConfig, NetworkResilience},
     pcc::{PCCDetector, QualityConfig, Frame, PixelChangeDetector},
     server::renderer::FrameBuffer,
 };
 use std::time::Duration;
-use tokio::time;
 
 // Test configurations
 const TEST_WIDTH: u32 = 1920;
@@ -200,6 +199,100 @@ async fn test_compression() -> Result<()> {
         decompressed, frame_data,
         "Decompressed data should match original"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pcc_rgb_data_correctness() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    // Use a small frame that spans multiple blocks (block_size = 32)
+    let w = 64u32;
+    let h = 64u32;
+
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: w,
+        height: h,
+        data: vec![0u8; (w * h * 3) as usize],
+    };
+
+    // Modify a single pixel at (10, 5) — set RGB to white
+    let mut frame2 = frame1.clone();
+    frame2.id = 2;
+    let pixel_offset = (5 * w + 10) as usize * 3;
+    frame2.data[pixel_offset] = 255;     // R
+    frame2.data[pixel_offset + 1] = 255; // G
+    frame2.data[pixel_offset + 2] = 255; // B
+
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert!(!changes.is_empty(), "Should detect the changed pixel");
+
+    // Should detect exactly one changed region (single pixel in one block)
+    assert_eq!(changes.len(), 1, "Should detect exactly one changed region");
+
+    let change = &changes[0];
+    // Exact bounds: single pixel at (10, 5)
+    assert_eq!(change.x, 10, "Change x should be 10");
+    assert_eq!(change.y, 5, "Change y should be 5");
+    assert_eq!(change.width, 1, "Change width should be 1 pixel");
+    assert_eq!(change.height, 1, "Change height should be 1 pixel");
+
+    // Verify data has correct RGB format (3 bytes per pixel)
+    assert_eq!(
+        change.data.len(),
+        (change.width * change.height * 3) as usize,
+        "Change data should have 3 bytes per pixel"
+    );
+    assert_eq!(change.data, vec![255, 255, 255], "Changed pixel data should be white");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pcc_multiblock_changes() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    let w = 128u32;
+    let h = 64u32;
+
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: w,
+        height: h,
+        data: vec![0u8; (w * h * 3) as usize],
+    };
+
+    // Modify pixels in two separate blocks:
+    // Pixel (5, 5) is in block (0, 0)
+    // Pixel (40, 5) is in block (32, 0)
+    let mut frame2 = frame1.clone();
+    frame2.id = 2;
+
+    let px1 = (5 * w + 5) as usize * 3;
+    frame2.data[px1] = 200;
+    frame2.data[px1 + 1] = 200;
+    frame2.data[px1 + 2] = 200;
+
+    let px2 = (5 * w + 40) as usize * 3;
+    frame2.data[px2] = 100;
+    frame2.data[px2 + 1] = 100;
+    frame2.data[px2 + 2] = 100;
+
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert_eq!(changes.len(), 2, "Should detect changes in two separate blocks");
+
+    // Verify each change has correct RGB data size
+    for change in &changes {
+        assert_eq!(
+            change.data.len(),
+            (change.width * change.height * 3) as usize,
+            "Each change region should have 3 bytes per pixel"
+        );
+    }
 
     Ok(())
 }

@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time};
 use tracing::{debug, error, info};
 
+#[allow(dead_code)]
 pub struct Renderer {
     pub buffer: Arc<FrameBuffer>,
     width: u32,
