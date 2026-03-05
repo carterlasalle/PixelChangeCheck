@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
-use rustls::{ClientConfig, ServerConfig};
+use rustls::{self, client::ServerCertVerified, client::ServerCertVerifier};
 use rcgen::generate_simple_self_signed;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,26 +25,51 @@ impl Default for NetworkConfig {
     }
 }
 
+/// A certificate verifier that accepts any certificate.
+/// WARNING: This skips TLS certificate verification and should ONLY be used
+/// for localhost testing and development. Do not use in production.
+struct SkipServerVerification;
+
+impl ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+}
+
 impl NetworkConfig {
-    pub fn client_crypto_config(&self) -> ClientConfig {
-        ClientConfig::builder()
+    pub fn client_crypto_config(&self) -> rustls::ClientConfig {
+        let mut config = rustls::ClientConfig::builder()
             .with_safe_defaults()
-            .with_native_roots()
-            .with_no_client_auth()
+            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+            .with_no_client_auth();
+
+        config.alpn_protocols = vec![b"pcc".to_vec()];
+        config
     }
 
-    pub fn server_crypto_config(&self) -> ServerConfig {
+    pub fn server_crypto_config(&self) -> rustls::ServerConfig {
         // Generate a self-signed certificate for testing
         let cert = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         let key_der = cert.serialize_private_key_der();
         let cert_der = cert.serialize_der().unwrap();
-        
-        let mut server_crypto = ServerConfig::builder()
+
+        let mut server_crypto = rustls::ServerConfig::builder()
             .with_safe_defaults()
             .with_no_client_auth()
-            .with_single_cert(vec![rustls::Certificate(cert_der)], rustls::PrivateKey(key_der))
+            .with_single_cert(
+                vec![rustls::Certificate(cert_der)],
+                rustls::PrivateKey(key_der),
+            )
             .unwrap();
-            
+
         server_crypto.alpn_protocols = vec![b"pcc".to_vec()];
         server_crypto
     }

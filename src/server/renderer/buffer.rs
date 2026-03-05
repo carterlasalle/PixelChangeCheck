@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::warn;
 
 const MAX_BUFFER_SIZE: usize = 3; // Maximum number of frames to keep in buffer
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);

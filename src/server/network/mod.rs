@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use quinn::Endpoint;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::info;
 
 pub struct ServerNetwork {
     endpoint: Endpoint,
@@ -52,7 +52,7 @@ impl ServerNetwork {
     }
 
     async fn handle_connection(connection: quinn::Connection, frame_tx: mpsc::Sender<Frame>) -> Result<()> {
-        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+        while let Ok((_send, mut recv)) = connection.accept_bi().await {
             let mut buf = vec![0u8; 65535];
             
             let n = recv.read(&mut buf)
