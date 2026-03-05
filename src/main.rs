@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
 
     let test_w = 1920u32;
     let test_h = 1080u32;
+    let full_frame_bytes = (test_w * test_h * 3) as usize;
     let detector = PCCDetector::default();
     let encoder = FrameEncoder::new(test_w, test_h, QualityConfig::default())?;
 
@@ -45,7 +46,7 @@ async fn main() -> Result<()> {
         timestamp: std::time::SystemTime::now(),
         width: test_w,
         height: test_h,
-        data: vec![128u8; (test_w * test_h * 3) as usize],
+        data: vec![128u8; full_frame_bytes],
     };
     let mut frame2 = frame1.clone();
     frame2.id = 1;
@@ -57,12 +58,17 @@ async fn main() -> Result<()> {
     // Benchmark PCC detection
     let iters = 10u32;
     let start = std::time::Instant::now();
-    let mut num_regions = 0;
+    let mut changes = Vec::new();
     for _ in 0..iters {
-        num_regions = detector.detect_changes(&frame1, &frame2)?.len();
+        changes = detector.detect_changes(&frame1, &frame2)?;
     }
     let detect_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
-    info!("PCC detection: {:.1}ms avg ({} regions, {}x{})", detect_ms, num_regions, test_w, test_h);
+    let region_bytes: usize = changes.iter().map(|c| c.data.len()).sum();
+    info!("PCC detection: {:.1}ms avg ({} regions, {}x{})", detect_ms, changes.len(), test_w, test_h);
+    info!("  Region data: {:.1} KB vs {:.1} MB full frame ({:.1}% bandwidth saved)",
+        region_bytes as f64 / 1024.0,
+        full_frame_bytes as f64 / 1_048_576.0,
+        100.0 * (1.0 - region_bytes as f64 / full_frame_bytes as f64));
 
     // Benchmark frame encoding
     let start = std::time::Instant::now();
@@ -77,7 +83,7 @@ async fn main() -> Result<()> {
 
     info!("Self-test complete. All components working.");
     info!("Next steps:");
-    info!("  cargo run --example simple_screen_share  - Full screen sharing demo");
+    info!("  cargo run --example simple_screen_share  - Full screen sharing demo with bandwidth stats");
     info!("  cargo bench                              - Detailed benchmarks");
     info!("  cargo test                               - Run test suite");
 

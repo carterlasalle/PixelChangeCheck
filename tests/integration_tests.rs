@@ -322,4 +322,108 @@ async fn test_renderer_creation() -> Result<()> {
 
     renderer.shutdown().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn test_pcc_bandwidth_savings() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    let w = 1920u32;
+    let h = 1080u32;
+    let full_frame_bytes = (w * h * 3) as usize;
+
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: w,
+        height: h,
+        data: vec![0u8; full_frame_bytes],
+    };
+
+    // Change ~1% of the frame (a 192x108 region at top-left)
+    let mut frame2 = frame1.clone();
+    frame2.id = 2;
+    let change_region_w = 192u32;
+    let change_region_h = 108u32;
+    for y in 0..change_region_h {
+        for x in 0..change_region_w {
+            let offset = ((y * w + x) * 3) as usize;
+            frame2.data[offset] = 255;
+            frame2.data[offset + 1] = 255;
+            frame2.data[offset + 2] = 255;
+        }
+    }
+
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert!(!changes.is_empty(), "Should detect changes");
+
+    // Calculate bandwidth: only the changed region data should be sent
+    let region_bytes: usize = changes.iter().map(|c| c.data.len()).sum();
+
+    // The changed region is ~1% of the frame, so region data should be much smaller
+    assert!(
+        region_bytes < full_frame_bytes / 10,
+        "Region data ({} bytes) should be <10% of full frame ({} bytes)",
+        region_bytes,
+        full_frame_bytes,
+    );
+
+    // Verify savings are significant (>90%)
+    let savings_pct = 100.0 * (1.0 - region_bytes as f64 / full_frame_bytes as f64);
+    assert!(
+        savings_pct > 90.0,
+        "Bandwidth savings should be >90%, got {:.1}%",
+        savings_pct,
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_apply_updates_reconstructs_frame() -> Result<()> {
+    let detector = PCCDetector::default();
+
+    let w = 128u32;
+    let h = 64u32;
+    let buffer = FrameBuffer::new(w, h);
+
+    // Push initial keyframe (all black)
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: w,
+        height: h,
+        data: vec![0u8; (w * h * 3) as usize],
+    };
+    buffer.push_frame(frame1.clone()).await?;
+    buffer.next_frame().await?; // move to current_frame
+
+    // Create frame2 with a white pixel at (10, 5)
+    let mut frame2 = frame1.clone();
+    frame2.id = 2;
+    let pixel_offset = ((5 * w + 10) * 3) as usize;
+    frame2.data[pixel_offset] = 255;
+    frame2.data[pixel_offset + 1] = 255;
+    frame2.data[pixel_offset + 2] = 255;
+
+    // Detect changes and apply as updates
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+    assert!(!changes.is_empty(), "Should detect changes");
+
+    buffer.apply_updates(changes).await?;
+
+    // Verify the pixel was updated in the buffer's current frame
+    let current = buffer.current_frame().await;
+    assert!(current.is_some(), "Should have current frame after updates");
+    let current = current.unwrap();
+    assert_eq!(current.data[pixel_offset], 255, "R channel should be updated");
+    assert_eq!(current.data[pixel_offset + 1], 255, "G channel should be updated");
+    assert_eq!(current.data[pixel_offset + 2], 255, "B channel should be updated");
+
+    // Verify unchanged pixels remain black
+    assert_eq!(current.data[0], 0, "Unchanged pixels should remain 0");
+    assert_eq!(current.data[1], 0, "Unchanged pixels should remain 0");
+    assert_eq!(current.data[2], 0, "Unchanged pixels should remain 0");
+
+    Ok(())
 } 
