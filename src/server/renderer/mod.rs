@@ -1,9 +1,11 @@
 mod buffer;
+pub mod web;
 pub use buffer::FrameBuffer;
 
 use anyhow::Result;
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::Mutex, time};
+use tokio::{sync::Mutex as AsyncMutex, time};
+use std::sync::Mutex as SyncMutex;
 use tracing::{debug, error, info};
 
 pub struct Renderer {
@@ -12,8 +14,12 @@ pub struct Renderer {
     height: u32,
     fps: u32,
     frame_interval: Duration,
-    /// The current rendered frame data (RGB24)
-    current_output: Arc<Mutex<Vec<u8>>>,
+    /// The current rendered frame data (RGB24), for async consumers.
+    current_output: Arc<AsyncMutex<Vec<u8>>>,
+    /// A plain-mutex mirror of `current_output`, so the synchronous web
+    /// server (running on its own OS thread, outside the tokio runtime)
+    /// can read the latest frame without needing to block_on anything.
+    shared_snapshot: Arc<SyncMutex<Vec<u8>>>,
 }
 
 impl Renderer {
@@ -31,9 +37,23 @@ impl Renderer {
             width,
             height,
             fps,
-            frame_interval: Duration::from_secs(1) / fps,
-            current_output: Arc::new(Mutex::new(vec![0u8; frame_size])),
+            frame_interval: Duration::from_secs(1) / fps.max(1),
+            current_output: Arc::new(AsyncMutex::new(vec![0u8; frame_size])),
+            shared_snapshot: Arc::new(SyncMutex::new(vec![0u8; frame_size])),
         })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// A cheap, thread-safe snapshot handle for the web server.
+    pub fn snapshot_handle(&self) -> Arc<SyncMutex<Vec<u8>>> {
+        self.shared_snapshot.clone()
     }
 
     /// Start the render loop. Continuously pulls frames from the buffer
@@ -74,13 +94,33 @@ impl Renderer {
             output[..copy_len].copy_from_slice(&frame.data[..copy_len]);
         }
 
+        self.sync_snapshot(&output);
+
         debug!("Rendered frame {}: {}x{}", frame.id, frame.width, frame.height);
         Ok(())
+    }
+
+    fn sync_snapshot(&self, output: &[u8]) {
+        if let Ok(mut snapshot) = self.shared_snapshot.lock() {
+            if snapshot.len() != output.len() {
+                snapshot.resize(output.len(), 0);
+            }
+            snapshot.copy_from_slice(output);
+        }
     }
 
     /// Get a copy of the current rendered frame
     pub async fn get_current_frame(&self) -> Vec<u8> {
         self.current_output.lock().await.clone()
+    }
+
+    /// Push a freshly-reconstructed frame (e.g. from the network layer,
+    /// after applying partial updates) straight into the output buffers
+    /// without going through the buffer/render-loop timing.
+    pub async fn publish_frame(&self, data: Vec<u8>) {
+        let mut output = self.current_output.lock().await;
+        *output = data;
+        self.sync_snapshot(&output);
     }
 
     pub async fn shutdown(&self) -> Result<()> {

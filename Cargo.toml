@@ -52,6 +52,18 @@ thiserror = "1.0"
 # System info
 num_cpus = "1.16"
 
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Web viewer (MJPEG over plain HTTP, works from any browser incl. iPhone Safari)
+tiny_http = "0.12"
+
+# Native window viewer
+minifb = "0.27"
+
+# Relay session ids
+rand = "0.8"
+
 [profile.release]
 opt-level = 3
 lto = true
