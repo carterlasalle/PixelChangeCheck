@@ -6,20 +6,20 @@ use rcgen::generate_simple_self_signed;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    pub port: Option<u16>,
-    pub max_packet_size: usize,
-    pub target_bandwidth: usize,
+    /// How long a connection may sit idle before QUIC gives up on it.
+    /// Matters most over the internet, where a stalled/rebooted peer
+    /// should eventually free up resources instead of hanging forever.
     pub connection_timeout: Duration,
+    /// How often QUIC sends a protocol-level keep-alive. Helps hold NAT/
+    /// firewall UDP mappings open on top of the app-level keep-alives we
+    /// already send once per capture frame.
     pub keepalive_interval: Duration,
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            port: None,
-            max_packet_size: 1400, // Standard MTU size minus headers
-            target_bandwidth: 5_000_000, // 5MB/s
-            connection_timeout: Duration::from_secs(10),
+            connection_timeout: Duration::from_secs(30),
             keepalive_interval: Duration::from_secs(5),
         }
     }
@@ -73,4 +73,15 @@ impl NetworkConfig {
         server_crypto.alpn_protocols = vec![b"pcc".to_vec()];
         server_crypto
     }
-} 
+
+    /// Build the QUIC transport-level config (idle timeout, keep-alive)
+    /// shared by both client and server endpoints.
+    pub fn transport_config(&self) -> Arc<quinn::TransportConfig> {
+        let mut transport = quinn::TransportConfig::default();
+        if let Ok(idle_timeout) = quinn::IdleTimeout::try_from(self.connection_timeout) {
+            transport.max_idle_timeout(Some(idle_timeout));
+        }
+        transport.keep_alive_interval(Some(self.keepalive_interval));
+        Arc::new(transport)
+    }
+}

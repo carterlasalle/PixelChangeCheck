@@ -4,11 +4,6 @@ use tokio::{sync::Mutex, time};
 use tracing::{error, warn};
 use serde::{Deserialize, Serialize};
 
-// Retry configuration
-const MAX_RETRIES: u32 = 3;
-const BASE_BACKOFF: Duration = Duration::from_millis(100);
-const MAX_BACKOFF: Duration = Duration::from_secs(5);
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResilienceConfig {
     pub max_retries: u32,

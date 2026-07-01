@@ -69,7 +69,14 @@ impl FrameBuffer {
                 let start_y = update.y;
                 let width = update.width;
                 let height = update.height;
-                
+
+                if start_x + width > self.width || start_y + height > self.height {
+                    warn!(
+                        "Discarding out-of-bounds update at ({start_x},{start_y}) size {width}x{height}"
+                    );
+                    continue;
+                }
+
                 // Update pixel data
                 for y in 0..height {
                     let frame_offset = ((start_y + y) * self.width + start_x) as usize * 3;

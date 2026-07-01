@@ -1,70 +1,72 @@
-use crate::network::NetworkConfig;
-use crate::pcc::types::Frame;
+use crate::network::config::NetworkConfig;
+use crate::network::protocol::Message;
 use anyhow::{Context, Result};
-use quinn::{Endpoint, Connection};
-use tokio::sync::mpsc;
+use async_trait::async_trait;
+use quinn::{ClientConfig, Endpoint, RecvStream, SendStream, ServerConfig};
+use std::net::SocketAddr;
+use std::sync::Arc;
 
-pub struct QUICTransport {
-    endpoint: Endpoint,
-    config: NetworkConfig,
-    connection: Option<Connection>,
-    frame_tx: mpsc::Sender<Frame>,
-    frame_rx: mpsc::Receiver<Frame>,
+/// A bidirectional, message-framed connection to a peer. Implemented for
+/// direct QUIC connections and for TCP connections proxied through a relay
+/// server, so the rest of the app (capture/render loops) doesn't need to
+/// care which path frames are taking.
+#[async_trait]
+pub trait MessageTransport: Send {
+    async fn send(&mut self, msg: &Message) -> Result<()>;
+    async fn recv(&mut self) -> Result<Message>;
 }
 
-impl QUICTransport {
-    pub fn new(endpoint: Endpoint, config: NetworkConfig) -> Self {
-        let (frame_tx, frame_rx) = mpsc::channel(32); // Buffer size for frame queue
-        Self {
-            endpoint,
-            config,
-            connection: None,
-            frame_tx,
-            frame_rx,
-        }
+/// A single QUIC bidirectional stream, framed with our `Message` protocol.
+pub struct QuicTransport {
+    send: SendStream,
+    recv: RecvStream,
+}
+
+impl QuicTransport {
+    pub fn new(send: SendStream, recv: RecvStream) -> Self {
+        Self { send, recv }
+    }
+}
+
+#[async_trait]
+impl MessageTransport for QuicTransport {
+    async fn send(&mut self, msg: &Message) -> Result<()> {
+        msg.write_framed(&mut self.send).await
     }
 
-    pub async fn connect(&mut self) -> Result<()> {
-        let addr = format!("127.0.0.1:{}", self.config.port.unwrap_or(5800)).parse()?;
-        let connection = self.endpoint
-            .connect(addr, "localhost")?
-            .await
-            .context("Failed to establish connection")?;
-            
-        self.connection = Some(connection);
-        Ok(())
+    async fn recv(&mut self) -> Result<Message> {
+        Message::read_framed(&mut self.recv).await
     }
+}
 
-    pub async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
-        if let Some(conn) = &mut self.connection {
-            let encoded: Vec<u8> = frame.encode()?;
-            let (mut send, _) = conn.open_bi().await?;
-            send.write_all(&encoded).await?;
-            send.finish().await?;
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Not connected"))
-        }
-    }
+/// Build a QUIC client endpoint used to dial out to a sharer (or a relay).
+pub fn client_endpoint(config: &NetworkConfig) -> Result<Endpoint> {
+    let mut client_config = ClientConfig::new(Arc::new(config.client_crypto_config()));
+    client_config.transport_config(config.transport_config());
+    let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+    endpoint.set_default_client_config(client_config);
+    Ok(endpoint)
+}
 
-    pub async fn receive_frame(&mut self) -> Result<Frame> {
-        if let Some(conn) = &mut self.connection {
-            let (_, mut recv) = conn.accept_bi().await?;
-            let mut buf = vec![0u8; self.config.max_packet_size];
-            
-            let n = recv.read(&mut buf)
-                .await
-                .context("Failed to receive frame")?;
-            
-            let n = match n {
-                Some(size) => size,
-                None => return Err(anyhow::anyhow!("Connection closed")),
-            };
-            
-            buf.truncate(n);
-            Frame::decode(&buf).context("Failed to decode frame")
-        } else {
-            Err(anyhow::anyhow!("Not connected"))
-        }
-    }
-} 
+/// Build a QUIC server endpoint that viewers can connect to directly.
+pub fn server_endpoint(config: &NetworkConfig, bind_addr: SocketAddr) -> Result<Endpoint> {
+    let mut server_config = ServerConfig::with_crypto(Arc::new(config.server_crypto_config()));
+    server_config.transport_config(config.transport_config());
+    let endpoint = Endpoint::server(server_config, bind_addr)?;
+    Ok(endpoint)
+}
+
+/// Dial a sharer directly and open the single bi-directional stream used for
+/// the whole session.
+pub async fn connect_direct(config: &NetworkConfig, addr: SocketAddr) -> Result<QuicTransport> {
+    let endpoint = client_endpoint(config)?;
+    let connection = endpoint
+        .connect(addr, "localhost")?
+        .await
+        .context("Failed to establish QUIC connection")?;
+    let (send, recv) = connection
+        .open_bi()
+        .await
+        .context("Failed to open bidirectional stream")?;
+    Ok(QuicTransport::new(send, recv))
+}

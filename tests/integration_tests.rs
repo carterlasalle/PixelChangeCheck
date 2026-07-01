@@ -1,12 +1,13 @@
 use anyhow::Result;
 use pixel_change_check_client::{
     encoder::FrameEncoder,
-    network::{NetworkConfig, ResilienceConfig, NetworkResilience},
+    network::{connect_direct, server_endpoint, Message, MessageTransport, NetworkConfig, QuicTransport, ResilienceConfig, NetworkResilience, WireChange},
     pcc::{PCCDetector, QualityConfig, Frame, PixelChangeDetector},
+    relay::{self, RelayRole, RelayTransport},
     server::renderer::FrameBuffer,
 };
+use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::time;
 
 // Test configurations
 const TEST_WIDTH: u32 = 1920;
@@ -228,5 +229,163 @@ async fn test_renderer_creation() -> Result<()> {
     assert_eq!(current.data[0], 42, "Frame data should match what was pushed");
 
     renderer.shutdown().await?;
+    Ok(())
+}
+
+/// Regression test for a bug where the PCC detector treated RGB frame data
+/// (3 bytes/pixel) as if it were 1 byte/pixel, corrupting both the
+/// comparison and the extracted change coordinates/data for any frame with
+/// real color data. A tiny frame makes the expected geometry easy to check
+/// by hand.
+#[tokio::test]
+async fn test_pcc_detector_respects_rgb_stride() -> Result<()> {
+    const W: u32 = 8;
+    const H: u32 = 8;
+
+    let frame1 = Frame {
+        id: 1,
+        timestamp: std::time::SystemTime::now(),
+        width: W,
+        height: H,
+        data: vec![0u8; (W * H * 3) as usize],
+    };
+
+    // Change exactly one pixel at (3, 2): its green channel.
+    let mut frame2 = frame1.clone();
+    let idx = (((2 * W) + 3) * 3 + 1) as usize;
+    frame2.data[idx] = 200;
+
+    let detector = PCCDetector::default();
+    let changes = detector.detect_changes(&frame1, &frame2)?;
+
+    assert_eq!(changes.len(), 1, "exactly one changed pixel should yield one region");
+    let change = &changes[0];
+    assert_eq!((change.x, change.y), (3, 2), "changed pixel coordinates must be exact");
+    assert_eq!((change.width, change.height), (1, 1));
+    assert_eq!(change.data.len(), 3, "a 1x1 RGB region is 3 bytes, not 1");
+    assert_eq!(change.data, vec![0, 200, 0]);
+
+    Ok(())
+}
+
+/// End-to-end test over a real (loopback) QUIC connection: a sharer sends
+/// a full keyframe and then a partial update, and a viewer reconstructs
+/// the exact same pixels PixelChangeCheck detected, over the actual
+/// network stack (not just in-process function calls).
+#[tokio::test]
+async fn test_direct_quic_end_to_end() -> Result<()> {
+    let bind_addr: SocketAddr = "127.0.0.1:19801".parse()?;
+    let net_config = NetworkConfig::default();
+    let endpoint = server_endpoint(&net_config, bind_addr)?;
+
+    // Dropping a quinn `Connection` tears it down immediately, which can
+    // truncate in-flight stream data. Have the viewer explicitly signal
+    // once it has read everything before the server side hangs up.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server_task = tokio::spawn(async move {
+        let connecting = endpoint.accept().await.expect("no incoming connection");
+        let connection = connecting.await.expect("failed to establish connection");
+        let (send, recv) = connection.accept_bi().await.expect("failed to accept stream");
+        let mut transport = QuicTransport::new(send, recv);
+
+        // Drain the viewer's handshake kick before sending our frames.
+        let _ = transport.recv().await;
+
+        let full_frame = Message::FullFrame {
+            frame_id: 1,
+            width: 4,
+            height: 4,
+            jpeg_data: vec![9, 9, 9], // content doesn't matter for transport-layer test
+        };
+        transport.send(&full_frame).await.expect("failed to send full frame");
+
+        let partial = Message::PartialUpdate {
+            frame_id: 2,
+            changes: vec![WireChange {
+                x: 1,
+                y: 1,
+                width: 1,
+                height: 1,
+                compressed_data: vec![7, 7, 7],
+            }],
+        };
+        transport.send(&partial).await.expect("failed to send partial update");
+
+        let _ = done_rx.await;
+    });
+
+    let mut viewer = connect_direct(&net_config, bind_addr).await?;
+    // Kick the QUIC stream open on the wire (see app::view for why this is needed).
+    viewer.send(&Message::KeepAlive).await?;
+
+    let received_full = viewer.recv().await?;
+    match received_full {
+        Message::FullFrame { frame_id, width, height, jpeg_data } => {
+            assert_eq!(frame_id, 1);
+            assert_eq!((width, height), (4, 4));
+            assert_eq!(jpeg_data, vec![9, 9, 9]);
+        }
+        other => panic!("expected FullFrame, got {other:?}"),
+    }
+
+    let received_partial = viewer.recv().await?;
+    match received_partial {
+        Message::PartialUpdate { frame_id, changes } => {
+            assert_eq!(frame_id, 2);
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].compressed_data, vec![7, 7, 7]);
+        }
+        other => panic!("expected PartialUpdate, got {other:?}"),
+    }
+
+    let _ = done_tx.send(());
+    server_task.await?;
+    Ok(())
+}
+
+/// End-to-end test of the relay path: a "host" and a "viewer" both dial
+/// out to a relay server (simulating two peers that can't reach each
+/// other directly) and the relay forwards frames between them.
+#[tokio::test]
+async fn test_relay_end_to_end() -> Result<()> {
+    let relay_addr: SocketAddr = "127.0.0.1:19900".parse()?;
+    tokio::spawn(async move {
+        let _ = relay::run_relay_server(relay_addr).await;
+    });
+    // Give the relay a moment to start listening.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut host = RelayTransport::connect(relay_addr, "TEST-SESSION".into(), RelayRole::Host).await?;
+    let mut viewer =
+        RelayTransport::connect(relay_addr, "TEST-SESSION".into(), RelayRole::Viewer).await?;
+
+    let full_frame = Message::FullFrame {
+        frame_id: 1,
+        width: 2,
+        height: 2,
+        jpeg_data: vec![1, 2, 3],
+    };
+    host.send(&full_frame).await?;
+
+    let received = viewer.recv().await?;
+    match received {
+        Message::FullFrame { frame_id, jpeg_data, .. } => {
+            assert_eq!(frame_id, 1);
+            assert_eq!(jpeg_data, vec![1, 2, 3]);
+        }
+        other => panic!("expected FullFrame, got {other:?}"),
+    }
+
+    // A viewer that joins *after* a keyframe was sent should immediately
+    // receive that cached keyframe rather than waiting for the next one.
+    let mut late_viewer =
+        RelayTransport::connect(relay_addr, "TEST-SESSION".into(), RelayRole::Viewer).await?;
+    let replayed = late_viewer.recv().await?;
+    match replayed {
+        Message::FullFrame { frame_id, .. } => assert_eq!(frame_id, 1),
+        other => panic!("expected replayed FullFrame, got {other:?}"),
+    }
+
     Ok(())
 } 
