@@ -1,35 +1,27 @@
-use anyhow::{Context, Result};
 use crate::pcc::types::{Frame, FrameCapture, QualityConfig};
+use anyhow::{Context, Result};
 use screenshots::Screen;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tracing::{debug, info};
 
 pub struct ScreenCapture {
-    config: QualityConfig,
     screen: Screen,
     frame_counter: AtomicU64,
 }
 
 impl ScreenCapture {
     pub fn new() -> Result<Self> {
-        let screens = Screen::all()
-            .context("Failed to enumerate screens")?;
+        let screens = Screen::all().context("Failed to enumerate screens")?;
 
-        let screen = screens
-            .into_iter()
-            .next()
-            .context("No screens found")?;
+        let screen = screens.into_iter().next().context("No screens found")?;
 
         info!(
             "Screen capture initialized: {}x{} (scale: {})",
-            screen.display_info.width,
-            screen.display_info.height,
-            screen.display_info.scale_factor,
+            screen.display_info.width, screen.display_info.height, screen.display_info.scale_factor,
         );
 
         Ok(Self {
-            config: QualityConfig::default(),
             screen,
             frame_counter: AtomicU64::new(0),
         })
@@ -48,10 +40,7 @@ impl ScreenCapture {
 
 impl FrameCapture for ScreenCapture {
     fn capture_frame(&self) -> Result<Frame> {
-        let image = self
-            .screen
-            .capture()
-            .context("Failed to capture screen")?;
+        let image = self.screen.capture().context("Failed to capture screen")?;
 
         let width = image.width();
         let height = image.height();
@@ -84,20 +73,13 @@ impl FrameCapture for ScreenCapture {
                 target_fps: 30,
                 max_fps: 60,
                 quality: 0.8,
-                compression_level: 6,
             },
             QualityConfig {
                 target_fps: 60,
                 max_fps: 60,
                 quality: 1.0,
-                compression_level: 4,
             },
         ]
-    }
-
-    fn configure(&mut self, config: QualityConfig) -> Result<()> {
-        self.config = config;
-        Ok(())
     }
 }
 
@@ -180,10 +162,6 @@ impl FrameCapture for SyntheticCapture {
 
     fn supported_configs(&self) -> Vec<QualityConfig> {
         vec![QualityConfig::default()]
-    }
-
-    fn configure(&mut self, _config: QualityConfig) -> Result<()> {
-        Ok(())
     }
 }
 

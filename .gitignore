@@ -3,3 +3,6 @@
 
 build_output.txt
 
+.scc/*
+!.scc/intent.yaml
+.tmp/
