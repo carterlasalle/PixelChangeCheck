@@ -63,6 +63,20 @@ mis-parsed.
 - `--connect`/`--relay` accept hostnames as well as literal addresses, and
   conflicting modes are refused instead of silently preferring one.
 
+### Investigated, not shipped
+
+- **A video path for sustained motion** (H.264/HEVC/AV1/AV2). The codec
+  registry, its wire identifiers, and runtime capability probing are in
+  place, and `probe_local()` honestly reports that this build can produce
+  nothing. Both pure-Rust AV1 routes were tried and rejected on evidence:
+  rav1e 0.6.3 trips Rust's `unsafe` precondition checks with an
+  out-of-bounds access in its CDF context, at any frame size, and rav1e
+  0.6.6 pins `clap =4.0.32`, which cannot co-exist with this project's
+  `clap 4.5`. Shipping either would mean a crash or a native build
+  system on the capture path. The pipeline falls back to a lossless
+  snapshot, which is always correct. `src/codec/mod.rs` records this in
+  full.
+
 ### Removed
 
 - `Renderer`/`FrameBuffer`'s unused buffer and render loop, and the tests
