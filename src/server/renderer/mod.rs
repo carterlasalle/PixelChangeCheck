@@ -9,6 +9,7 @@ mod buffer;
 pub mod web;
 
 pub use buffer::SharedSurface;
+pub use web::SnapshotFn;
 
 #[cfg(test)]
 mod tests {

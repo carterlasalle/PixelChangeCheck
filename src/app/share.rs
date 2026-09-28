@@ -159,17 +159,8 @@ pub async fn run_share(args: ShareArgs) -> Result<()> {
     // gets a receiver of its own rather than a second encode path.
     let web_updates = tx.subscribe();
 
-    if let Some(web_addr) = &args.web {
-        start_web(
-            web_addr,
-            args.web_cert,
-            &surface,
-            web_updates,
-            &token,
-            &identity,
-        )
-        .await?;
-    }
+    // The web server starts once the published surface exists, so a
+    // joining browser can be caught up from it.
 
     // Capture the first frame *before* any listener exists. A viewer that
     // connected during that window would otherwise receive an empty
@@ -188,6 +179,35 @@ pub async fn run_share(args: ShareArgs) -> Result<()> {
         encoded: None,
     }));
     surface.publish(&first_frame, target_quality);
+
+    if let Some(web_addr) = &args.web {
+        // Only the sharer owns the authoritative surface, so only it can
+        // produce the snapshot a joining browser needs.
+        let source = published.clone();
+        let snapshot: web::SnapshotFn = Arc::new(move || {
+            let source = source.clone();
+            // The published state is already current; this runs on the web
+            // server's own thread, so it reads what the capture loop last
+            // published rather than reaching into its task.
+            match try_current_snapshot(&source) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    warn!("Could not build a web snapshot: {e}");
+                    Vec::new()
+                }
+            }
+        });
+        start_web(
+            web_addr,
+            args.web_cert,
+            &surface,
+            web_updates,
+            &token,
+            &identity,
+            snapshot,
+        )
+        .await?;
+    }
 
     let viewers: Arc<Mutex<HashMap<u64, ViewerStats>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_viewer_id = Arc::new(AtomicU64::new(1));
@@ -264,6 +284,7 @@ async fn start_web(
     updates: broadcast::Receiver<Arc<Vec<u8>>>,
     token: &SessionToken,
     identity: &crate::network::ServerIdentity,
+    snapshot: web::SnapshotFn,
 ) -> Result<()> {
     let addr = crate::network::resolve(web_addr)
         .await
@@ -287,6 +308,7 @@ async fn start_web(
     let surface = surface.clone();
     let token = token.clone();
     let fingerprint = identity.fingerprint.clone();
+    let snapshot_for_thread = snapshot.clone();
     let scheme = if tls.is_some() { "https" } else { "http" };
     // The web server owns its own current-thread runtime and blocks, so
     // bind here (to report the address and to fail fast) and hand the
@@ -301,7 +323,15 @@ async fn start_web(
         token.as_str()
     );
     std::thread::spawn(move || {
-        if let Err(e) = web::run_web_server(listener, surface, updates, token, fingerprint, tls) {
+        if let Err(e) = web::run_web_server(
+            listener,
+            surface,
+            updates,
+            token,
+            fingerprint,
+            tls,
+            snapshot_for_thread,
+        ) {
             error!("Web viewer stopped: {e}");
         }
     });
@@ -844,6 +874,29 @@ async fn capture_loop(
             tokio::time::sleep(frame_interval - elapsed).await;
         }
     }
+}
+
+/// The message sequence that brings a receiver up to the published
+/// surface, without blocking the caller.
+fn try_current_snapshot(published: &Shared) -> Result<Vec<Vec<u8>>> {
+    // `try_write` so this can run on the web server's thread: blocking that
+    // thread would stall every stream it is serving.
+    let mut state = published
+        .try_write()
+        .map_err(|_| anyhow::anyhow!("the capture loop holds the surface; try again"))?;
+    let width = state.snapshot.width;
+    let height = state.snapshot.height;
+    let rev = state.rev;
+    let epoch = state.epoch;
+    let rgb = state.snapshot.rgb.clone();
+    if state.encoded_for(rev).is_none() {
+        state.encoded = Some((
+            rev,
+            Arc::new(crate::encoder::encode_snapshot(width, height, &rgb)?.1),
+        ));
+    }
+    let data = state.encoded_for(rev).expect("just produced").clone();
+    snapshot_messages(width, height, &data, rev, epoch)
 }
 
 /// Publish the shared surface and build the message sequence for it. The
