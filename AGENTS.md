@@ -2788,6 +2788,24 @@ See `docs/adr/`:
 - `0001-lossless-authoritative-surface.md`
 - `0002-token-and-pin.md`
 - `0003-revision-and-epoch-sequencing.md`
+- `0004-end-to-end-encryption.md` (specified, not implemented)
+
+## Specified, not built
+
+`docs/spec/roadmap.md` holds the specification for the next six
+workstreams: telemetry, the NAT traversal ladder, end-to-end encryption,
+delivery, audio and audio sync, and one-command setup. Treat it as the
+definition of done for those, not as a description of existing code.
+
+Two findings that are not code and will otherwise be re-derived:
+
+- **The relay is TCP+TLS, and that is why it is not replaceable by
+  anything free.** It traverses corporate proxies that block UDP, which
+  is exactly where STUN/ICE would fail. Free reachability is a *first*
+  rung, not a replacement.
+- **A relay is cheap here specifically.** Measured at ~570 bytes/frame,
+  about 160 MB/hour/viewer, because the design sends deltas. A video
+  stream would not have that property.
 
 ## Open questions
 
