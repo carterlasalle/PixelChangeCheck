@@ -1,0 +1,32 @@
+id: bughunt-swallowed-loop-error
+snapshots:
+  ? |
+    for item in items:
+      try:
+        work(item)
+      except ValueError:
+        continue
+  : labels:
+    - source: |-
+        try:
+            work(item)
+          except ValueError:
+            continue
+      style: primary
+      start: 21
+      end: 74
+  ? |
+    while True:
+      try:
+        work()
+      except:
+        continue
+  : labels:
+    - source: |-
+        try:
+            work()
+          except:
+            continue
+      style: primary
+      start: 14
+      end: 52

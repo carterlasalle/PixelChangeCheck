@@ -24,8 +24,12 @@
 //! apply identically on every rung.
 
 use serde::Serialize;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
+
+pub mod peer;
+pub mod stun;
+pub mod upnp;
 
 /// Which rung a connection would take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -33,9 +37,9 @@ use std::time::{Duration, Instant};
 pub enum Rung {
     /// A routable IPv6 address: no NAT in the path at all.
     Ipv6Direct,
-    /// A port the router can open for us.
-    Upnp,
-    /// A reflexive address discovered by STUN.
+    /// The sharer's router was asked to forward a port for us.
+    PortMapping,
+    /// A reflexive address the peer was actually able to reach.
     StunIce,
     /// Nothing direct worked.
     Relay,
@@ -45,7 +49,7 @@ impl Rung {
     pub fn label(self) -> &'static str {
         match self {
             Rung::Ipv6Direct => "IPv6 direct",
-            Rung::Upnp => "UPnP/NAT-PMP",
+            Rung::PortMapping => "mapped port",
             Rung::StunIce => "STUN/ICE",
             Rung::Relay => "relay",
         }
@@ -72,6 +76,10 @@ pub struct Report {
     pub reflexive: Option<SocketAddr>,
     /// What a direct attempt would have to use.
     pub best_rung: Rung,
+    /// The port the router was asked to forward, when it agreed.
+    pub mapping: Option<upnp::Mapping>,
+    /// The result of asking the peer whether it can reach us.
+    pub peer_check: peer::CheckOutcome,
     pub notes: Vec<String>,
 }
 
@@ -108,6 +116,27 @@ pub fn render(report: &Report) -> String {
             .as_ref()
             .map(|a| a.to_string())
             .unwrap_or_else(|| "none".into())
+    ));
+    out.push_str(&format!(
+        "  mapped port            {}\n",
+        report
+            .mapping
+            .as_ref()
+            .map(|m| format!(
+                "{} -> {} for {}s",
+                m.internal_port, m.external_port, m.lifetime
+            ))
+            .unwrap_or_else(|| "none".into())
+    ));
+    out.push_str(&format!(
+        "  peer reachability     {}\n",
+        match report.peer_check {
+            peer::CheckOutcome::Reachable { rtt } => {
+                format!("reachable, {rtt:?} round trip")
+            }
+            peer::CheckOutcome::Unreachable => "unreachable from the peer".into(),
+            peer::CheckOutcome::NotAttempted => "not attempted (no candidate)".into(),
+        }
     ));
     out.push_str(&format!(
         "\nBest direct path: {}\n",
@@ -167,123 +196,6 @@ pub fn classify(ip: IpAddr) -> (&'static str, bool) {
 pub fn is_global_ipv6(ip: IpAddr) -> bool {
     matches!(classify(ip), (_, true))
 }
-
-/// The MAPPED-ADDRESS attribute, and the two address families it can
-/// carry. Named so the parser below is checked against the spec's numbers
-/// rather than against literals.
-const ATTR_MAPPED: u16 = 0x0001;
-const FAMILY_V4: u8 = 0x01;
-const FAMILY_V6: u8 = 0x02;
-
-/// Ask a STUN server (RFC 5389) what this host looks like from outside.
-///
-/// A binding request is a 20-byte header plus attributes; a response
-/// carries the reflexive address. Implemented directly rather than pulled
-/// in as a dependency because it is genuinely small and because the
-/// failure mode we care about -- "no answer" -- has to be distinguishable
-/// from "wrong answer".
-pub async fn stun_reflexive(server: SocketAddr, timeout: Duration) -> Result<SocketAddr, String> {
-    const BINDING_REQUEST: u8 = 0x0001;
-    const MAGIC_COOKIE: u32 = 0x2112_A442;
-
-    let mut request = Vec::with_capacity(20);
-    request.extend_from_slice(&BINDING_REQUEST.to_be_bytes());
-    request.extend_from_slice(&0u16.to_be_bytes()); // no attributes
-    request.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
-    request.extend_from_slice(&[0u8; 12]);
-
-    let bind_addr: SocketAddr = if server.is_ipv4() {
-        "0.0.0.0:0".parse().expect("literal")
-    } else {
-        "[::]:0".parse().expect("literal")
-    };
-    let socket = tokio::net::UdpSocket::bind(bind_addr)
-        .await
-        .map_err(|e| format!("could not open a UDP socket: {e}"))?;
-    socket
-        .connect(server)
-        .await
-        .map_err(|e| format!("could not reach the STUN server {server}: {e}"))?;
-    socket
-        .send(&request)
-        .await
-        .map_err(|e| format!("could not send a binding request: {e}"))?;
-
-    let deadline = Instant::now() + timeout;
-    let mut buf = [0u8; 512];
-    let n = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(format!(
-                "no answer from {server} within {}s (UDP may be blocked on this network)",
-                timeout.as_secs()
-            ));
-        }
-        match tokio::time::timeout(remaining, socket.recv(&mut buf)).await {
-            Ok(Ok(n)) => break n,
-            Ok(Err(e)) => return Err(format!("STUN read failed: {e}")),
-            Err(_) => continue,
-        }
-    };
-    parse_binding(&buf[..n])
-}
-
-fn parse_binding(packet: &[u8]) -> Result<SocketAddr, String> {
-    if packet.len() < 20 {
-        return Err(format!(
-            "STUN response is truncated: {} bytes",
-            packet.len()
-        ));
-    }
-    let message_type = u16::from_be_bytes([packet[0], packet[1]]);
-    if message_type != 0x0101 {
-        return Err(format!(
-            "expected a STUN binding success response, got type 0x{message_type:04x}"
-        ));
-    }
-    if u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]) != 0x2112_A442 {
-        return Err("STUN response has the wrong magic cookie".into());
-    }
-    let length = u16::from_be_bytes([packet[2], packet[3]]) as usize;
-    let end = (20 + length).min(packet.len());
-    let mut at = 20usize;
-    while at + 4 <= end {
-        let attr = u16::from_be_bytes([packet[at], packet[at + 1]]);
-        let len = u16::from_be_bytes([packet[at + 2], packet[at + 3]]) as usize;
-        let value_at = at + 4;
-        if value_at + len > packet.len() {
-            break;
-        }
-        if attr == ATTR_MAPPED && len >= 8 {
-            let family = packet[value_at + 1];
-            let port = u16::from_be_bytes([packet[value_at + 2], packet[value_at + 3]]);
-            let ip = match family {
-                FAMILY_V4 => {
-                    let o = &packet[value_at + 4..value_at + 8];
-                    IpAddr::V4(Ipv4Addr::new(o[0], o[1], o[2], o[3]))
-                }
-                FAMILY_V6 => {
-                    let mut octets = [0u8; 16];
-                    octets.copy_from_slice(&packet[value_at + 4..value_at + 20]);
-                    IpAddr::V6(Ipv6Addr::from(octets))
-                }
-                other => {
-                    return Err(format!(
-                        "STUN returned unknown address family 0x{other:02x}"
-                    ))
-                }
-            };
-            return Ok(SocketAddr::new(ip, port));
-        }
-        // Attributes are padded to a 4-byte boundary.
-        at = value_at + len.div_ceil(4) * 4;
-    }
-    Err("STUN response carried no MAPPED-ADDRESS attribute".into())
-}
-
-/// Public STUN servers. Google and Cloudflare both run the free RFC 5389
-/// service and neither requires a key for a plain binding request.
-pub const DEFAULT_STUN: &[&str] = &["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
 
 /// How hard to try for a direct path before falling back to a relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -358,14 +270,14 @@ pub async fn diagnose(stun: Option<SocketAddr>) -> Report {
     // STUN is the only rung we can actually test without a peer.
     let target = match stun {
         Some(s) => Some(s),
-        None => tokio::net::lookup_host(DEFAULT_STUN[0])
+        None => tokio::net::lookup_host(stun::DEFAULT_STUN[0])
             .await
             .ok()
             .and_then(|mut it| it.next()),
     };
     let mut reflexive = None;
     if let Some(server) = target {
-        match stun_reflexive(server, Duration::from_secs(3)).await {
+        match stun::reflexive_address(server, Duration::from_secs(3)).await {
             Ok(addr) => reflexive = Some(addr),
             Err(e) => notes.push(format!("STUN probe failed: {e}")),
         }
@@ -373,12 +285,49 @@ pub async fn diagnose(stun: Option<SocketAddr>) -> Report {
         notes.push("Could not resolve a public STUN server.".into());
     }
 
+    // Ask the router to forward the port we already listen on. This only
+    // helps the sharer, and it is deliberately asked for *after* STUN, so
+    // a machine that is already reachable does not open a hole it does
+    // not need.
+    let mapping = match upnp::map_port(0).await {
+        Ok(m) => m,
+        Err(e) => {
+            notes.push(format!("port mapping failed: {e}"));
+            None
+        }
+    };
+    if let Some(m) = &mapping {
+        notes.push(format!(
+            "The router was asked to forward UDP port {}; a viewer still has to reach \
+             that port, which is what the peer check decides.",
+            m.external_port
+        ));
+    }
+
+    // The decisive question: can the peer actually reach the candidate?
+    // A reflexive address is evidence, not proof, because symmetric NAT
+    // answers every destination with a different port.
+    let candidate = reflexive.map(|address| peer::Candidate { address });
+    let peer_check = match candidate {
+        Some(c) => {
+            let outcome = peer::probe_peer(Some(c)).await;
+            if matches!(outcome, peer::CheckOutcome::Unreachable) {
+                notes.push(
+                    "A STUN address was found but the peer could not reach it; this is what \
+                     symmetric NAT looks like."
+                        .into(),
+                );
+            }
+            outcome
+        }
+        None => peer::CheckOutcome::NotAttempted,
+    };
+
     let best_rung = if has_global_ipv6 {
         Rung::Ipv6Direct
-    } else if reflexive.is_some() {
-        // A reflexive address proves NAT is not symmetric for UDP; the ICE
-        // candidate check against a real peer is the remaining unknown, so
-        // this rung is reported as a strong hint rather than a guarantee.
+    } else if mapping.is_some() {
+        Rung::PortMapping
+    } else if matches!(peer_check, peer::CheckOutcome::Reachable { .. }) {
         Rung::StunIce
     } else {
         Rung::Relay
@@ -398,6 +347,8 @@ pub async fn diagnose(stun: Option<SocketAddr>) -> Report {
         has_default_route,
         reflexive,
         best_rung,
+        mapping,
+        peer_check,
         notes,
     }
 }
@@ -489,44 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn a_short_response_is_refused_rather_than_read_past() {
-        assert!(parse_binding(&[0u8; 4]).is_err());
-    }
-
-    #[test]
-    fn a_response_with_the_wrong_type_or_cookie_is_refused() {
-        let mut packet = vec![0u8; 20];
-        packet[0] = 0x01;
-        packet[1] = 0x02; // not a binding success
-        assert!(parse_binding(&packet).is_err());
-
-        let mut packet = vec![0u8; 20];
-        packet[0] = 0x01;
-        packet[1] = 0x01;
-        packet[4] = 0xde; // wrong cookie
-        let err = parse_binding(&packet).unwrap_err();
-        assert!(err.contains("magic cookie"), "unhelpful: {err}");
-    }
-
-    #[test]
-    fn a_well_formed_response_yields_the_reflexive_address() {
-        let mut packet = vec![0u8; 20];
-        packet[0] = 0x01;
-        packet[1] = 0x01;
-        packet[2..4].copy_from_slice(&8u16.to_be_bytes());
-        packet[4..8].copy_from_slice(&0x2112_A442u32.to_be_bytes());
-        packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x08]); // MAPPED-ADDRESS
-                                                             // reserved(1) + family(1) + port(2) + address(4) = 8 bytes.
-        packet.extend_from_slice(&[0x00, 0x01]); // reserved, family IPv4
-        packet.extend_from_slice(&3478u16.to_be_bytes());
-        packet.extend_from_slice(&[203, 0, 113, 9]);
-        assert_eq!(
-            parse_binding(&packet).unwrap(),
-            "203.0.113.9:3478".parse::<SocketAddr>().unwrap()
-        );
-    }
-
-    #[test]
     fn the_report_renders_every_section_even_when_empty() {
         let report = Report {
             addresses: vec![],
@@ -534,18 +447,27 @@ mod tests {
             has_default_route: false,
             reflexive: None,
             best_rung: Rung::Relay,
+            mapping: None,
+            peer_check: peer::CheckOutcome::NotAttempted,
             notes: vec![],
         };
         let text = render(&report);
-        for section in ["Local addresses", "Checks", "Best direct path", "Notes"] {
+        for section in [
+            "Local addresses",
+            "Checks",
+            "Best direct path",
+            "Notes",
+            "mapped port",
+            "peer reachability",
+        ] {
             assert!(text.contains(section), "missing {section} in:\n{text}");
         }
     }
 
     #[test]
     fn the_rung_ordering_is_the_intended_ladder() {
-        assert!(Rung::Ipv6Direct < Rung::Upnp);
-        assert!(Rung::Upnp < Rung::StunIce);
+        assert!(Rung::Ipv6Direct < Rung::PortMapping);
+        assert!(Rung::PortMapping < Rung::StunIce);
         assert!(Rung::StunIce < Rung::Relay);
         assert!(!Rung::Relay.is_direct());
     }

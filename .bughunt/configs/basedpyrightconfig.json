@@ -31,7 +31,7 @@
   ],
   "typeCheckingMode": "all",
   "failOnWarnings": true,
-  "pythonVersion": "3.14",
+  "pythonVersion": "3.12",
   "pythonPlatform": "All",
   "strictListInference": true,
   "strictSetInference": true,

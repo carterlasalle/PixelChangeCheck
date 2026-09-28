@@ -1,0 +1,9 @@
+id: bughunt-fillna-zero
+snapshots:
+  ? |
+    vals = series.fillna(0)
+  : labels:
+    - source: series.fillna(0)
+      style: primary
+      start: 7
+      end: 23

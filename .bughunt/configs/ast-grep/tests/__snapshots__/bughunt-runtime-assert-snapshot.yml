@@ -1,0 +1,9 @@
+id: bughunt-runtime-assert
+snapshots:
+  ? |
+    assert not errors
+  : labels:
+    - source: assert not errors
+      style: primary
+      start: 0
+      end: 17
