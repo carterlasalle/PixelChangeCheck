@@ -23,6 +23,7 @@ use crate::network::{
 };
 use crate::pcc::types::{rgb_len, Frame};
 use crate::pcc::{PlanLimits, Planner};
+use crate::reach::Rung;
 use crate::relay::{generate_session_code, RelayRole, RelayTransport};
 use crate::server::renderer::{web, SharedSurface};
 use anyhow::{Context, Result};
@@ -65,6 +66,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// worse.
 const MAX_CONSECUTIVE_LAGS: u32 = 3;
 
+#[derive(Clone)]
 pub struct ShareArgs {
     /// `host:port` to listen on for direct QUIC viewer connections.
     pub listen: Option<String>,
@@ -86,6 +88,10 @@ pub struct ShareArgs {
     pub quality: f32,
     pub token: SessionToken,
     pub repair_interval: Duration,
+    /// How hard to try for a direct path before the relay.
+    pub reach: crate::reach::ReachPolicy,
+    /// Capture and send audio alongside the screen.
+    pub audio: bool,
 }
 
 /// The authoritative surface, exactly as an up-to-date viewer sees it.
@@ -139,10 +145,10 @@ impl Pressure {
     }
 }
 
-pub async fn run_share(args: ShareArgs) -> Result<()> {
+pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics) -> Result<()> {
     let capture = CaptureSource::open(args.synthetic)?;
     let (width, height) = (capture.width(), capture.height());
-    let token = args.token;
+    let token = args.token.clone();
     info!("Sharing {width}x{height}");
 
     let identity = Arc::new(
@@ -179,6 +185,37 @@ pub async fn run_share(args: ShareArgs) -> Result<()> {
         encoded: None,
     }));
     surface.publish(&first_frame, target_quality);
+
+    // The ladder, decided once at startup rather than per session: probing
+    // on every viewer would add a STUN round trip to every join, and the
+    // answer does not change while the process runs.
+    let ladder = resolve_ladder(&args).await;
+    match (&ladder, &args.relay) {
+        (Some(rung), _) if rung.is_direct() => {
+            info!(
+                "Direct path available via {}; the relay stays a fallback",
+                rung.label()
+            );
+        }
+        (Some(Rung::Relay), Some(_)) => {
+            info!("No direct path found; using the relay");
+        }
+        (Some(Rung::Relay), None) => {
+            warn!(
+                "No direct path found and no --relay was given, so viewers must be on \
+                 this network or reach the port directly"
+            );
+        }
+        (None, Some(_)) => info!("Relay configured; skipping discovery as requested"),
+        (None, None) => {}
+        _ => {}
+    }
+    if args.reach == crate::reach::ReachPolicy::DirectOnly && args.relay.is_some() {
+        anyhow::bail!("--reach direct was given but --relay was also set; pick one");
+    }
+    if args.reach == crate::reach::ReachPolicy::DirectOnly && args.relay.is_none() {
+        anyhow::bail!("--reach direct needs a direct path this machine does not have");
+    }
 
     if let Some(web_addr) = &args.web {
         // Only the sharer owns the authoritative surface, so only it can
@@ -258,6 +295,7 @@ pub async fn run_share(args: ShareArgs) -> Result<()> {
     drop(keepalive);
 
     capture_loop(
+        metrics,
         first_frame,
         capture,
         Planner::default(),
@@ -691,6 +729,7 @@ pub(crate) fn peek_rev(bytes: &[u8]) -> Option<Rev> {
 
 #[allow(clippy::too_many_arguments)]
 async fn capture_loop(
+    metrics: crate::telemetry::SharedMetrics,
     mut first: Frame,
     capture: CaptureSource,
     planner: Planner,
@@ -731,6 +770,7 @@ async fn capture_loop(
         // diffing mismatched geometry.
         if surface_size != (frame.width, frame.height) {
             epoch += 1;
+            metrics.epoch_bumps.incr();
             warn!(
                 "Capture geometry changed to {}x{}; starting epoch {epoch}",
                 frame.width, frame.height
@@ -756,6 +796,8 @@ async fn capture_loop(
         // A mutable view of the shared surface; this copies only if a
         // joining viewer is holding the same allocation right now.
         let rgb: &mut Vec<u8> = Arc::make_mut(&mut reference);
+
+        let detect_start = Instant::now();
         let plan = planner.plan(
             rgb,
             width,
@@ -766,6 +808,15 @@ async fn capture_loop(
                 max_update_bytes: SEND_BUDGET,
             },
         )?;
+        metrics.detect.record_duration(detect_start.elapsed());
+        metrics.plan.record_duration(detect_start.elapsed());
+        metrics.frames_total.incr();
+        let total_pixels = (width as f64) * (height as f64);
+        metrics.changed_area_fraction.set(if total_pixels > 0.0 {
+            (plan.changed_pixels as f64 / total_pixels).min(1.0)
+        } else {
+            0.0
+        });
 
         let idle = plan.ops.is_empty() && plan.wire_len == 0;
         let wants_snapshot = !idle && plan.ops.is_empty();
@@ -782,18 +833,35 @@ async fn capture_loop(
             rev += 1;
             last_repair = Instant::now();
             pending_snapshot = false;
+            metrics.frames_snapshot_fallback.incr();
+            let encode_start = Instant::now();
             for msg in publish_snapshot(&published, &reference, width, height, rev, epoch).await? {
+                metrics.observe_message_bytes(msg.len());
+                metrics.bytes_snapshot.add(msg.len() as u64);
                 let _ = tx.send(Arc::new(msg));
             }
+            metrics.encode.record_duration(encode_start.elapsed());
         } else if !idle {
             rev += 1;
-            let msg = Message::PartialUpdate {
+            for op in &plan.ops {
+                let n = op.wire_len() as u64;
+                match op {
+                    crate::network::WireOp::Fill { .. } => metrics.bytes_fill.add(n),
+                    crate::network::WireOp::Copy { .. } => metrics.bytes_copy.add(n),
+                    crate::network::WireOp::Rect { .. } => metrics.bytes_patch.add(n),
+                }
+            }
+            let serialize_start = Instant::now();
+            let bytes = Message::PartialUpdate {
                 rev,
                 epoch,
                 ops: plan.ops,
-            };
-            match msg.encode() {
+            }
+            .encode();
+            match bytes {
                 Ok(bytes) => {
+                    metrics.observe_message_bytes(bytes.len());
+                    metrics.serialize.record_duration(serialize_start.elapsed());
                     let _ = tx.send(Arc::new(bytes));
                 }
                 Err(e) => {
@@ -814,7 +882,9 @@ async fn capture_loop(
             // Nothing changed. A keep-alive is nine bytes and it keeps NAT
             // mappings open; there is no reason to leave a viewer in the
             // dark about liveness.
+            metrics.frames_idle.incr();
             if let Ok(bytes) = (Message::KeepAlive { rev }).encode() {
+                metrics.bytes_keepalive.add(bytes.len() as u64);
                 let _ = tx.send(Arc::new(bytes));
             }
         }
@@ -870,10 +940,39 @@ async fn capture_loop(
         }
 
         let elapsed = loop_start.elapsed();
+        if elapsed > frame_interval {
+            metrics.loop_overruns.incr();
+        }
+        metrics.captured_frames.incr();
+        metrics
+            .effective_fps
+            .set(1.0 / frame_interval.as_secs_f64());
         if elapsed < frame_interval {
             tokio::time::sleep(frame_interval - elapsed).await;
         }
     }
+}
+
+/// Work out which rung of the ladder applies here, if discovery was asked
+/// for at all.
+async fn resolve_ladder(args: &ShareArgs) -> Option<Rung> {
+    if args.reach == crate::reach::ReachPolicy::RelayOnly {
+        return None;
+    }
+    let report = crate::reach::diagnose(None).await;
+    // A STUN probe that answers means NAT is not symmetric for UDP, which
+    // is the single most useful thing to know before reaching for a relay.
+    let rung = if report.has_global_ipv6 {
+        Rung::Ipv6Direct
+    } else if report.reflexive.is_some() {
+        Rung::StunIce
+    } else {
+        Rung::Relay
+    };
+    for note in &report.notes {
+        info!("reach: {note}");
+    }
+    Some(rung)
 }
 
 /// The message sequence that brings a receiver up to the published

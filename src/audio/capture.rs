@@ -9,6 +9,18 @@ use std::time::{Duration, Instant};
 
 use super::codec::{SAMPLES_PER_FRAME, SAMPLE_RATE};
 
+/// The default capture device's name, or `None` when the machine has none.
+///
+/// Exists so `pcc doctor` can answer "will audio work here?" without
+/// starting a stream, which on some platforms is the only way to find out
+/// whether a device exists at all.
+pub fn default_device_name() -> Option<String> {
+    let host = cpal::default_host();
+    host.default_input_device()
+        .and_then(|d| d.name().ok())
+        .map(|n| n.to_string())
+}
+
 /// A fixed-size PCM frame captured on the local monotonic clock.
 #[derive(Debug)]
 pub struct AudioFrame {

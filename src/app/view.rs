@@ -60,11 +60,12 @@ struct Surface {
 /// Entry point for `pcc view`. The network loop runs on a background
 /// tokio task; the window loop stays on the calling thread because GUI
 /// toolkits generally require the main thread on macOS.
-pub fn run_view(args: ViewArgs) -> Result<()> {
+pub fn run_view(args: ViewArgs, metrics: crate::telemetry::SharedMetrics) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     let surface: Arc<Mutex<Surface>> = Arc::new(Mutex::new(Surface::default()));
     let bg_surface = surface.clone();
+    let metrics_bg = metrics.clone();
     let attempts = Arc::new(Mutex::new(0usize));
     let bg_attempts = attempts.clone();
 
@@ -79,7 +80,7 @@ pub fn run_view(args: ViewArgs) -> Result<()> {
                 s.frame = None;
                 s.terminal = None;
             }
-            let outcome = receive_once(&view_args, &bg_surface).await;
+            let outcome = receive_once(&view_args, &bg_surface, &metrics_bg).await;
             *bg_attempts.lock() += 1;
             // Every exit path must release the presentation loop, or a
             // cleanly-ended session leaves it spinning forever.
@@ -129,7 +130,11 @@ pub fn run_view(args: ViewArgs) -> Result<()> {
     }
 }
 
-async fn receive_once(args: &ViewArgs, surface: &Arc<Mutex<Surface>>) -> Result<()> {
+async fn receive_once(
+    args: &ViewArgs,
+    surface: &Arc<Mutex<Surface>>,
+    metrics: &crate::telemetry::SharedMetrics,
+) -> Result<()> {
     anyhow::ensure!(
         !(args.connect.is_some() && args.relay.is_some()),
         "specify either --connect or --relay, not both"
@@ -190,6 +195,7 @@ async fn receive_once(args: &ViewArgs, surface: &Arc<Mutex<Surface>>) -> Result<
     };
 
     info!("Connected. Waiting for frames...");
+    let joined_at = std::time::Instant::now();
     let mut compositor = Compositor::new();
     let mut last_ack: Rev = 0;
 
@@ -215,10 +221,18 @@ async fn receive_once(args: &ViewArgs, surface: &Arc<Mutex<Surface>>) -> Result<
                 compositor.push_snapshot_chunk(index, &data)?;
             }
             Message::SnapshotCommit { rev, epoch } => {
+                let apply_start = std::time::Instant::now();
                 compositor.commit_snapshot(rev, epoch)?;
+                metrics.apply.record_duration(apply_start.elapsed());
                 if let Some((w, h)) = compositor.dimensions() {
                     let frame = Frame::new(rev, w, h, compositor.buffer().to_vec())?;
                     surface.lock().frame = Some(Arc::new(frame));
+                    // The gap between joining and this frame is the single
+                    // number a new user cares about most.
+                    metrics
+                        .first_exact_image
+                        .record_duration(joined_at.elapsed());
+                    metrics.first_paint.record_duration(joined_at.elapsed());
                     info!("Snapshot installed: {w}x{h} at revision {rev}");
                 }
                 if rev != last_ack {
@@ -227,8 +241,10 @@ async fn receive_once(args: &ViewArgs, surface: &Arc<Mutex<Surface>>) -> Result<
                 }
             }
             Message::PartialUpdate { rev, epoch, ops } => {
+                let apply_start = std::time::Instant::now();
                 match compositor.apply_ops(rev, epoch, &ops) {
                     Ok(()) => {
+                        metrics.apply.record_duration(apply_start.elapsed());
                         if let Some((w, h)) = compositor.dimensions() {
                             let frame = Frame::new(rev, w, h, compositor.buffer().to_vec())?;
                             surface.lock().frame = Some(Arc::new(frame));
@@ -240,6 +256,7 @@ async fn receive_once(args: &ViewArgs, surface: &Arc<Mutex<Surface>>) -> Result<
                     }
                     Err(ApplyError::Rejected(_)) => {
                         // The compositor knows precisely what is missing.
+                        metrics.repairs.incr();
                         transport.send(&Message::RequestKeyframe).await?;
                     }
                     Err(ApplyError::Invalid(e)) => {
