@@ -285,34 +285,55 @@ fn parse_binding(packet: &[u8]) -> Result<SocketAddr, String> {
 /// service and neither requires a key for a plain binding request.
 pub const DEFAULT_STUN: &[&str] = &["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
 
+/// How hard to try for a direct path before falling back to a relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ReachPolicy {
+    /// Try IPv6, then STUN, then the relay.
+    TryDirect,
+    /// Refuse the relay. Fails loudly rather than silently degrading.
+    DirectOnly,
+    /// Skip discovery entirely.
+    RelayOnly,
+}
+
+/// A single line a viewer can open or paste.
+///
+/// The token and the pin both travel in the URL, so neither is retyped and
+/// neither is mistyped. The pin is public and the token is the secret, so
+/// this is safe to put in a chat message to one person and no wider.
+pub fn pair_url(listen: &str, pin: &str, token: &str) -> String {
+    format!("pcc://view?connect={}&pin={}&token={}", listen, pin, token)
+}
+
+/// The `pcc doctor` output: reachability, plus whether audio is available.
+pub fn render_doctor(reach: &Report, audio: Option<String>) -> String {
+    let mut out = render(reach);
+    out.push_str("\nAudio\n");
+    match audio {
+        Some(device) => {
+            out.push_str(&format!("  capture device: {device}\n"));
+        }
+        None => out.push_str("  no capture device found; sharing still works, without audio\n"),
+    }
+    out
+}
+
+/// Probe for a usable capture device without starting a stream.
+pub async fn probe_audio() -> Option<String> {
+    crate::audio::capture::default_device_name()
+}
+
 /// Run the full diagnosis.
 pub async fn diagnose(stun: Option<SocketAddr>) -> Report {
     let mut addresses = Vec::new();
     let mut has_global_ipv6 = false;
 
-    // Binding port 0 is the portable way to ask the OS which local address
-    // it would use to reach the internet, without parsing routing tables.
-    if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-        if let Ok(a) = sock.local_addr() {
-            let (reason, usable) = classify(a.ip());
-            if a.ip().is_ipv6() && usable {
-                has_global_ipv6 = true;
-            }
-            addresses.push(LocalAddress {
-                address: a.to_string(),
-                reason,
-                usable,
-            });
-        }
-    }
-
-    // Enumerate interfaces so a report shows every route a peer could use.
-    for (idx, addr) in enumerate_interface_addresses().into_iter().enumerate() {
+    // Every address a peer could plausibly reach us on.
+    for addr in interface_addresses() {
         let (reason, usable) = classify(addr.ip());
         if addr.ip().is_ipv6() && usable {
             has_global_ipv6 = true;
         }
-        let _ = idx;
         addresses.push(LocalAddress {
             address: addr.to_string(),
             reason,
@@ -381,21 +402,33 @@ pub async fn diagnose(stun: Option<SocketAddr>) -> Report {
     }
 }
 
-/// Local addresses on every interface, via the OS.
+/// The addresses this host would actually source traffic from.
 ///
-/// Implemented with the standard library's link-local enumeration so the
-/// diagnosis does not need a dependency, and tolerant by design: a machine
-/// that will not enumerate still gets a report from the bound socket above.
-fn enumerate_interface_addresses() -> Vec<SocketAddr> {
-    // `UdpSocket::bind` to port 0 on each candidate family is the portable
-    // way to ask the OS which local addresses exist without a new crate.
-    let mut out = Vec::new();
-    for probe in ["0.0.0.0:0", "[::]:0"] {
-        if let Ok(sock) = std::net::UdpSocket::bind(probe) {
-            if let Ok(addr) = sock.local_addr() {
-                if !out.iter().any(|a: &SocketAddr| a.ip() == addr.ip()) {
-                    out.push(addr);
-                }
+/// Binding port 0 reports only `0.0.0.0`, which tells an operator nothing.
+/// Connecting the socket first makes the kernel choose a real source
+/// address, which is exactly the question: is there a global IPv6 here, or
+/// only a private IPv4?
+fn interface_addresses() -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = Vec::new();
+    let probes: [(&str, SocketAddr); 2] = [
+        // TEST-NET-3 and 2001:db8:: are guaranteed not to be a local
+        // network, so a route to them is a default route.
+        ("0.0.0.0:0", "203.0.113.1:9".parse().expect("literal")),
+        ("[::]:0", "[2001:db8::1]:9".parse().expect("literal")),
+    ];
+    for (bind, probe) in probes {
+        let Ok(sock) = std::net::UdpSocket::bind(bind) else {
+            continue;
+        };
+        if sock.connect(probe).is_err() {
+            continue;
+        }
+        if let Ok(addr) = sock.local_addr() {
+            if addr.ip().is_unspecified() {
+                continue;
+            }
+            if !out.iter().any(|a| a.ip() == addr.ip()) {
+                out.push(addr);
             }
         }
     }

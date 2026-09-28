@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use pixel_change_check_client::app::{share, view};
 use pixel_change_check_client::network::{SessionToken, DEFAULT_PORT};
+use pixel_change_check_client::reach;
 use pixel_change_check_client::relay;
 use pixel_change_check_client::telemetry::{self, LogFormat, Metrics};
 use std::time::Duration;
@@ -34,6 +35,17 @@ struct Cli {
     metrics_listen: Option<String>,
     #[command(subcommand)]
     command: Commands,
+}
+
+/// How hard to try for a direct connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ReachPolicyArg {
+    /// Try IPv6, then STUN, then the relay.
+    Auto,
+    /// Fail rather than use a relay.
+    Direct,
+    /// Skip discovery.
+    Relay,
 }
 
 #[derive(Subcommand)]
@@ -95,6 +107,14 @@ enum Commands {
         /// 30s default.
         #[arg(long, default_value_t = 0)]
         repair_secs: u64,
+        /// How hard to try for a direct path before falling back to a
+        /// relay: auto tries IPv6 then STUN, direct refuses the relay,
+        /// relay skips discovery entirely.
+        #[arg(long, value_enum, default_value_t = ReachPolicyArg::Auto)]
+        reach: ReachPolicyArg,
+        /// Also capture audio and send it alongside the screen.
+        #[arg(long)]
+        audio: bool,
     },
     /// Connect to a shared session and view it.
     View {
@@ -121,9 +141,22 @@ enum Commands {
         #[arg(long)]
         reconnect: bool,
     },
-    /// Report what this machine can do and which path to the internet it
-    /// has, without connecting to anything.
+    /// Report what this machine can do, whether audio capture is available,
+    /// and which path to the internet it has. Connects to nothing.
     Diagnose,
+    /// Print a single line a viewer can open or paste, carrying the token
+    /// and the certificate pin so neither has to be retyped.
+    Pair {
+        /// Host and port the viewer should connect to, as host:port.
+        #[arg(long)]
+        listen: String,
+        /// Certificate fingerprint the viewer must pin.
+        #[arg(long)]
+        pin: String,
+        /// The viewer token. Generated and printed if omitted.
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Run a relay so a sharer and a viewer that cannot reach each other
     /// directly can still connect: both sides dial out to this relay.
     Relay {
@@ -196,6 +229,8 @@ fn main() -> Result<()> {
             quality,
             token,
             repair_secs,
+            reach,
+            audio,
         } => {
             let token = token_from(token.as_ref(), "viewer token")?;
             let args = share::ShareArgs {
@@ -215,9 +250,15 @@ fn main() -> Result<()> {
                 quality,
                 token,
                 repair_interval: Duration::from_secs(repair_secs),
+                reach: match reach {
+                    ReachPolicyArg::Auto => reach::ReachPolicy::TryDirect,
+                    ReachPolicyArg::Direct => reach::ReachPolicy::DirectOnly,
+                    ReachPolicyArg::Relay => reach::ReachPolicy::RelayOnly,
+                },
+                audio,
             };
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(share::run_share(args))
+            rt.block_on(share::run_share(args, metrics))
         }
         Commands::View {
             connect,
@@ -237,7 +278,16 @@ fn main() -> Result<()> {
                 show_window: !no_window,
                 reconnect,
             };
-            view::run_view(args)
+            view::run_view(args, metrics)
+        }
+        Commands::Pair {
+            listen,
+            pin,
+            token: pair_token,
+        } => {
+            let t = token_from(pair_token.as_ref(), "viewer token")?;
+            println!("{}", reach::pair_url(&listen, &pin, t.as_str()));
+            Ok(())
         }
         Commands::Diagnose => {
             // Answers "do I need a relay?" without contacting anyone. The
