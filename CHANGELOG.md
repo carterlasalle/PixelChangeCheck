@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-The wire protocol is version 3. Viewers and sharers must be the same
+The wire protocol is version 4. Viewers and sharers must be the same
 build; a version mismatch is refused with a clear message rather than
-mis-parsed.
+mis-parsed. Version 4 adds the end-to-end encryption handshake.
 
 ### Correctness
 
@@ -100,8 +100,13 @@ provisioning script, a hardened systemd unit and firewall notes.
 
 X25519 plus ChaCha20-Poly1305 between sharer and viewer, keyed from the
 session token so there is no second credential. Independent keys per
-direction, monotonic frame counters, and the revision as AAD so a relay
+direction, monotonic frame counters, and the counter as AAD so a relay
 can neither replay, reorder nor substitute.
+
+Sealing is per viewer, after the shared broadcast, because each viewer
+has its own keys. There is no plaintext fallback: the handshake either
+produces a session or the connection is refused. The browser path is a
+separate trust domain and is not yet covered.
 
 ### Audio
 

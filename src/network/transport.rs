@@ -1,4 +1,5 @@
 use crate::network::config::{NetworkConfig, ServerIdentity};
+use crate::network::e2e;
 use crate::network::protocol::Message;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -22,6 +23,15 @@ pub trait MessageSink: Send {
 #[async_trait]
 pub trait MessageSource: Send {
     async fn recv(&mut self) -> Result<Message>;
+
+    /// Read one *envelope*, undecoded. A sealed transport needs the
+    /// ciphertext before it can decrypt, so this cannot go through
+    /// `recv`. The default is right for a plaintext transport, which is
+    /// the only kind this is a sensible default for.
+    async fn recv_raw(&mut self) -> Result<Vec<u8>> {
+        let msg = self.recv().await?;
+        Ok(msg.encode()?)
+    }
 }
 
 /// A bidirectional, message-framed connection to a peer. Implemented for
@@ -37,6 +47,74 @@ pub trait MessageTransport: Send {
     /// Split into independently owned halves, so a reader task can watch
     /// for viewer control messages while a writer task streams updates.
     fn split(self: Box<Self>) -> (Box<dyn MessageSink>, Box<dyn MessageSource>);
+}
+
+/// A sink that seals everything it writes.
+///
+/// The handshake travels in the clear by necessity -- it is what derives
+/// these keys -- and everything after it does not. The relay sits between
+/// the two peers and sees only frame sizes and timing.
+pub struct SealedSink {
+    inner: Box<dyn MessageSink>,
+    direction: e2e::Direction,
+}
+
+impl std::fmt::Debug for SealedSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealedSink")
+            .field("direction", &self.direction)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SealedSink {
+    /// Seal everything written through this sink.
+    pub fn new(inner: Box<dyn MessageSink>, direction: e2e::Direction) -> Self {
+        Self { inner, direction }
+    }
+}
+
+impl SealedSource {
+    /// Open everything read through this source.
+    pub fn new(inner: Box<dyn MessageSource>, direction: e2e::Direction) -> Self {
+        Self { inner, direction }
+    }
+}
+
+#[async_trait]
+impl MessageSink for SealedSink {
+    async fn send(&mut self, msg: &Message) -> Result<()> {
+        let encoded = msg.encode()?;
+        MessageSink::send_encoded(self, &encoded).await
+    }
+
+    async fn send_encoded(&mut self, bytes: &[u8]) -> Result<()> {
+        let sealed = self.direction.seal(bytes)?;
+        self.inner.send_encoded(&sealed).await
+    }
+}
+
+/// A source that opens everything it reads.
+pub struct SealedSource {
+    inner: Box<dyn MessageSource>,
+    direction: e2e::Direction,
+}
+
+impl std::fmt::Debug for SealedSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealedSource")
+            .field("direction", &self.direction)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl MessageSource for SealedSource {
+    async fn recv(&mut self) -> Result<Message> {
+        let frame = self.inner.recv_raw().await?;
+        let plain = self.direction.open(&frame)?;
+        Ok(Message::decode(&plain)?)
+    }
 }
 
 /// Write an already-encoded envelope to a stream: 4-byte little-endian
@@ -80,6 +158,12 @@ struct QuicSource {
 impl MessageSource for QuicSource {
     async fn recv(&mut self) -> Result<Message> {
         Message::read_framed(&mut self.recv).await
+    }
+
+    /// Read one envelope without decoding it, which is what a sealed
+    /// session needs: the ciphertext is not a `Message` yet.
+    async fn recv_raw(&mut self) -> Result<Vec<u8>> {
+        Message::read_envelope(&mut self.recv).await
     }
 }
 

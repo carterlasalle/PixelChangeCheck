@@ -101,10 +101,13 @@ impl Direction {
         n
     }
 
-    /// Seal one frame. `aad` is authenticated but not encrypted; the
-    /// revision goes in it so a relay cannot reorder or substitute frames
-    /// without the receiver noticing.
-    pub fn seal(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    /// Seal one frame.
+    ///
+    /// The counter travels in the clear as the frame header and is also
+    /// the AEAD's additional data. Tampering with it therefore changes the
+    /// AAD and fails the tag, so a relay cannot reorder or substitute
+    /// frames without the receiver noticing.
+    pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let counter = self.counter;
         self.counter = self
             .counter
@@ -117,7 +120,7 @@ impl Direction {
                 Nonce::from_slice(&raw),
                 Payload {
                     msg: plaintext,
-                    aad,
+                    aad: &aad_for(counter),
                 },
             )
             .map_err(|_| anyhow::anyhow!("frame encryption failed"))?;
@@ -132,7 +135,7 @@ impl Direction {
     }
 
     /// Open one frame, rejecting anything at or below what has been seen.
-    pub fn open(&mut self, framed: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    pub fn open(&mut self, framed: &[u8]) -> Result<Vec<u8>> {
         anyhow::ensure!(
             framed.len() > 4 + TAG_LEN,
             "sealed frame is too short: {} bytes",
@@ -151,7 +154,7 @@ impl Direction {
                 Nonce::from_slice(&raw),
                 Payload {
                     msg: &framed[4..],
-                    aad,
+                    aad: &aad_for(wire - 1),
                 },
             )
             .map_err(|_| anyhow::anyhow!("sealed frame failed authentication"))
@@ -183,6 +186,13 @@ impl std::fmt::Debug for Session {
 
 /// Domain separation, so the handshake and the frames cannot be confused.
 const TOKEN_DOMAIN: &[u8] = b"pcc/e2e/v1";
+
+/// The additional authenticated data for a frame: its counter. Derived
+/// here rather than passed in, so a caller cannot accidentally
+/// authenticate something the receiver will reconstruct differently.
+fn aad_for(counter: u64) -> [u8; 8] {
+    counter.to_le_bytes()
+}
 
 /// Derive two independent direction keys.
 ///
@@ -314,6 +324,56 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The sharer's side of the handshake: wait for the viewer's offer,
+/// answer it, and return the session.
+pub async fn host_handshake(
+    sink: &mut Box<dyn crate::network::MessageSink>,
+    source: &mut Box<dyn crate::network::MessageSource>,
+    keys: KeyPair,
+    token: &str,
+) -> Result<Session> {
+    let offer = match source.recv().await? {
+        crate::network::Message::E2eOffer { public, proof } => Offer { public, proof },
+        other => anyhow::bail!(
+            "expected an encryption offer, got {:?}; is the viewer the same build?",
+            other.rev()
+        ),
+    };
+    let reply = reply(&keys, token);
+    sink.send(&crate::network::Message::E2eReply {
+        public: reply.public,
+        proof: reply.proof,
+    })
+    .await?;
+    accept(&offer, keys, token)
+}
+
+/// The viewer's side: send the offer, take the reply, return the session.
+pub async fn viewer_handshake(
+    sink: &mut Box<dyn crate::network::MessageSink>,
+    source: &mut Box<dyn crate::network::MessageSource>,
+    keys: KeyPair,
+    token: &str,
+) -> Result<Session> {
+    let offer = offer(&keys, token);
+    sink.send(&crate::network::Message::E2eOffer {
+        public: offer.public,
+        proof: offer.proof,
+    })
+    .await?;
+    let reply = match source.recv().await? {
+        crate::network::Message::E2eReply { public, proof } => Reply { public, proof },
+        // The sharer refusing the token is the common case here, and its
+        // explanation is far more useful than "expected a reply".
+        crate::network::Message::Error(text) => anyhow::bail!("{text}"),
+        other => anyhow::bail!(
+            "expected an encryption reply, got {:?}; is the sharer the same build?",
+            other.rev()
+        ),
+    };
+    complete(keys, &reply, &offer.public, token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,22 +394,16 @@ mod tests {
     fn both_sides_derive_the_same_keys() {
         let (mut host, mut viewer) = handshake("TOKEN12345678");
         let plaintext = b"a frame of pixels";
-        let sealed = host.host_to_viewer.seal(plaintext, b"rev=1").unwrap();
-        assert_eq!(
-            viewer.host_to_viewer.open(&sealed, b"rev=1").unwrap(),
-            plaintext
-        );
+        let sealed = host.host_to_viewer.seal(plaintext).unwrap();
+        assert_eq!(viewer.host_to_viewer.open(&sealed).unwrap(), plaintext);
     }
 
     #[test]
     fn the_viewer_can_seal_control_traffic_the_host_opens() {
         let (mut host, mut viewer) = handshake("TOKEN12345678");
-        let sealed = viewer
-            .viewer_to_host
-            .seal(b"RequestKeyframe", b"c=1")
-            .unwrap();
+        let sealed = viewer.viewer_to_host.seal(b"RequestKeyframe").unwrap();
         assert_eq!(
-            host.viewer_to_host.open(&sealed, b"c=1").unwrap(),
+            host.viewer_to_host.open(&sealed).unwrap(),
             b"RequestKeyframe"
         );
     }
@@ -383,8 +437,8 @@ mod tests {
         assert_ne!(real.public, forged.public);
         let mut viewer = complete(viewer_keys, &forged, &offer.public, "TOKEN12345678").unwrap();
         let mut host = accept(&offer, host_keys, "TOKEN12345678").unwrap();
-        let sealed = host.host_to_viewer.seal(b"pixels", b"a").unwrap();
-        assert!(viewer.host_to_viewer.open(&sealed, b"a").is_err());
+        let sealed = host.host_to_viewer.seal(b"pixels").unwrap();
+        assert!(viewer.host_to_viewer.open(&sealed).is_err());
     }
 
     #[test]
@@ -392,26 +446,32 @@ mod tests {
         let (mut s, _) = handshake("TOKEN12345678");
         // If the directions shared a key, a frame sealed one way would
         // open the other. That must not be possible.
-        let sealed = s.host_to_viewer.seal(b"secret", b"aad").unwrap();
-        assert!(s.viewer_to_host.open(&sealed, b"aad").is_err());
+        let sealed = s.host_to_viewer.seal(b"secret").unwrap();
+        assert!(s.viewer_to_host.open(&sealed).is_err());
     }
 
     #[test]
-    fn a_frame_sealed_for_one_aad_does_not_open_for_another() {
+    fn a_tampered_counter_fails_authentication() {
+        // The counter is the AAD, so rewriting it in the clear header
+        // must break the tag rather than silently renumbering the frame.
         let mut d = Direction::new([7u8; 32]);
-        let sealed = d.seal(b"pixels", b"rev=1").unwrap();
+        let mut sealed = d.seal(b"pixels").unwrap();
+        sealed[3] = sealed[3].wrapping_add(1);
         let mut other = Direction::new([7u8; 32]);
-        let err = other.open(&sealed, b"rev=2").unwrap_err().to_string();
-        assert!(err.contains("authentication"), "unhelpful: {err}");
+        let err = other.open(&sealed).unwrap_err().to_string();
+        assert!(
+            err.contains("authentication") || err.contains("replay"),
+            "unhelpful: {err}"
+        );
     }
 
     #[test]
     fn a_replayed_frame_is_refused() {
         let mut sender = Direction::new([1u8; 32]);
         let mut receiver = Direction::new([1u8; 32]);
-        let sealed = sender.seal(b"pixels", b"aad").unwrap();
-        receiver.open(&sealed, b"aad").unwrap();
-        let err = receiver.open(&sealed, b"aad").unwrap_err().to_string();
+        let sealed = sender.seal(b"pixels").unwrap();
+        receiver.open(&sealed).unwrap();
+        let err = receiver.open(&sealed).unwrap_err().to_string();
         assert!(err.contains("replay"), "unhelpful: {err}");
     }
 
@@ -419,57 +479,55 @@ mod tests {
     fn an_out_of_order_frame_is_refused() {
         let mut sender = Direction::new([1u8; 32]);
         let mut receiver = Direction::new([1u8; 32]);
-        let first = sender.seal(b"one", b"aad").unwrap();
-        let second = sender.seal(b"two", b"aad").unwrap();
-        receiver.open(&second, b"aad").unwrap();
+        let first = sender.seal(b"one").unwrap();
+        let second = sender.seal(b"two").unwrap();
+        receiver.open(&second).unwrap();
         // A relay delivering the older frame afterwards must not succeed.
-        assert!(receiver.open(&first, b"aad").is_err());
+        assert!(receiver.open(&first).is_err());
     }
 
     #[test]
     fn a_wrong_key_cannot_open_a_frame() {
         let mut sender = Direction::new([1u8; 32]);
-        let sealed = sender.seal(b"pixels", b"aad").unwrap();
+        let sealed = sender.seal(b"pixels").unwrap();
         let mut wrong = Direction::new([2u8; 32]);
-        assert!(wrong.open(&sealed, b"aad").is_err());
+        assert!(wrong.open(&sealed).is_err());
     }
 
     #[test]
     fn a_tampered_ciphertext_is_refused() {
         let mut sender = Direction::new([1u8; 32]);
-        let mut sealed = sender.seal(b"pixels", b"aad").unwrap();
+        let mut sealed = sender.seal(b"pixels").unwrap();
         let n = sealed.len();
         sealed[n - 1] ^= 0xFF;
         let mut receiver = Direction::new([1u8; 32]);
-        assert!(receiver.open(&sealed, b"aad").is_err());
+        assert!(receiver.open(&sealed).is_err());
     }
 
     #[test]
     fn a_truncated_frame_is_refused_before_any_decryption() {
         let mut sender = Direction::new([1u8; 32]);
-        let sealed = sender.seal(b"pixels", b"aad").unwrap();
+        let sealed = sender.seal(b"pixels").unwrap();
         let mut receiver = Direction::new([1u8; 32]);
-        let err = receiver.open(&sealed[..8], b"aad").unwrap_err().to_string();
+        let err = receiver.open(&sealed[..8]).unwrap_err().to_string();
         assert!(err.contains("too short"), "unhelpful: {err}");
     }
 
     #[test]
     fn a_rekey_breaks_the_old_key_and_resets_the_counter() {
         let mut sender = Direction::new([1u8; 32]);
-        sender.seal(b"before", b"aad").unwrap();
+        sender.seal(b"before").unwrap();
         let mut receiver = Direction::new([1u8; 32]);
-        receiver
-            .open(&sender.seal(b"before", b"aad").unwrap(), b"aad")
-            .unwrap();
+        receiver.open(&sender.seal(b"before").unwrap()).unwrap();
 
         sender.rekey([9u8; 32]);
         receiver.rekey([9u8; 32]);
-        // After a rekey the counter starts again, so frame 1 is fine on the
-        // new key and impossible on the old one.
+        // After a rekey the counter starts again, so the first frame on
+        // the new key opens and the old key cannot read it.
         let mut old = Direction::new([1u8; 32]);
-        let sealed = sender.seal(b"after", b"aad").unwrap();
-        assert!(old.open(&sealed, b"aad").is_err());
-        assert_eq!(receiver.open(&sealed, b"aad").unwrap(), b"after");
+        let sealed = sender.seal(b"after").unwrap();
+        assert!(old.open(&sealed).is_err());
+        assert_eq!(receiver.open(&sealed).unwrap(), b"after");
     }
 
     #[test]

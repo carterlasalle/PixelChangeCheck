@@ -16,7 +16,7 @@ pub use protocol::{
 pub use resilience::{NetworkResilience, ResilienceConfig};
 pub use transport::{
     client_endpoint, connect_direct, resolve, server_endpoint, write_encoded, Connection,
-    MessageSink, MessageSource, MessageTransport, QuicTransport,
+    MessageSink, MessageSource, MessageTransport, QuicTransport, SealedSink, SealedSource,
 };
 pub use wire::{WireOp, OP_COPY, OP_FILL, OP_HEADER_BYTES, OP_RECT};
 

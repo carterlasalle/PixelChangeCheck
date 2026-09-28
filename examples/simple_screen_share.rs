@@ -199,7 +199,11 @@ fn apply_encoded(viewer: &mut Compositor, bytes: &[u8]) -> Result<()> {
         Message::SnapshotCommit { rev, epoch } => viewer.commit_snapshot(rev, epoch)?,
         Message::PartialUpdate { rev, epoch, ops } => viewer.apply_ops(rev, epoch, &ops)?,
         Message::KeepAlive { .. } | Message::Ack { .. } | Message::Bye | Message::Error(_) => {}
-        Message::QualityConfig(_) | Message::Hello { .. } | Message::RequestKeyframe => {}
+        Message::QualityConfig(_)
+        | Message::Hello { .. }
+        | Message::RequestKeyframe
+        | Message::E2eOffer { .. }
+        | Message::E2eReply { .. } => {}
     }
     Ok(())
 }

@@ -193,6 +193,12 @@ impl MessageSource for RelaySource {
     async fn recv(&mut self) -> Result<Message> {
         Message::read_framed(&mut self.stream).await
     }
+
+    /// Read one envelope without decoding it, which is what a sealed
+    /// session needs: the ciphertext is not a `Message` yet.
+    async fn recv_raw(&mut self) -> Result<Vec<u8>> {
+        Message::read_envelope(&mut self.stream).await
+    }
 }
 
 #[async_trait]

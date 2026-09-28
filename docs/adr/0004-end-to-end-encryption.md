@@ -38,6 +38,21 @@ session token that already exists.
 - Rekey on epoch change and on repair, so one long-lived key does not
   accumulate the whole session's risk.
 
+## Implementation notes
+
+- The handshake itself travels in cleartext, necessarily: it is what
+  derives the keys. Every frame after it is sealed. The relay therefore
+  sees one handshake and then only sizes and timing.
+- The AAD is the frame counter, which travels in the clear header.
+  Tampering with it changes the AAD and fails the tag, so a relay cannot
+  reorder or substitute without the receiver noticing.
+- Sealing happens **per viewer**, after the shared broadcast, because each
+  viewer has its own keys. The broadcast carries logical messages; the
+  per-viewer task seals on the way out.
+- The browser path is a separate trust domain and is not covered by this.
+  It has no per-browser key exchange yet; a browser that wants the same
+  guarantee needs WebCrypto in the handshake.
+
 ## Consequences
 
 - A relay operator learns: that a session exists, its packet sizes and

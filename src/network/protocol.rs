@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Bumped for the revision/epoch/handshake protocol. Old viewers are
 /// rejected with a version error rather than silently mis-parsed.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Largest encoded message body we will produce or accept.
 ///
@@ -49,6 +49,8 @@ pub const SNAPSHOT_CHUNK_BYTES: usize = 1024 * 1024;
 pub const MAX_SNAPSHOT_CHUNKS: u32 = 128;
 
 const K_HELLO: u8 = 0x01;
+const K_E2E_OFFER: u8 = 0x12;
+const K_E2E_REPLY: u8 = 0x13;
 const K_REQUEST_KEYFRAME: u8 = 0x02;
 const K_ACK: u8 = 0x03;
 const K_SNAPSHOT_BEGIN: u8 = 0x04;
@@ -79,6 +81,18 @@ pub enum Message {
     },
     /// Viewer -> sharer: "I hold nothing usable, send me a fresh snapshot."
     RequestKeyframe,
+    /// Viewer -> sharer: an ephemeral X25519 public key and proof of
+    /// holding the token. Everything after this is sealed, so the relay
+    /// sees only sizes and timing.
+    E2eOffer {
+        public: [u8; 32],
+        proof: [u8; 32],
+    },
+    /// Sharer -> viewer: the same, in reply.
+    E2eReply {
+        public: [u8; 32],
+        proof: [u8; 32],
+    },
     /// Viewer -> sharer: cumulative "I have fully applied up to this rev".
     Ack {
         rev: Rev,
@@ -177,6 +191,16 @@ impl Message {
                 out.extend_from_slice(bytes);
             }
             Message::RequestKeyframe => out.push(K_REQUEST_KEYFRAME),
+            Message::E2eOffer { public, proof } => {
+                out.push(K_E2E_OFFER);
+                out.extend_from_slice(public);
+                out.extend_from_slice(proof);
+            }
+            Message::E2eReply { public, proof } => {
+                out.push(K_E2E_REPLY);
+                out.extend_from_slice(public);
+                out.extend_from_slice(proof);
+            }
             Message::Ack { rev } => {
                 out.push(K_ACK);
                 out.extend_from_slice(&rev.to_le_bytes());
@@ -294,16 +318,22 @@ impl Message {
         Ok(())
     }
 
-    /// Read one length-prefixed message. The cap is applied to the prefix
-    /// *before* the buffer exists, so a hostile peer cannot make us
-    /// allocate a 4 GiB `Vec` by sending the bytes `FF FF FF FF`.
-    pub async fn read_framed<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+    /// Read one length-prefixed envelope, without decoding it. A sealed
+    /// session reads the ciphertext through here.
+    pub async fn read_envelope<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
         let mut len_buf = [0u8; 4];
         reader.read_exact(&mut len_buf).await?;
         let len = read_len_prefix(&len_buf)?;
         let mut payload = vec![0u8; len];
         reader.read_exact(&mut payload).await?;
-        Message::decode(&payload)
+        Ok(payload)
+    }
+
+    /// Read one length-prefixed message. The cap is applied to the prefix
+    /// *before* the buffer exists, so a hostile peer cannot make us
+    /// allocate a 4 GiB `Vec` by sending the bytes `FF FF FF FF`.
+    pub async fn read_framed<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+        Message::decode(&Message::read_envelope(reader).await?)
     }
 }
 
@@ -394,6 +424,20 @@ impl<'a> Cursor<'a> {
                 Message::Hello { token }
             }
             K_REQUEST_KEYFRAME => Message::RequestKeyframe,
+            K_E2E_OFFER => {
+                let mut public = [0u8; 32];
+                let mut proof = [0u8; 32];
+                public.copy_from_slice(self.take(32)?);
+                proof.copy_from_slice(self.take(32)?);
+                Message::E2eOffer { public, proof }
+            }
+            K_E2E_REPLY => {
+                let mut public = [0u8; 32];
+                let mut proof = [0u8; 32];
+                public.copy_from_slice(self.take(32)?);
+                proof.copy_from_slice(self.take(32)?);
+                Message::E2eReply { public, proof }
+            }
             K_ACK => Message::Ack { rev: self.u64()? },
             K_SNAPSHOT_BEGIN => {
                 let rev = self.u64()?;

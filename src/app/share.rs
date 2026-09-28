@@ -544,6 +544,35 @@ async fn serve_viewer(
     viewers.lock().insert(id, ViewerStats::default());
     info!("{label} authorized");
 
+    // End-to-end encryption. The token has already been checked, so the
+    // offer/reply exchange only has to prove both sides derived the same
+    // keys; after it every frame is sealed and the relay sees nothing but
+    // sizes and timing.
+    let host_keys = crate::network::e2e::KeyPair::generate();
+    let mut sink: Box<dyn crate::network::MessageSink> = sink;
+    let mut source: Box<dyn crate::network::MessageSource> = source;
+    let session = match crate::network::e2e::host_handshake(
+        &mut sink,
+        &mut source,
+        host_keys,
+        token.as_str(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("{label} encryption handshake failed: {e}");
+            return;
+        }
+    };
+    let mut sink: Box<dyn crate::network::MessageSink> = Box::new(crate::network::SealedSink::new(
+        sink,
+        session.host_to_viewer,
+    ));
+    let mut source: Box<dyn crate::network::MessageSource> = Box::new(
+        crate::network::SealedSource::new(source, session.viewer_to_host),
+    );
+
     let mut floor = match send_snapshot(&mut sink, &published).await {
         Ok(rev) => rev,
         Err(e) => {
