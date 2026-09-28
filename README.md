@@ -228,6 +228,15 @@ The viewer applies each transaction atomically against a single
 sequencing authority, and a `Copy` reads the surface as it was *before*
 the transaction -- which is what lets two regions swap in one update.
 
+## Roadmap
+
+`docs/spec/roadmap.md` specifies the next six workstreams — telemetry,
+NAT traversal, end-to-end encryption, delivery, audio, and one-command
+setup — each with its interface, its definition of done, and what it
+deliberately does not cover. Nothing in it is implemented yet.
+
+Decisions already taken live in `docs/adr/`.
+
 ## Known limitations
 
 - The browser path is plaintext unless you supply a certificate.
