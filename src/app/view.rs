@@ -10,7 +10,10 @@
 //! * a resize re-reads the surface dimensions, so a sharer that changes
 //!   geometry does not leave a viewer rendering into a stale buffer.
 
-use crate::network::{connect_direct, Message, MessageTransport, NetworkConfig, Rev, SessionToken};
+use crate::network::{
+    connect_direct, Message, MessageSink, MessageSource, MessageTransport, NetworkConfig, Rev,
+    SessionToken,
+};
 use crate::pcc::types::{Frame, BYTES_PER_PIXEL};
 use crate::pcc::{ApplyError, Compositor};
 use crate::relay::{RelayRole, RelayTransport};
@@ -130,6 +133,55 @@ pub fn run_view(args: ViewArgs, metrics: crate::telemetry::SharedMetrics) -> Res
     }
 }
 
+/// A sealed session presented as one transport.
+///
+/// It cannot be split a second time: the two directions share nothing,
+/// but each already owns its own counter, and splitting would hand the
+/// caller halves that are individually useless.
+struct SealedSession {
+    sink: Box<dyn MessageSink>,
+    source: Box<dyn MessageSource>,
+}
+
+#[async_trait::async_trait]
+impl MessageTransport for SealedSession {
+    async fn send(&mut self, msg: &Message) -> Result<()> {
+        self.sink.send(msg).await
+    }
+
+    async fn send_encoded(&mut self, bytes: &[u8]) -> Result<()> {
+        self.sink.send_encoded(bytes).await
+    }
+
+    async fn recv(&mut self) -> Result<Message> {
+        self.source.recv().await
+    }
+
+    fn split(self: Box<Self>) -> (Box<dyn MessageSink>, Box<dyn MessageSource>) {
+        unreachable!("a sealed session is used whole")
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageSink for Box<dyn MessageSink> {
+    async fn send(&mut self, msg: &Message) -> Result<()> {
+        (**self).send(msg).await
+    }
+    async fn send_encoded(&mut self, bytes: &[u8]) -> Result<()> {
+        (**self).send_encoded(bytes).await
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageSource for Box<dyn MessageSource> {
+    async fn recv(&mut self) -> Result<Message> {
+        (**self).recv().await
+    }
+    async fn recv_raw(&mut self) -> Result<Vec<u8>> {
+        (**self).recv_raw().await
+    }
+}
+
 async fn receive_once(
     args: &ViewArgs,
     surface: &Arc<Mutex<Surface>>,
@@ -140,7 +192,7 @@ async fn receive_once(
         "specify either --connect or --relay, not both"
     );
 
-    let mut transport: Box<dyn MessageTransport> = if let Some(target) = &args.connect {
+    let transport: Box<dyn MessageTransport> = if let Some(target) = &args.connect {
         let addr = crate::network::resolve(target)
             .await
             .with_context(|| format!("Could not resolve --connect {target}"))?;
@@ -193,6 +245,47 @@ async fn receive_once(
             "Specify either --connect <host:port> or --relay <host:port> --session <code>"
         );
     };
+
+    // End-to-end encryption, before anything else is exchanged. The token
+    // is the pre-shared key, so there is no second credential to manage
+    // and a wrong token fails here rather than after a snapshot has been
+    // decoded.
+    let keys = crate::network::e2e::KeyPair::generate();
+    let (mut sink, mut source) = transport.split();
+    let session = match crate::network::e2e::viewer_handshake(
+        &mut sink,
+        &mut source,
+        keys,
+        args.token.as_str(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            // A dropped stream loses the sharer's reason, because a
+            // QUIC send stream that is not finished is reset rather
+            // than flushed. The viewer knows what it just sent, so it
+            // says the useful thing: the token was refused.
+            let detail = e.to_string();
+            anyhow::bail!(
+                "the sharer refused this session (token, or a different build?): {detail}"
+            );
+        }
+    };
+    let mut transport: Box<dyn MessageTransport> = Box::new(SealedSession {
+        sink: Box::new(crate::network::SealedSink::new(
+            sink,
+            session.viewer_to_host,
+        )),
+        // The viewer *reads* what the host seals, so the source opens
+        // with the host-to-viewer direction. Getting this backwards fails
+        // authentication on the first frame, which is at least a loud
+        // failure rather than a silent downgrade.
+        source: Box::new(crate::network::SealedSource::new(
+            source,
+            session.host_to_viewer,
+        )),
+    });
 
     info!("Connected. Waiting for frames...");
     let joined_at = std::time::Instant::now();
@@ -281,7 +374,11 @@ async fn receive_once(
                 info!("Sharer ended the session");
                 return Ok(());
             }
-            Message::Hello { .. } | Message::Ack { .. } | Message::RequestKeyframe => {
+            Message::Hello { .. }
+            | Message::Ack { .. }
+            | Message::RequestKeyframe
+            | Message::E2eOffer { .. }
+            | Message::E2eReply { .. } => {
                 // Viewer-to-sharer messages; a sharer sending one back is
                 // a protocol error, not something to act on.
                 warn!("Ignoring a viewer-only message from the sharer");

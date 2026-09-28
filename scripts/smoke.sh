@@ -8,9 +8,11 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release/pixel-change-check-client"
-SHARE_PORT=15877
-WEB_PORT=15878
-RELAY_PORT=15901
+BASE_PORT=$(( 15000 + (RANDOM % 2000) * 3 ))
+SHARE_PORT=$BASE_PORT
+WEB_PORT=$(( BASE_PORT + 1 ))
+RELAY_PORT=$(( BASE_PORT + 2 ))
+METRICS_PORT=$(( BASE_PORT + 3 ))
 # A fresh log directory per run: a killed process can still hold an old
 # file open, and reading a stale fingerprint from it looks exactly like a
 # certificate mismatch.
@@ -126,7 +128,11 @@ check "viewer received frames" \
 $BIN view --connect "127.0.0.1:$SHARE_PORT" --token "WRONGTOKEN999" --pin "$PIN" --no-window \
   > "$LOG_DIR/badview.log" 2>&1
 check "a viewer with the wrong token is refused" \
-  "$(grep -qi 'unauthorized' "$LOG_DIR/badview.log" && echo 0 || echo 1)" "$(tail -3 "$LOG_DIR/badview.log")"
+  "$(grep -qiE 'unauthorized|refused this session' "$LOG_DIR/badview.log" && echo 0 || echo 1)" \
+  "$(tail -3 "$LOG_DIR/badview.log")"
+check "a viewer with the wrong token exits non-zero" \
+  "$($BIN view --connect "127.0.0.1:$SHARE_PORT" --token WRONGTOKEN999 --pin "$PIN" \
+      --no-window >/dev/null 2>&1 && echo 1 || echo 0)" "it exited zero"
 
 # A viewer pinned to the wrong certificate cannot connect at all.
 OTHER_PIN=$(printf '00%.0s' {1..32})
@@ -156,7 +162,6 @@ check "pcc pair emits one URL carrying the pin and token" \
 
 # A metrics scrape must answer on loopback and must not need a token: it is
 # deliberately a different surface from the session-authenticated web port.
-METRICS_PORT=15891
 $BIN share --synthetic --listen "127.0.0.1:$((SHARE_PORT + 1))" --no-web \
   --token "$TOKEN" --fps 5 --metrics-listen "127.0.0.1:$METRICS_PORT" \
   --stats-interval 1 > "$LOG_DIR/metrics.log" 2>&1 &
@@ -170,7 +175,8 @@ for family in pcc_frames_total pcc_bytes_total pcc_detect_seconds_bucket pcc_cha
     "$(echo "$SCRAPE" | grep -q "$family" && echo 0 || echo 1)" "missing $family"
 done
 check "stats interval prints a summary" \
-  "$(grep -q 'frames' "$LOG_DIR/metrics.log" && echo 0 || echo 1)" "$(tail -3 "$LOG_DIR/metrics.log")"
+  "$(grep -qE 'uptime [0-9]+s  frames [0-9]+' "$LOG_DIR/metrics.log" && echo 0 || echo 1)" \
+  "$(tail -3 "$LOG_DIR/metrics.log")"
 # `diagnose` prints its report to stdout and logs nothing, so JSON
 # rendering is probed on a path that actually emits events.
 JSON_LINE=$(timeout 2 $BIN share --synthetic --no-listen --no-web \

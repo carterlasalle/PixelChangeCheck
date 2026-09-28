@@ -26,16 +26,14 @@ Six workstreams, deliberately ordered by what unblocks the rest:
 |---|---|---|---|---|
 | 1 | Telemetry (logging + stats) | done | audio, reach, everything measurable | — |
 | 2 | NAT traversal ladder | done, IPv6 rung only | reaching non-LAN peers cheaply | 1 |
-| 3 | End-to-end encryption | crypto done, transport pending | trusting a third-party relay | 2 |
+| 3 | End-to-end encryption | done | trusting a third-party relay | 2 |
 | 4 | Delivery (release, image, deploy) | done | installing at all | — |
 | 5 | Audio + sync | module done, transport pending | — | 1 |
 | 6 | One-command setup | `pair` and `doctor` done | everything above | 1, 2, 4 |
 
-Two honest gaps, both because the upstream artefact is missing rather
-than because the work was skipped: the reachability ladder tests the
-IPv6 and STUN rungs but has no UPnP or ICE implementation, and
-end-to-end encryption is a tested crypto module that is not yet sealing
-the wire protocol in `serve_viewer`.
+Two honest gaps. The reachability ladder tests the IPv6 and STUN rungs
+but has no UPnP or ICE implementation. The audio module is built and
+tested but not transported, and the browser path is not sealed.
 
 **Telemetry first is not a preference.** Sync is the one workstream that
 cannot be built by eye: without per-frame age and per-viewer latency
@@ -224,11 +222,10 @@ dimensions and no session code; the round-trip cost is measured and
 acceptable; and a token mismatch fails the handshake with the same error
 as today.
 
-**Remaining:** the crypto is complete and tested — handshake, direction
-separation, replay and out-of-order rejection, wrong-token rejection,
-substitution resistance — but `serve_viewer` does not yet seal frames
-with it. That is the remaining piece, and it is a wiring change rather
-than new design.
+**Remaining: the browser path.** The native viewer and the relay path
+are sealed end to end. A browser has no per-browser key exchange yet; it
+would need WebCrypto in the handshake, which is a separate piece of work
+rather than a gap in this one.
 
 ### Risks
 
