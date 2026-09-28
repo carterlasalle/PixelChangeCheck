@@ -1,0 +1,9 @@
+id: bughunt-repo-relative-resource
+snapshots:
+  ? |
+    ref = Path(__file__).resolve().parent.parent.parent / "data" / "spectrum.csv"
+  : labels:
+    - source: Path(__file__).resolve().parent.parent.parent / "data"
+      style: primary
+      start: 6
+      end: 60

@@ -1,0 +1,16 @@
+id: bughunt-swallowed-exception
+snapshots:
+  ? |
+    try:
+      work()
+    except ValueError:
+      pass
+  : labels:
+    - source: |-
+        try:
+          work()
+        except ValueError:
+          pass
+      style: primary
+      start: 0
+      end: 39

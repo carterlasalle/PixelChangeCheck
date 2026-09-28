@@ -1,0 +1,32 @@
+id: bughunt-return-in-finally
+snapshots:
+  ? |
+    def f():
+      try:
+        work()
+      finally:
+        return 1
+  : labels:
+    - source: |-
+        try:
+            work()
+          finally:
+            return 1
+      style: primary
+      start: 11
+      end: 50
+  ? |
+    while True:
+      try:
+        work()
+      finally:
+        break
+  : labels:
+    - source: |-
+        try:
+            work()
+          finally:
+            break
+      style: primary
+      start: 14
+      end: 50

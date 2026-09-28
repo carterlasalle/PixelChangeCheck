@@ -1,0 +1,295 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "src/server/renderer/client.js",
+      "score": 399,
+      "findings": 96,
+      "tools": [
+        "eslint",
+        "lizard",
+        "oxlint"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 4,
+      "odc": {
+        "checking": 63,
+        "function": 27,
+        "algorithm": 4,
+        "timing/serialization": 2
+      },
+      "tool_count": 3
+    },
+    {
+      "path": "src/app/share.rs",
+      "score": 32,
+      "findings": 4,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 4,
+      "odc": {
+        "algorithm": 4
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/network/protocol.rs",
+      "score": 24,
+      "findings": 3,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 3,
+      "odc": {
+        "algorithm": 3
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/pcc/planner.rs",
+      "score": 24,
+      "findings": 3,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 3,
+      "odc": {
+        "algorithm": 3
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "deploy/relay/provision-oracle.sh",
+      "score": 19,
+      "findings": 4,
+      "tools": [
+        "shellcheck"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 0,
+      "odc": {
+        "function": 4
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/pcc/compositor.rs",
+      "score": 16,
+      "findings": 2,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 2,
+      "odc": {
+        "algorithm": 2
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/pcc/detector.rs",
+      "score": 16,
+      "findings": 2,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 2,
+      "odc": {
+        "algorithm": 2
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/reach/mod.rs",
+      "score": 16,
+      "findings": 2,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 2,
+      "odc": {
+        "algorithm": 2
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/relay.rs",
+      "score": 16,
+      "findings": 2,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 2,
+      "odc": {
+        "algorithm": 2
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "Dockerfile",
+      "score": 10,
+      "findings": 4,
+      "tools": [
+        "hadolint"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 0,
+      "odc": {
+        "function": 4
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/app/view.rs",
+      "score": 8,
+      "findings": 1,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 1,
+      "odc": {
+        "algorithm": 1
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/audio/playout.rs",
+      "score": 8,
+      "findings": 1,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 1,
+      "odc": {
+        "algorithm": 1
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/encoder/mod.rs",
+      "score": 8,
+      "findings": 1,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 1,
+      "odc": {
+        "algorithm": 1
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/main.rs",
+      "score": 8,
+      "findings": 1,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 1,
+      "odc": {
+        "algorithm": 1
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/network/wire.rs",
+      "score": 8,
+      "findings": 1,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 1,
+      "odc": {
+        "algorithm": 1
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/pcc/types.rs",
+      "score": 8,
+      "findings": 1,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 1,
+      "odc": {
+        "algorithm": 1
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/server/renderer/web.rs",
+      "score": 8,
+      "findings": 1,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 1,
+      "odc": {
+        "algorithm": 1
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "src/telemetry/mod.rs",
+      "score": 8,
+      "findings": 1,
+      "tools": [
+        "lizard"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 1,
+      "odc": {
+        "algorithm": 1
+      },
+      "tool_count": 1
+    },
+    {
+      "path": "scripts/smoke.sh",
+      "score": 1,
+      "findings": 1,
+      "tools": [
+        "shellcheck"
+      ],
+      "coverage_gaps": 0,
+      "branch_gaps": 0,
+      "complexity_signals": 0,
+      "odc": {
+        "function": 1
+      },
+      "tool_count": 1
+    }
+  ]
+}

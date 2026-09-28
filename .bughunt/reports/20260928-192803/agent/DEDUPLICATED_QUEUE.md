@@ -1,0 +1,393 @@
+# Deduplicated Logical Issue Queue
+
+Raw analyzer findings are preserved elsewhere. These 97 clusters group same-location/same-defect-class evidence for repair.
+
+- [ ] **1. `LOG-A72EE20B0879`** — `<unknown>:?` — **1 tool(s), 4 raw finding(s)** — `function`
+  - Tools: oxlint
+  - Codes: unicorn(prefer-add-event-listener)
+  - Representative: Prefer `addEventListener()` over their `on`-function counterparts.
+- [ ] **2. `LOG-ECCA81FB5D2F`** — `deploy/relay/provision-oracle.sh:182` — **1 tool(s), 4 raw finding(s)** — `function`
+  - Tools: shellcheck
+  - Codes: SC1009, SC1036, SC1072, SC1073
+  - Representative: Couldn't parse this command expansion. Fix to allow more checks.
+- [ ] **3. `LOG-639DD9159D43`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: scc
+  - Codes: BHGRAPH001
+  - Representative: scc index failed (exit 1): error: index: store: sqlite: database is locked
+
+- [ ] **4. `LOG-41EB8ABB7E49`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `build/package/merge`
+  - Tools: actionlint
+  - Codes: —
+  - Representative: [{"message":"label \"macos-13\" is unknown. available labels are \"windows-latest\", \"windows-latest-8-cores\", \"windows-2025\", \"windows-2025-vs2026\", \"windows-2022\", \"windows-11-arm\", \"ubuntu-slim\", \"ubuntu-latest\", \"ubuntu-latest-4-cores\", \"ubuntu-latest-8-cores\", \"ubuntu-latest-16-cores\", \"ubuntu-24.04\", \"ubuntu-24.04-arm\", \"ubuntu-22.04\", \"ubuntu-22.04-arm\", \"macos-latest\", \"macos-latest-xlarge\", \"macos-latest-large\", \"macos-26-intel\", \"macos-26-xlarge\", \"macos-26-large\", \"macos-26\", \"macos-15-intel\", \"macos-15-xlarge\", \"macos-15-large\", \"macos-15\", \"macos-14-xlarge\", \"macos-14-large\", \"macos-14\", \"self-hosted\", \"x64\", \"arm\", \"arm64\", \"linux\", \"macos\", \"windows\". if it is a custom label for self-hosted runner, set list of labels in actionlint.yaml config file","filepath":".github/workflows/release.yml","line":37,"column":43,"kind":"runner-label","snippet":"        os: [ubuntu-latest, macos-latest, macos-13, window
+- [ ] **5. `LOG-0FE078629057`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-unused-vars)
+  - Representative: Variable 'FMT_PNG' is declared but never used. Unused variables should start with a '_'.
+- [ ] **6. `LOG-E901AB1CA1A8`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: typescript(no-extraneous-class)
+  - Representative: Unexpected class with only a constructor.
+- [ ] **7. `LOG-EFB02C58DF16`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: oxlint
+  - Codes: unicorn(no-new-array)
+  - Representative: Do not use `new Array(singleArgument)`.
+- [ ] **8. `LOG-5ED659508B44`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: yamllint
+  - Codes: —
+  - Representative: 4:3       error    wrong indentation: expected 4 but found 2  (indentation)
+- [ ] **9. `LOG-86D5A35ADF36`** — `src/server/renderer/client.js:33` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-unused-vars
+  - Representative: 'FMT_PNG' is assigned a value but never used.
+- [ ] **10. `LOG-3F7A77B58455`** — `src/server/renderer/client.js:137` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'document' is not defined.
+- [ ] **11. `LOG-9F1EA8F72914`** — `src/server/renderer/client.js:188` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'Blob' is not defined.
+- [ ] **12. `LOG-9F62A19EA637`** — `src/server/renderer/client.js:189` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'createImageBitmap' is not defined.
+- [ ] **13. `LOG-A721392F56A5`** — `src/server/renderer/client.js:193` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'OffscreenCanvas' is not defined.
+- [ ] **14. `LOG-DC480FB6F1B9`** — `src/server/renderer/client.js:348` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'TextDecoder' is not defined.
+- [ ] **15. `LOG-B50A19C9E29B`** — `src/server/renderer/client.js:358` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'TextEncoder' is not defined.
+- [ ] **16. `LOG-B72F8255C3FC`** — `src/server/renderer/client.js:383` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'document' is not defined.
+- [ ] **17. `LOG-9DC68D0D02CF`** — `src/server/renderer/client.js:391` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'requestAnimationFrame' is not defined.
+- [ ] **18. `LOG-F23470A17EBB`** — `src/server/renderer/client.js:404` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'ImageData' is not defined.
+- [ ] **19. `LOG-BBDE635777ED`** — `src/server/renderer/client.js:412` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'document' is not defined.
+- [ ] **20. `LOG-46CA2747F142`** — `src/server/renderer/client.js:417` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'location' is not defined.
+- [ ] **21. `LOG-E893FF51A70B`** — `src/server/renderer/client.js:418` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'location' is not defined.
+- [ ] **22. `LOG-B198144335F3`** — `src/server/renderer/client.js:419` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'WebSocket' is not defined.
+- [ ] **23. `LOG-D49ACECDB80B`** — `src/server/renderer/client.js:435` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'setTimeout' is not defined.
+- [ ] **24. `LOG-5748160DA374`** — `src/server/renderer/client.js:441` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'WebSocket' is not defined.
+- [ ] **25. `LOG-55DC1527622E`** — `src/server/renderer/client.js:500` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'WebSocket' is not defined.
+- [ ] **26. `LOG-CB8FC8B896AD`** — `src/server/renderer/client.js:526` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: eslint
+  - Codes: no-undef
+  - Representative: 'window' is not defined.
+- [ ] **27. `LOG-287EBACD3890`** — `<unknown>:?` — **1 tool(s), 12 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-plusplus)
+  - Representative: Unary operator '++' used.
+- [ ] **28. `LOG-D3D0827DE67D`** — `<unknown>:?` — **1 tool(s), 11 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-implicit-globals)
+  - Representative: Unexpected function declaration in the global scope.
+- [ ] **29. `LOG-F3D6EEE59A8D`** — `<unknown>:?` — **1 tool(s), 3 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'WebSocket' is not defined.
+- [ ] **30. `LOG-B16FE6A0E1BE`** — `<unknown>:?` — **1 tool(s), 3 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'document' is not defined.
+- [ ] **31. `LOG-C1A6CF08EA6B`** — `<unknown>:?` — **1 tool(s), 3 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(sort-vars)
+  - Representative: Variable declarations should be sorted
+- [ ] **32. `LOG-8A7F92540E53`** — `<unknown>:?` — **1 tool(s), 2 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'location' is not defined.
+- [ ] **33. `LOG-868CF306BEE7`** — `<unknown>:?` — **1 tool(s), 2 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undefined)
+  - Representative: Unexpected use of `undefined`
+- [ ] **34. `LOG-D34358680A0E`** — `<unknown>:?` — **1 tool(s), 2 raw finding(s)** — `timing/serialization`
+  - Tools: oxlint
+  - Codes: oxc(no-async-await)
+  - Representative: async is not allowed
+- [ ] **35. `LOG-5E18C287B195`** — `<unknown>:?` — **1 tool(s), 2 raw finding(s)** — `function`
+  - Tools: oxlint
+  - Codes: unicorn(prefer-query-selector)
+  - Representative: Prefer `.querySelector()` over `.getElementById()`.
+- [ ] **36. `LOG-1FE6FD8BEC9F`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: oxlint
+  - Codes: import(unambiguous)
+  - Representative: This module could be mistakenly parsed as script instead of module
+- [ ] **37. `LOG-3FD941B71134`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(max-classes-per-file)
+  - Representative: File has too many classes (5). Maximum allowed is 1
+- [ ] **38. `LOG-5473A84D717D`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(max-lines)
+  - Representative: File has too many lines (538).
+- [ ] **39. `LOG-0967A8B70CB1`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-inline-comments)
+  - Representative: Unexpected comment inline with code
+- [ ] **40. `LOG-6CFA3B5D2B16`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'TextEncoder' is not defined.
+- [ ] **41. `LOG-B2C329ED5AF9`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'TextDecoder' is not defined.
+- [ ] **42. `LOG-31BFADADE5CE`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'requestAnimationFrame' is not defined.
+- [ ] **43. `LOG-787959BAB831`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'createImageBitmap' is not defined.
+- [ ] **44. `LOG-187368C295F7`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'OffscreenCanvas' is not defined.
+- [ ] **45. `LOG-7F79F8A02130`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'Blob' is not defined.
+- [ ] **46. `LOG-B8A975453906`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'ImageData' is not defined.
+- [ ] **47. `LOG-8AD69B56F7B2`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'setTimeout' is not defined.
+- [ ] **48. `LOG-EC82FBD3A4EB`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-undef)
+  - Representative: 'window' is not defined.
+- [ ] **49. `LOG-33E85038A516`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-bitwise)
+  - Representative: Unexpected use of `">>"`.
+- [ ] **50. `LOG-C380FDB0E001`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-bitwise)
+  - Representative: Unexpected use of `"|"`.
+- [ ] **51. `LOG-73BDA48F1BCC`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-bitwise)
+  - Representative: Unexpected use of `"<<"`.
+- [ ] **52. `LOG-9490FDBC1610`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-bitwise)
+  - Representative: Unexpected use of `"&"`.
+- [ ] **53. `LOG-F47D24B59A5E`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-use-before-define)
+  - Representative: 'join' was used before it was defined.
+- [ ] **54. `LOG-CF6D53EBBEFE`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: oxlint
+  - Codes: oxc(no-rest-spread-properties)
+  - Representative: object spread property are not allowed. 
+- [ ] **55. `LOG-CF5ADF6E0F8B`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-use-before-define)
+  - Representative: 'blit' was used before it was defined.
+- [ ] **56. `LOG-E5AD85E5CD56`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-use-before-define)
+  - Representative: 'fill' was used before it was defined.
+- [ ] **57. `LOG-15E0020DD9E6`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-use-before-define)
+  - Representative: 'blitRegion' was used before it was defined.
+- [ ] **58. `LOG-A43E2478DCE9`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(max-lines-per-function)
+  - Representative: The function `parseMessage` has too many lines (70). Maximum allowed is 50.
+- [ ] **59. `LOG-F44B041A2FEB`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(class-methods-use-this)
+  - Representative: Expected method `status` to have this.
+- [ ] **60. `LOG-18B6AE8DB053`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-use-before-define)
+  - Representative: 'encodeAck' was used before it was defined.
+- [ ] **61. `LOG-0E5EE434BFB5`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(max-lines-per-function)
+  - Representative: The async method `onMessage` has too many lines (52). Maximum allowed is 50.
+- [ ] **62. `LOG-FE3948B83B98`** — `<unknown>:?` — **1 tool(s), 1 raw finding(s)** — `checking`
+  - Tools: oxlint
+  - Codes: eslint(no-use-before-define)
+  - Representative: 'encodeRequestKeyframe' was used before it was defined.
+- [ ] **63. `LOG-6E1A21FCF578`** — `Dockerfile:5` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: hadolint
+  - Codes: DL3008
+  - Representative: Pin versions in apt get install. Instead of `apt-get install <package>` use `apt-get install <package>=<version>`
+- [ ] **64. `LOG-0BDF14E4A7AD`** — `Dockerfile:15` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: hadolint
+  - Codes: DL3008
+  - Representative: Pin versions in apt get install. Instead of `apt-get install <package>` use `apt-get install <package>=<version>`
+- [ ] **65. `LOG-33E15F6FA239`** — `Dockerfile:23` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: hadolint
+  - Codes: DL3025
+  - Representative: Use arguments JSON notation for CMD and ENTRYPOINT arguments
+- [ ] **66. `LOG-5D4BEA70B869`** — `src/app/share.rs:148` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: run_share has 137 NLOC, 23 CCN, 905 token, 2 PARAM, 170 length, 0 ND
+- [ ] **67. `LOG-F79B742E102A`** — `src/app/share.rs:319` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: start_web has 56 NLOC, 15 CCN, 387 token, 7 PARAM, 60 length, 0 ND
+- [ ] **68. `LOG-447F8A306B23`** — `src/app/share.rs:490` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: serve_viewer has 151 NLOC, 17 CCN, 980 token, 8 PARAM, 168 length, 0 ND
+- [ ] **69. `LOG-A1674970BB01`** — `src/app/share.rs:761` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: capture_loop has 184 NLOC, 36 CCN, 1406 token, 12 PARAM, 224 length, 0 ND
+- [ ] **70. `LOG-0D6A1B93E6FB`** — `src/app/view.rs:185` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: receive_once has 177 NLOC, 33 CCN, 1139 token, 3 PARAM, 204 length, 0 ND
+- [ ] **71. `LOG-3B84E81A1F82`** — `src/audio/playout.rs:116` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: start_default_output has 38 NLOC, 15 CCN, 264 token, 1 PARAM, 38 length, 0 ND
+- [ ] **72. `LOG-B81D2AC3F8EA`** — `src/encoder/mod.rs:81` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: decode_snapshot has 45 NLOC, 14 CCN, 277 token, 4 PARAM, 49 length, 0 ND
+- [ ] **73. `LOG-327D0093E0B9`** — `src/main.rs:184` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: main has 130 NLOC, 24 CCN, 803 token, 0 PARAM, 138 length, 0 ND
+- [ ] **74. `LOG-87F85DDF58F5`** — `src/network/protocol.rs:185` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: encode_body has 82 NLOC, 3 CCN, 647 token, 2 PARAM, 82 length, 0 ND
+- [ ] **75. `LOG-A0B7E2AE29F4`** — `src/network/protocol.rs:413` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: message has 105 NLOC, 43 CCN, 715 token, 1 PARAM, 108 length, 0 ND
+- [ ] **76. `LOG-45F24D61FA95`** — `src/network/protocol.rs:522` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: op has 56 NLOC, 15 CCN, 309 token, 1 PARAM, 59 length, 0 ND
+- [ ] **77. `LOG-67F5261FDBA2`** — `src/network/wire.rs:129` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: validate has 47 NLOC, 18 CCN, 281 token, 3 PARAM, 49 length, 0 ND
+- [ ] **78. `LOG-59BEAC3E40A4`** — `src/pcc/compositor.rs:212` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: apply_ops has 77 NLOC, 12 CCN, 573 token, 4 PARAM, 88 length, 0 ND
+- [ ] **79. `LOG-F12BC2764C5A`** — `src/pcc/compositor.rs:379` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: blit_region has 18 NLOC, 2 CCN, 139 token, 9 PARAM, 18 length, 0 ND
+- [ ] **80. `LOG-32D7BD4970ED`** — `src/pcc/detector.rs:147` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: detect has 119 NLOC, 28 CCN, 902 token, 5 PARAM, 139 length, 0 ND
+- [ ] **81. `LOG-936D295517AE`** — `src/pcc/detector.rs:465` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: verify_displacement_of has 34 NLOC, 11 CCN, 274 token, 10 PARAM, 36 length, 0 ND
+- [ ] **82. `LOG-0FDE4C494A07`** — `src/pcc/planner.rs:132` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: plan has 63 NLOC, 12 CCN, 416 token, 6 PARAM, 77 length, 0 ND
+- [ ] **83. `LOG-B5EC17B9F51C`** — `src/pcc/planner.rs:289` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: check_shift has 51 NLOC, 12 CCN, 414 token, 10 PARAM, 60 length, 0 ND
+- [ ] **84. `LOG-E64358027781`** — `src/pcc/planner.rs:365` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: subtract_region has 44 NLOC, 15 CCN, 358 token, 5 PARAM, 51 length, 0 ND
+- [ ] **85. `LOG-B5227D668788`** — `src/pcc/types.rs:203` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: capture_frame has 20 NLOC, 1 CCN, 48 token, 1 PARAM, 94 length, 0 ND
+- [ ] **86. `LOG-D9532358B1BE`** — `src/reach/mod.rs:138` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: classify has 24 NLOC, 17 CCN, 282 token, 1 PARAM, 27 length, 0 ND
+- [ ] **87. `LOG-3CEC7BD45F95`** — `src/reach/mod.rs:327` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: diagnose has 65 NLOC, 12 CCN, 334 token, 1 PARAM, 77 length, 0 ND
+- [ ] **88. `LOG-5F9E73E792AC`** — `src/relay.rs:119` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: connect has 45 NLOC, 14 CCN, 311 token, 6 PARAM, 51 length, 0 ND
+- [ ] **89. `LOG-24ED1B2DCC56`** — `src/relay.rs:293` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: handle_client has 147 NLOC, 27 CCN, 981 token, 8 PARAM, 174 length, 0 ND
+- [ ] **90. `LOG-FC829F31E150`** — `src/server/renderer/client.js:79` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: lz4Decode has 31 NLOC, 14 CCN, 315 token, 2 PARAM, 32 length, 0 ND
+- [ ] **91. `LOG-C3DCB0BC0E45`** — `src/server/renderer/client.js:212` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: applyOps has 31 NLOC, 18 CCN, 456 token, 3 PARAM, 35 length, 0 ND
+- [ ] **92. `LOG-8A804F094547`** — `src/server/renderer/client.js:267` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: blitRegion has 5 NLOC, 2 CCN, 61 token, 9 PARAM, 5 length, 0 ND
+- [ ] **93. `LOG-531E57E2854E`** — `src/server/renderer/client.js:286` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: parseMessage has 68 NLOC, 18 CCN, 715 token, 1 PARAM, 68 length, 0 ND
+- [ ] **94. `LOG-89738C427C81`** — `src/server/renderer/web.rs:456` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: read_ws_frame has 39 NLOC, 12 CCN, 302 token, 1 PARAM, 39 length, 0 ND
+- [ ] **95. `LOG-53259B1BF81A`** — `src/telemetry/mod.rs:160` — **1 tool(s), 1 raw finding(s)** — `algorithm`
+  - Tools: lizard
+  - Codes: LIZARD_CCN
+  - Representative: render_prometheus has 161 NLOC, 1 CCN, 603 token, 2 PARAM, 170 length, 0 ND
+- [ ] **96. `LOG-A6B4F3878720`** — `Dockerfile:21` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: hadolint
+  - Codes: DL3066
+  - Representative: Non-numeric user-id may not be resolvable by host system
+- [ ] **97. `LOG-9D00E8B3F4FD`** — `scripts/smoke.sh:182` — **1 tool(s), 1 raw finding(s)** — `function`
+  - Tools: shellcheck
+  - Codes: SC2086
+  - Representative: Double quote to prevent globbing and word splitting.
