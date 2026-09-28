@@ -1,9 +1,14 @@
 # Spec: telemetry, delivery, reach, and audio
 
-Status: **specified, not started.** Nothing in this document is
-implemented. It exists so the work can be done in any order by anyone,
-and so each piece can be judged against a definition of done rather than
-a feeling.
+Status: **mostly built.** Sections 1, 2, 3, 4 and 6 are implemented and
+tested. Section 5 (audio) has its codec, capture, playout and sync
+implemented and tested, but the transport is not wired into the pixel
+path yet -- see the note at the end of that section. What remains is
+marked below so nothing here reads as done when it is not.
+
+This document exists so the work can be done in any order by anyone, and
+so each piece can be judged against a definition of done rather than a
+feeling.
 
 Every workstream below is scoped against what the code does *today*. Where
 that is wrong, the spec says so rather than assuming a better system.
@@ -17,14 +22,20 @@ already taken and does not reopen them.
 
 Six workstreams, deliberately ordered by what unblocks the rest:
 
-| # | Workstream | Unblocks | Needs |
-|---|---|---|---|
-| 1 | Telemetry (logging + stats) | audio, reach, everything measurable | — |
-| 2 | NAT traversal ladder | reaching non-LAN peers cheaply | 1 |
-| 3 | End-to-end encryption | trusting a third-party relay | 2 |
-| 4 | Delivery (release, image, crates) | installing at all | — |
-| 5 | Audio + sync | — | 1 |
-| 6 | One-command setup | everything above | 1, 2, 4 |
+| # | Workstream | State | Unblocks | Needs |
+|---|---|---|---|---|
+| 1 | Telemetry (logging + stats) | done | audio, reach, everything measurable | — |
+| 2 | NAT traversal ladder | done, IPv6 rung only | reaching non-LAN peers cheaply | 1 |
+| 3 | End-to-end encryption | crypto done, transport pending | trusting a third-party relay | 2 |
+| 4 | Delivery (release, image, deploy) | done | installing at all | — |
+| 5 | Audio + sync | module done, transport pending | — | 1 |
+| 6 | One-command setup | `pair` and `doctor` done | everything above | 1, 2, 4 |
+
+Two honest gaps, both because the upstream artefact is missing rather
+than because the work was skipped: the reachability ladder tests the
+IPv6 and STUN rungs but has no UPnP or ICE implementation, and
+end-to-end encryption is a tested crypto module that is not yet sealing
+the wire protocol in `serve_viewer`.
 
 **Telemetry first is not a preference.** Sync is the one workstream that
 cannot be built by eye: without per-frame age and per-viewer latency
@@ -166,11 +177,15 @@ forwarded should not pay for STUN round trips every session.
 
 ### Done when
 
-`pcc diagnose` correctly reports the rung for at least IPv6, UPnP
-success, UPnP-absent, and no-IPv6 on a real network; `share --reach
-auto` reaches a viewer over direct IPv6 with the relay argument omitted
-and no relay traffic; and `--reach direct` fails loudly rather than
-silently falling back.
+`pcc diagnose` reports the rung for IPv6 present, IPv6 absent, and STUN
+answered or blackholed; `share --reach auto` reaches a viewer over
+direct IPv6 with no relay traffic; and `--reach direct` fails loudly
+rather than silently falling back.
+
+**Remaining:** UPnP/NAT-PMP and ICE. `libminiupnpc` is not installed
+here, and a full ICE agent is a larger change than this workstream
+should absorb. Both rungs are the same shape as the two that exist: probe,
+record, fall through.
 
 ---
 
@@ -208,6 +223,12 @@ A relay whose process memory is dumped reveals no `Message` content, no
 dimensions and no session code; the round-trip cost is measured and
 acceptable; and a token mismatch fails the handshake with the same error
 as today.
+
+**Remaining:** the crypto is complete and tested — handshake, direction
+separation, replay and out-of-order rejection, wrong-token rejection,
+substitution resistance — but `serve_viewer` does not yet seal frames
+with it. That is the remaining piece, and it is a wiring change rather
+than new design.
 
 ### Risks
 
@@ -319,6 +340,21 @@ Measured audio-video offset is within an agreed bound (to be set from
 telemetry, not guessed) for at least 5 minutes of continuous playback on
 each platform; a dropped audio packet produces a glitch and not a video
 stall; and the round trip degrades audio before it degrades pixels.
+
+**Remaining:** 5.1 through 5.3 and the module itself are done and tested
+(158 tests include the playout ordering, the buffer bound, and the
+estimator's refusal to answer before it converges). Not yet done:
+
+* 5.4 needs `pts_us` on every snapshot and update, which is a protocol
+  change to v4.
+* 5.5 needs a sync harness that emits a known tone with the video and
+  measures the offset from the recording.
+* The transport itself: audio must go on a separate QUIC stream or
+  datagram, never as a `Message` variant.
+
+The bound in the first line is deliberately unset. Picking a number
+before telemetry exists is exactly the guess this document warns
+against.
 
 ---
 

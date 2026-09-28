@@ -2717,7 +2717,12 @@ cargo fmt --all -- --check
 bash scripts/smoke.sh                    # end-to-end against the real binaries
 cargo run --release --example simple_screen_share
 cargo run --release --example benchmarks  # --release is required for meaningful numbers
+pcc diagnose                             # which reachability rung this machine has
 ```
+
+`cargo test` is 158 tests. `scripts/smoke.sh` is 25 end-to-end checks
+against the real binaries, including the metrics scrape and the JSON log
+format; it is the only check that exercises the CLI.
 
 ## Runtime and toolchain
 
@@ -2759,6 +2764,14 @@ must be changed together.
   a stale fingerprint from it is indistinguishable from a real mismatch.
 - A certificate pin is a **SHA-256 digest**, never a DER certificate.
   `hex_to_der` is the only correct way to turn a printed pin into bytes.
+- `main` creates one `Runtime` and passes `rt.handle()` to anything that
+  spawns. A `Runtime` that merely exists has not been *entered* on this
+  thread, so a bare `tokio::spawn` from `main` panics with "no reactor
+  running".
+- The reachability ladder resolves on a background task and must never
+  block startup. A STUN probe on a network that blackholes UDP takes its
+  full timeout, and holding the listeners closed for that long makes the
+  sharer look dead. This was a real regression the smoke test caught.
 
 ## Known agent anti-patterns
 

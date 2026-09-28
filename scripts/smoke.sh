@@ -140,6 +140,45 @@ fi
 kill $VIEW_PID 2>/dev/null
 wait $VIEW_PID 2>/dev/null
 
+# ------------------------------------------------------ observability
+echo "checking the observability surface"
+DIAG=$($BIN diagnose 2>&1)
+check "pcc diagnose prints a report" \
+  "$(echo "$DIAG" | grep -q 'Best direct path' && echo 0 || echo 1)" "$DIAG"
+check "pcc diagnose names the path it would take" \
+  "$(echo "$DIAG" | grep -qE 'IPv6 direct|UPnP|STUN|relay' && echo 0 || echo 1)" "$DIAG"
+
+PAIR=$($BIN pair --listen "192.0.2.10:$SHARE_PORT" --pin "$PIN" --token "$TOKEN" 2>&1)
+check "pcc pair emits one URL carrying the pin and token" \
+  "$(echo "$PAIR" | grep -q "connect=192.0.2.10:$SHARE_PORT" \
+     && echo "$PAIR" | grep -q "pin=$PIN" \
+     && echo "$PAIR" | grep -q "token=$TOKEN" && echo 0 || echo 1)" "$PAIR"
+
+# A metrics scrape must answer on loopback and must not need a token: it is
+# deliberately a different surface from the session-authenticated web port.
+METRICS_PORT=15891
+$BIN share --synthetic --listen "127.0.0.1:$((SHARE_PORT + 1))" --no-web \
+  --token "$TOKEN" --fps 5 --metrics-listen "127.0.0.1:$METRICS_PORT" \
+  --stats-interval 1 > "$LOG_DIR/metrics.log" 2>&1 &
+METRICS_PID=$!
+sleep 3
+SCRAPE=$(curl -s --max-time 5 "http://127.0.0.1:$METRICS_PORT/metrics")
+check "metrics endpoint answers without a token" \
+  "$(echo "$SCRAPE" | grep -q 'pcc_uptime_seconds' && echo 0 || echo 1)" "no scrape"
+for family in pcc_frames_total pcc_bytes_total pcc_detect_seconds_bucket pcc_changed_area_fraction; do
+  check "metrics expose $family" \
+    "$(echo "$SCRAPE" | grep -q "$family" && echo 0 || echo 1)" "missing $family"
+done
+check "stats interval prints a summary" \
+  "$(grep -q 'frames' "$LOG_DIR/metrics.log" && echo 0 || echo 1)" "$(tail -3 "$LOG_DIR/metrics.log")"
+# `diagnose` prints its report to stdout and logs nothing, so JSON
+# rendering is probed on a path that actually emits events.
+JSON_LINE=$(timeout 2 $BIN share --synthetic --no-listen --no-web \
+  --token "$TOKEN" --log-format json 2>&1 | head -1)
+check "logs render as json on request" \
+  "$(echo "$JSON_LINE" | grep -qE '^\{' && echo 0 || echo 1)" "got: $JSON_LINE"
+kill $METRICS_PID 2>/dev/null
+
 # ----------------------------------------------------------------- relay
 echo "starting a relay and a second sharer through it"
 $BIN relay --listen "127.0.0.1:$RELAY_PORT" --token "$TOKEN" > "$LOG_DIR/relay.log" 2>&1 &

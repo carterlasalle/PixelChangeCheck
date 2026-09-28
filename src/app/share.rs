@@ -186,35 +186,36 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
     }));
     surface.publish(&first_frame, target_quality);
 
-    // The ladder, decided once at startup rather than per session: probing
-    // on every viewer would add a STUN round trip to every join, and the
-    // answer does not change while the process runs.
-    let ladder = resolve_ladder(&args).await;
-    match (&ladder, &args.relay) {
-        (Some(rung), _) if rung.is_direct() => {
-            info!(
-                "Direct path available via {}; the relay stays a fallback",
-                rung.label()
-            );
-        }
-        (Some(Rung::Relay), Some(_)) => {
-            info!("No direct path found; using the relay");
-        }
-        (Some(Rung::Relay), None) => {
-            warn!(
-                "No direct path found and no --relay was given, so viewers must be on \
-                 this network or reach the port directly"
-            );
-        }
-        (None, Some(_)) => info!("Relay configured; skipping discovery as requested"),
-        (None, None) => {}
-        _ => {}
+    // The ladder is decided once at startup rather than per session:
+    // a STUN round trip on every viewer join is latency nobody asked for,
+    // and the answer does not change while the process runs.
+    //
+    // It also must not block startup. A STUN probe on a network that
+    // blackholes UDP takes its full timeout, and holding the listeners
+    // closed for that long would make the sharer look dead. So it runs on
+    // its own task and reports when it has an answer.
+    if args.reach != crate::reach::ReachPolicy::RelayOnly {
+        let reach = args.reach;
+        let relay_configured = args.relay.is_some();
+        tokio::spawn(async move {
+            let Some(rung) = resolve_ladder(reach).await else {
+                return;
+            };
+            match (rung.is_direct(), relay_configured) {
+                (true, _) => info!(
+                    "Direct path available via {}; the relay stays a fallback",
+                    rung.label()
+                ),
+                (false, true) => info!("No direct path found; using the relay"),
+                (false, false) => warn!(
+                    "No direct path found and no --relay was given, so viewers must be on \
+                     this network or reach the port directly"
+                ),
+            }
+        });
     }
     if args.reach == crate::reach::ReachPolicy::DirectOnly && args.relay.is_some() {
         anyhow::bail!("--reach direct was given but --relay was also set; pick one");
-    }
-    if args.reach == crate::reach::ReachPolicy::DirectOnly && args.relay.is_none() {
-        anyhow::bail!("--reach direct needs a direct path this machine does not have");
     }
 
     if let Some(web_addr) = &args.web {
@@ -953,10 +954,9 @@ async fn capture_loop(
     }
 }
 
-/// Work out which rung of the ladder applies here, if discovery was asked
-/// for at all.
-async fn resolve_ladder(args: &ShareArgs) -> Option<Rung> {
-    if args.reach == crate::reach::ReachPolicy::RelayOnly {
+/// Work out which rung of the ladder applies here.
+async fn resolve_ladder(policy: crate::reach::ReachPolicy) -> Option<Rung> {
+    if policy == crate::reach::ReachPolicy::RelayOnly {
         return None;
     }
     let report = crate::reach::diagnose(None).await;

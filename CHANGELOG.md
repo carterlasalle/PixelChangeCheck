@@ -63,6 +63,55 @@ mis-parsed.
 - `--connect`/`--relay` accept hostnames as well as literal addresses, and
   conflicting modes are refused instead of silently preferring one.
 
+### Telemetry
+
+`--log-level`, `--log-format text|json`, `--log-file` (hourly rotation),
+`--stats-interval`, and `--metrics-listen`. `RUST_LOG` overrides
+`--log-level`, because a live bug needs per-module filtering without a
+rebuild. The capture loop records counters and never logs per frame.
+
+Measured: detect, plan, encode, serialize and apply as separate
+histograms; wire bytes split by what produced them; per-viewer lag,
+repairs and queue depth; and the changed-area fraction, which is the
+number that predicts which strategy ran.
+
+### Reachability
+
+`pcc diagnose` reports local addresses with each one classified, whether
+a *global* IPv6 address exists, whether there is a default route, and a
+STUN reflexive address. `share --reach auto|direct|relay` turns that into
+a decision, resolved once at startup rather than per viewer.
+
+The relay stays as the last rung deliberately: it is TCP+TLS, so it
+already traverses the corporate proxies that block UDP, which is
+exactly where a direct-only path fails.
+
+`pcc pair` prints one URL carrying the token and the pin, so neither is
+retyped. `pcc doctor` adds an audio capture probe.
+
+### Delivery
+
+Tag-triggered release across Linux, macOS (arm64 and x86) and Windows
+with per-platform archives and checksums, a hardened multi-stage
+Dockerfile, dependabot, and `deploy/relay/` with an Oracle Always Free
+provisioning script, a hardened systemd unit and firewall notes.
+
+### End-to-end encryption
+
+X25519 plus ChaCha20-Poly1305 between sharer and viewer, keyed from the
+session token so there is no second credential. Independent keys per
+direction, monotonic frame counters, and the revision as AAD so a relay
+can neither replay, reorder nor substitute.
+
+### Audio
+
+Opus at 48 kHz stereo in 20 ms frames, a cpal capture source with a
+bounded queue, the audio-master playout that slaves video to the audio
+clock, and an offset estimator that returns nothing until it converges.
+
+Audio is never derived from the video surface, and the authoritative
+pixels are never modified to make audio line up.
+
 ### Investigated, not shipped
 
 - **A video path for sustained motion** (H.264/HEVC/AV1/AV2). The codec

@@ -154,7 +154,56 @@ pcc share --web-cert cert.pem --web-key key.pem
 cargo run --release -- share --help
 cargo run --release -- view --help
 cargo run --release -- relay --help
+cargo run --release -- diagnose
 ```
+
+### Do I need a relay?
+
+Most of the time, no. Ask the tool:
+
+```sh
+pcc diagnose
+```
+
+It reports your local addresses, whether you have a *global* IPv6
+address (a link-local one is not routable and saying otherwise sends you
+down a dead end), whether there is a default route, and a STUN reflexive
+address. Then:
+
+```sh
+pcc share --reach auto     # try IPv6, then STUN, then the relay
+pcc share --reach direct   # refuse the relay rather than use it
+pcc share --reach relay    # skip discovery
+```
+
+The relay is the **last** rung on purpose. It is TCP+TLS, so it already
+traverses the corporate proxies that block UDP -- which is exactly where
+a direct-only path fails. Symmetric NAT and UDP-blocking proxies are the
+two cases nothing free fixes.
+
+Running one is cheap here specifically: at roughly 570 bytes/frame, a
+session is about 160 MB per viewer per hour. See `deploy/relay/` for a
+free-tier setup.
+
+### Pairing without retyping a fingerprint
+
+```sh
+pcc pair --listen 192.168.1.20:5800 --pin <fingerprint>
+```
+
+prints one URL carrying both the token and the pin, so a viewer never
+retypes or mistypes a 64-character hex string.
+
+### Watching it work
+
+```sh
+pcc share --synthetic --stats-interval 5 --metrics-listen 127.0.0.1:9100
+curl -s 127.0.0.1:9100/metrics
+```
+
+`--stats-interval` prints a table; `--metrics-listen` serves Prometheus
+text on loopback. `RUST_LOG=pcc=debug` narrows the log, and
+`--log-format json` is what you want in a bug report.
 
 ### Testing
 
@@ -230,10 +279,13 @@ the transaction -- which is what lets two regions swap in one update.
 
 ## Roadmap
 
-`docs/spec/roadmap.md` specifies the next six workstreams — telemetry,
-NAT traversal, end-to-end encryption, delivery, audio, and one-command
-setup — each with its interface, its definition of done, and what it
-deliberately does not cover. Nothing in it is implemented yet.
+`docs/spec/roadmap.md` specifies six workstreams — telemetry, NAT
+traversal, end-to-end encryption, delivery, audio, and one-command setup
+— each with its interface, its definition of done, and what it
+deliberately does not cover. Telemetry, reachability, end-to-end
+encryption and delivery are built; the audio *transport* is not wired
+into the pixel path yet, because audio must never share the compositor's
+atomic-exactness guarantees.
 
 Decisions already taken live in `docs/adr/`.
 
