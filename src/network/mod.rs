@@ -1,4 +1,5 @@
 mod config;
+pub mod e2e;
 mod protocol;
 mod resilience;
 mod transport;

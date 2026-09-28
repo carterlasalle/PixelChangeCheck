@@ -1,0 +1,8 @@
+id: bughunt-runtime-assert
+valid:
+  - |
+      if not errors:
+          raise ValueError("validation failed")
+invalid:
+  - |
+      assert not errors

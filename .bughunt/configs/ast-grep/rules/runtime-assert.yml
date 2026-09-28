@@ -1,0 +1,7 @@
+id: bughunt-runtime-assert
+language: Python
+severity: warning
+message: Bare assert is removed under python -O; runtime validation must
+  raise explicitly instead of relying on assert.
+rule:
+  pattern: assert $COND

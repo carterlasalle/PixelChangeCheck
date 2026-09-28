@@ -1,0 +1,7 @@
+id: bughunt-repo-relative-resource
+valid:
+  - |
+      ref = importlib.resources.files("pkg") / "spectrum.csv"
+invalid:
+  - |
+      ref = Path(__file__).resolve().parent.parent.parent / "data" / "spectrum.csv"

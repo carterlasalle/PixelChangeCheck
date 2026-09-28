@@ -1,0 +1,17 @@
+{
+  "source_directories": [
+    "src"
+  ],
+  "taint_models_path": ".bughunt/configs/pysa",
+  "strict": true,
+  "python_version": "3.14.0",
+  "site_package_search_strategy": "pep561",
+  "exclude": [
+    ".*/\\.venv/.*",
+    ".*/\\.bughunt/runtime/.*",
+    ".*/\\.bughunt/cache/.*",
+    ".*/build/.*",
+    ".*/dist/.*",
+    ".*/mutants/.*"
+  ]
+}

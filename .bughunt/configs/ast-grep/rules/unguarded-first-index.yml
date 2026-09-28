@@ -1,0 +1,12 @@
+id: bughunt-unguarded-first-index
+language: Python
+severity: error
+message: First-element indexing of a fallible sequence with no emptiness
+  guard; splitlines()/readlines()/split() on empty output raises IndexError.
+rule:
+  any:
+    - pattern: $CALL.splitlines()[0]
+    - pattern: $CALL.readlines()[0]
+    - pattern: $CALL.split($SEP)[0]
+    - pattern: $CALL.splitlines()[-1]
+    - pattern: $CALL.readlines()[-1]

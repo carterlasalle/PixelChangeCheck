@@ -1,0 +1,11 @@
+.git
+.github
+.omp
+target
+.trace
+*.log
+.DS_Store
+.env
+.env.*
+!/README.md
+!/LICENSE

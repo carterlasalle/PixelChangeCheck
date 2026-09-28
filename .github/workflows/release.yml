@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Must match `rust-version` in Cargo.toml and CI's MSRV.
+  MSRV: "1.85.0"
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  BINARY: pixel-change-check-client
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - run: rustup toolchain install "$MSRV" --profile minimal
+      - run: rustup default "$MSRV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build release binary
+        run: cargo build --locked --release
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          archive="${BINARY}-${version}-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz"
+          mkdir -p package
+          cp "target/release/${BINARY}" package/
+          cp README.md package/
+          if [ -f LICENSE ]; then cp LICENSE package/; fi
+          tar -C package -czf "$archive" .
+          shasum -a 256 "$archive" > "$archive.sha256"
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          $archive = "$env:BINARY-$version-$env:RUNNER_OS-$env:RUNNER_ARCH.zip"
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item "target/release/$env:BINARY.exe" package/
+          Copy-Item README.md package/
+          if (Test-Path LICENSE) { Copy-Item LICENSE package/ }
+          Compress-Archive -Path package/* -DestinationPath $archive
+          (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower() + "  " + $archive | Set-Content "$archive.sha256" -NoNewline
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: |
+            *.tar.gz
+            *.zip
+            *.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ env.RELEASE_TAG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" release-assets/* \
+            --title "$VERSION" \
+            --generate-notes

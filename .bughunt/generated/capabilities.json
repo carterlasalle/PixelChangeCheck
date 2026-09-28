@@ -1,0 +1,335 @@
+{
+  "schema_version": 1,
+  "git_baseline": "997ee8460b10d944d315b0f649c7f8ccff7d481b",
+  "capabilities": {
+    "python": {
+      "id": "python",
+      "detected": false,
+      "evidence": [],
+      "detail": "Python source/stubs"
+    },
+    "github-actions": {
+      "id": "github-actions",
+      "detected": true,
+      "evidence": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml"
+      ],
+      "detail": "GitHub Actions workflows"
+    },
+    "shell": {
+      "id": "shell",
+      "detected": true,
+      "evidence": [
+        "deploy/relay/provision-oracle.sh",
+        "scripts/smoke.sh",
+        "setup.sh"
+      ],
+      "detail": "shell scripts or shell entrypoints"
+    },
+    "dotenv": {
+      "id": "dotenv",
+      "detected": true,
+      "evidence": [
+        ".omp/extensions/scc/index.ts (environment access)"
+      ],
+      "detail": "environment files"
+    },
+    "openapi": {
+      "id": "openapi",
+      "detected": false,
+      "evidence": [],
+      "detail": "OpenAPI/Swagger specifications"
+    },
+    "protobuf": {
+      "id": "protobuf",
+      "detected": false,
+      "evidence": [],
+      "detail": "Protocol Buffer schemas/workspace"
+    },
+    "sql": {
+      "id": "sql",
+      "detected": false,
+      "evidence": [],
+      "detail": "SQL source"
+    },
+    "postgres-migrations": {
+      "id": "postgres-migrations",
+      "detected": false,
+      "evidence": [],
+      "detail": "PostgreSQL migration SQL"
+    },
+    "docker": {
+      "id": "docker",
+      "detected": true,
+      "evidence": [
+        "Dockerfile"
+      ],
+      "detail": "Dockerfiles"
+    },
+    "terraform": {
+      "id": "terraform",
+      "detected": false,
+      "evidence": [],
+      "detail": "Terraform configuration"
+    },
+    "go": {
+      "id": "go",
+      "detected": false,
+      "evidence": [],
+      "detail": "Go source/module"
+    },
+    "rust": {
+      "id": "rust",
+      "detected": true,
+      "evidence": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "benches/benchmarks.rs",
+        "examples/simple_screen_share.rs",
+        "src/app/mod.rs",
+        "src/app/share.rs",
+        "src/app/view.rs",
+        "src/audio/capture.rs",
+        "src/audio/codec.rs",
+        "src/audio/mod.rs",
+        "src/audio/playout.rs",
+        "src/audio/sync.rs",
+        "src/capture/mod.rs",
+        "src/codec/mod.rs",
+        "src/encoder/mod.rs",
+        "src/lib.rs",
+        "src/main.rs",
+        "src/network/config.rs",
+        "src/network/e2e.rs",
+        "src/network/mod.rs",
+        "src/network/protocol.rs",
+        "src/network/resilience.rs",
+        "src/network/transport.rs",
+        "src/network/wire.rs",
+        "src/pcc/compositor.rs",
+        "src/pcc/detector.rs",
+        "src/pcc/mod.rs",
+        "src/pcc/planner.rs",
+        "src/pcc/types.rs",
+        "src/reach/mod.rs",
+        "src/relay.rs",
+        "src/server/mod.rs",
+        "src/server/renderer/buffer.rs",
+        "src/server/renderer/mod.rs",
+        "src/server/renderer/web.rs",
+        "src/telemetry/logging.rs",
+        "src/telemetry/metrics.rs",
+        "src/telemetry/mod.rs",
+        "tests/replication.rs",
+        "tests/transport.rs"
+      ],
+      "detail": "Rust crate/source"
+    },
+    "cpp": {
+      "id": "cpp",
+      "detected": false,
+      "evidence": [],
+      "detail": "C/C++/Objective-C source"
+    },
+    "cpp-compile-db": {
+      "id": "cpp-compile-db",
+      "detected": false,
+      "evidence": [],
+      "detail": "C/C++ compilation database"
+    },
+    "php": {
+      "id": "php",
+      "detected": false,
+      "evidence": [],
+      "detail": "PHP source/project"
+    },
+    "javascript-typescript": {
+      "id": "javascript-typescript",
+      "detected": true,
+      "evidence": [
+        ".omp/extensions/scc/index.ts",
+        ".omp/extensions/scc/package.json",
+        ".omp/extensions/scc/update-check.ts",
+        "src/server/renderer/client.js"
+      ],
+      "detail": "JavaScript/TypeScript project/source"
+    },
+    "react": {
+      "id": "react",
+      "detected": false,
+      "evidence": [],
+      "detail": "React project"
+    },
+    "typescript": {
+      "id": "typescript",
+      "detected": true,
+      "evidence": [
+        ".omp/extensions/scc/index.ts",
+        ".omp/extensions/scc/update-check.ts"
+      ],
+      "detail": "TypeScript source/configuration"
+    },
+    "toml": {
+      "id": "toml",
+      "detected": true,
+      "evidence": [
+        "Cargo.toml",
+        "bughunt.toml"
+      ],
+      "detail": "TOML configuration"
+    },
+    "yaml": {
+      "id": "yaml",
+      "detected": true,
+      "evidence": [
+        ".github/dependabot.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+        ".omp/config.yml",
+        ".scc/config.yaml"
+      ],
+      "detail": "YAML configuration"
+    },
+    "schema-ref": {
+      "id": "schema-ref",
+      "detected": false,
+      "evidence": [],
+      "detail": "configuration file with explicit schema reference"
+    },
+    "alembic": {
+      "id": "alembic",
+      "detected": false,
+      "evidence": [],
+      "detail": "Alembic migration configuration/history"
+    },
+    "django": {
+      "id": "django",
+      "detected": false,
+      "evidence": [],
+      "detail": "Django project"
+    },
+    "odoo": {
+      "id": "odoo",
+      "detected": false,
+      "evidence": [],
+      "detail": "Odoo project"
+    },
+    "benchmark-tests": {
+      "id": "benchmark-tests",
+      "detected": false,
+      "evidence": [],
+      "detail": "pytest benchmark tests"
+    },
+    "asyncio": {
+      "id": "asyncio",
+      "detected": false,
+      "evidence": [],
+      "detail": "asyncio/async Python code"
+    },
+    "pact": {
+      "id": "pact",
+      "detected": false,
+      "evidence": [],
+      "detail": "Pact contract artifacts/dependency"
+    }
+  },
+  "files": {
+    "python": [],
+    "github-actions": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml"
+    ],
+    "shell": [
+      "deploy/relay/provision-oracle.sh",
+      "scripts/smoke.sh",
+      "setup.sh"
+    ],
+    "dotenv": [
+      ".omp/extensions/scc/index.ts (environment access)"
+    ],
+    "openapi": [],
+    "protobuf": [],
+    "sql": [],
+    "postgres-migrations": [],
+    "docker": [
+      "Dockerfile"
+    ],
+    "terraform": [],
+    "go": [],
+    "rust": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "benches/benchmarks.rs",
+      "examples/simple_screen_share.rs",
+      "src/app/mod.rs",
+      "src/app/share.rs",
+      "src/app/view.rs",
+      "src/audio/capture.rs",
+      "src/audio/codec.rs",
+      "src/audio/mod.rs",
+      "src/audio/playout.rs",
+      "src/audio/sync.rs",
+      "src/capture/mod.rs",
+      "src/codec/mod.rs",
+      "src/encoder/mod.rs",
+      "src/lib.rs",
+      "src/main.rs",
+      "src/network/config.rs",
+      "src/network/e2e.rs",
+      "src/network/mod.rs",
+      "src/network/protocol.rs",
+      "src/network/resilience.rs",
+      "src/network/transport.rs",
+      "src/network/wire.rs",
+      "src/pcc/compositor.rs",
+      "src/pcc/detector.rs",
+      "src/pcc/mod.rs",
+      "src/pcc/planner.rs",
+      "src/pcc/types.rs",
+      "src/reach/mod.rs",
+      "src/relay.rs",
+      "src/server/mod.rs",
+      "src/server/renderer/buffer.rs",
+      "src/server/renderer/mod.rs",
+      "src/server/renderer/web.rs",
+      "src/telemetry/logging.rs",
+      "src/telemetry/metrics.rs",
+      "src/telemetry/mod.rs",
+      "tests/replication.rs",
+      "tests/transport.rs"
+    ],
+    "cpp": [],
+    "cpp-compile-db": [],
+    "php": [],
+    "javascript-typescript": [
+      ".omp/extensions/scc/index.ts",
+      ".omp/extensions/scc/package.json",
+      ".omp/extensions/scc/update-check.ts",
+      "src/server/renderer/client.js"
+    ],
+    "react": [],
+    "typescript": [
+      ".omp/extensions/scc/index.ts",
+      ".omp/extensions/scc/update-check.ts"
+    ],
+    "toml": [
+      "Cargo.toml",
+      "bughunt.toml"
+    ],
+    "yaml": [
+      ".github/dependabot.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml",
+      ".omp/config.yml",
+      ".scc/config.yaml"
+    ],
+    "schema-ref": [],
+    "alembic": [],
+    "django": [],
+    "odoo": [],
+    "benchmark-tests": [],
+    "asyncio": [],
+    "pact": []
+  }
+}

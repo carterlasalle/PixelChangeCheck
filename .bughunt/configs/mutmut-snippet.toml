@@ -1,0 +1,9 @@
+# BEGIN BUGHUNT MANAGED MUTMUT CONFIG
+[tool.mutmut]
+source_paths = ["src/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+# Coverage gaps are reported separately as BHCOV001/BHCOV002. Restrict mutation
+# to covered lines by default so mutation testing measures assertion strength
+# instead of spending most of its budget on code the suite never executes.
+mutate_only_covered_lines = true
+# END BUGHUNT MANAGED MUTMUT CONFIG
