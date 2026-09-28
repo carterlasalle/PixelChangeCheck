@@ -1,24 +1,29 @@
-use anyhow::Result;
-use std::{sync::Arc, time::Duration};
-use tokio::{sync::Mutex, time};
-use tracing::{error, warn};
-use serde::{Deserialize, Serialize};
+//! Reconnect bookkeeping for long-lived connections.
+//!
+//! The share loop calls this on every relay failure, and the view loop
+//! counts attempts. It exists because retry policy was previously a
+//! module that nothing in the product ever called, holding two
+//! configuration flags (`jitter_buffer_size`, `error_correction_enabled`)
+//! that no code read and that no FEC implementation backed. Those knobs
+//! are gone: an unused flag that claims a feature is worse than no flag.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
+#[derive(Debug, Clone)]
 pub struct ResilienceConfig {
+    /// Attempts to make before giving up. `0` means "keep trying", which
+    /// is what a long-lived sharer wants from a relay that may restart.
     pub max_retries: u32,
+    /// Base delay between attempts; doubled per attempt up to 4x.
     pub retry_delay: Duration,
-    pub jitter_buffer_size: usize,
-    pub error_correction_enabled: bool,
 }
 
 impl Default for ResilienceConfig {
     fn default() -> Self {
         Self {
-            max_retries: 3,
+            max_retries: 5,
             retry_delay: Duration::from_millis(100),
-            jitter_buffer_size: 5,
-            error_correction_enabled: true,
         }
     }
 }
@@ -26,153 +31,156 @@ impl Default for ResilienceConfig {
 #[derive(Debug)]
 pub struct NetworkResilience {
     config: ResilienceConfig,
-    retry_count: Arc<Mutex<u32>>,
-    last_success: Arc<Mutex<Option<std::time::SystemTime>>>,
+    state: Mutex<State>,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    consecutive_failures: u32,
+    total_failures: u64,
+    last_success: Option<Instant>,
+    backoff: Duration,
 }
 
 impl NetworkResilience {
     pub fn new(config: ResilienceConfig) -> Self {
+        let backoff = config.retry_delay;
         Self {
             config,
-            retry_count: Arc::new(Mutex::new(0)),
-            last_success: Arc::new(Mutex::new(None)),
+            state: Mutex::new(State {
+                backoff,
+                ..State::default()
+            }),
         }
     }
 
-    // Execute an operation with retry logic
-    pub async fn with_retry<F, T>(&self, operation: F) -> Result<T>
-    where
-        F: Fn() -> Result<T> + Send + Sync,
-    {
-        let mut current_retry = 0;
-        let mut backoff = self.config.retry_delay;
+    /// Record a failed attempt. Returns true when the budget is exhausted
+    /// and the caller should stop trying.
+    pub async fn note_failure(&self) -> bool {
+        let mut state = self.state.lock().await;
+        state.consecutive_failures += 1;
+        state.total_failures += 1;
+        state.last_success = None;
+        state.backoff = (state.backoff * 2).min(self.config.retry_delay * 4);
+        self.config.max_retries > 0 && state.consecutive_failures >= self.config.max_retries
+    }
 
+    /// Record a success and reset the backoff.
+    pub async fn note_success(&self) {
+        let mut state = self.state.lock().await;
+        state.consecutive_failures = 0;
+        state.last_success = Some(Instant::now());
+        state.backoff = self.config.retry_delay;
+    }
+
+    /// How long to wait before the next attempt.
+    pub async fn next_delay(&self) -> Duration {
+        self.state.lock().await.backoff
+    }
+
+    /// True while the connection has not exhausted its retry budget.
+    pub async fn is_healthy(&self) -> bool {
+        let state = self.state.lock().await;
+        self.config.max_retries == 0 || state.consecutive_failures < self.config.max_retries
+    }
+
+    pub async fn consecutive_failures(&self) -> u32 {
+        self.state.lock().await.consecutive_failures
+    }
+
+    pub async fn total_failures(&self) -> u64 {
+        self.state.lock().await.total_failures
+    }
+
+    /// Run an async operation, retrying it on failure with exponential
+    /// backoff. An async closure, because retrying a blocking function on
+    /// an async runtime is the bug the old signature invited.
+    pub async fn retry_async<F, Fut, T>(&self, mut operation: F) -> anyhow::Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>>,
+    {
         loop {
-            match operation() {
-                Ok(result) => {
-                    self.record_success().await;
-                    return Ok(result);
+            match operation().await {
+                Ok(value) => {
+                    self.note_success().await;
+                    return Ok(value);
                 }
                 Err(e) => {
-                    current_retry += 1;
-                    if current_retry >= self.config.max_retries {
-                        error!("Operation failed after {} retries: {}", current_retry, e);
-                        return Err(e);
+                    if self.note_failure().await {
+                        return Err(e.context(format!(
+                            "failed after {} attempts",
+                            self.state.lock().await.consecutive_failures
+                        )));
                     }
-
-                    warn!("Operation failed, retrying in {:?}: {}", backoff, e);
-                    time::sleep(backoff).await;
-                    backoff = std::cmp::min(backoff * 2, self.config.retry_delay * 2);
+                    tracing::warn!(
+                        "Operation failed ({e}); retrying in {:?}",
+                        self.next_delay().await
+                    );
+                    tokio::time::sleep(self.next_delay().await).await;
                 }
             }
         }
     }
+}
 
-    // Monitor connection health
-    pub async fn monitor_connection<F>(&self, health_check: F) -> Result<()>
-    where
-        F: Fn() -> Result<bool> + Send + Sync + 'static,
-    {
-        let retry_count = self.retry_count.clone();
-        let last_success = self.last_success.clone();
-        let config = self.config.clone();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
-        tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-
-                match health_check() {
-                    Ok(true) => {
-                        *retry_count.lock().await = 0;
-                        *last_success.lock().await = Some(std::time::SystemTime::now());
-                    }
-                    Ok(false) => {
-                        warn!("Health check failed");
-                        *retry_count.lock().await += 1;
-                    }
-                    Err(e) => {
-                        error!("Health check error: {}", e);
-                        *retry_count.lock().await += 1;
-                    }
-                }
-
-                // Check if connection is considered failed
-                if *retry_count.lock().await >= config.max_retries {
-                    error!("Connection considered failed after {} retries", config.max_retries);
-                    break;
-                }
-            }
+    #[tokio::test]
+    async fn a_failing_operation_is_retried_then_reported() {
+        let resilience = NetworkResilience::new(ResilienceConfig {
+            max_retries: 3,
+            retry_delay: Duration::from_millis(1),
         });
-
-        Ok(())
+        let calls = Arc::new(AtomicU32::new(0));
+        let result: anyhow::Result<()> = resilience
+            .retry_async(|| {
+                let seen = calls.clone();
+                async move {
+                    let n = seen.fetch_add(1, Ordering::SeqCst);
+                    if n < 2 {
+                        Err(anyhow::anyhow!("transient"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(resilience.is_healthy().await);
     }
 
-    // Record successful operation
-    async fn record_success(&self) {
-        *self.retry_count.lock().await = 0;
-        *self.last_success.lock().await = Some(std::time::SystemTime::now());
-    }
-
-    // Check if connection is healthy
-    pub async fn is_healthy(&self) -> bool {
-        let retry_count = *self.retry_count.lock().await;
-        retry_count < self.config.max_retries
-    }
-
-    // Get connection statistics
-    pub async fn get_stats(&self) -> ConnectionStats {
-        let retry_count = *self.retry_count.lock().await;
-        let last_success = *self.last_success.lock().await;
-
-        ConnectionStats {
-            retry_count,
-            last_success,
-            is_healthy: self.is_healthy().await,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ConnectionStats {
-    pub retry_count: u32,
-    pub last_success: Option<std::time::SystemTime>,
-    pub is_healthy: bool,
-}
-
-// Extension trait for resilient operations
-#[async_trait::async_trait]
-pub trait Resilient {
-    // Retry an async operation with backoff
-    async fn retry_async<F, T>(&self, operation: F) -> Result<T>
-    where
-        F: Fn() -> Result<T> + Send + Sync,
-        T: Send;
-
-    // Execute with timeout
-    async fn with_timeout<F, T>(&self, duration: Duration, operation: F) -> Result<T>
-    where
-        F: std::future::Future<Output = Result<T>> + Send,
-        T: Send;
-}
-
-#[async_trait::async_trait]
-impl Resilient for NetworkResilience {
-    async fn retry_async<F, T>(&self, operation: F) -> Result<T>
-    where
-        F: Fn() -> Result<T> + Send + Sync,
-        T: Send,
-    {
-        self.with_retry(operation).await
-    }
-
-    async fn with_timeout<F, T>(&self, duration: Duration, operation: F) -> Result<T>
-    where
-        F: std::future::Future<Output = Result<T>> + Send,
-        T: Send,
-    {
-        tokio::time::timeout(duration, operation)
+    #[tokio::test]
+    async fn the_budget_is_reported_when_it_is_exhausted() {
+        let resilience = NetworkResilience::new(ResilienceConfig {
+            max_retries: 2,
+            retry_delay: Duration::from_millis(1),
+        });
+        let err = resilience
+            .retry_async(|| async { Err::<(), _>(anyhow::anyhow!("permanent")) })
             .await
-            .map_err(|_| anyhow::anyhow!("Operation timed out"))?
+            .unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(chain.contains("permanent"), "unhelpful: {chain}");
+        assert!(chain.contains("2 attempts"), "unhelpful: {chain}");
+        assert_eq!(resilience.consecutive_failures().await, 2);
+        assert!(!resilience.is_healthy().await);
     }
-} 
+
+    #[tokio::test]
+    async fn an_unlimited_budget_never_gives_up() {
+        let resilience = NetworkResilience::new(ResilienceConfig {
+            max_retries: 0,
+            retry_delay: Duration::from_millis(1),
+        });
+        for _ in 0..10 {
+            assert!(!resilience.note_failure().await);
+        }
+        assert!(resilience.is_healthy().await);
+    }
+}

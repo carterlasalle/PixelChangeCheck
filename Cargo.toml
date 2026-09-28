@@ -2,6 +2,8 @@
 name = "pixel-change-check-client"
 version = "0.1.0"
 edition = "2021"
+# The floor CI tests. Raise this and the MSRV job together.
+rust-version = "1.85"
 authors = ["Carter LaSalle"]
 description = "High-performance screen capture client with PCC (Pixel Change Check)"
 autobenches = false
@@ -63,6 +65,11 @@ minifb = "0.27"
 
 # Relay session ids
 rand = "0.8"
+sha2 = "0.10"
+parking_lot = "0.12"
+base64 = "0.22"
+sha1 = "0.10"
+tokio-rustls = "0.24"
 
 [profile.release]
 opt-level = 3

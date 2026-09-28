@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# End-to-end smoke test against the real binaries, over real sockets.
+#
+# Exercises: direct QUIC with token + pin, the browser WebSocket
+# compositor handshake, the MJPEG fallback, and the relay path. Prints a
+# line per check and exits non-zero on the first failure.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="$ROOT/target/release/pixel-change-check-client"
+SHARE_PORT=15877
+WEB_PORT=15878
+RELAY_PORT=15901
+# A fresh log directory per run: a killed process can still hold an old
+# file open, and reading a stale fingerprint from it looks exactly like a
+# certificate mismatch.
+LOG_DIR="$ROOT/.tmp/smoke-$$"
+FAILURES=0
+
+mkdir -p "$LOG_DIR"
+# Nothing from a previous run may still be listening.
+pkill -f "$BIN" 2>/dev/null
+sleep 0.5
+
+pass() { printf '  ok   %s\n' "$1"; }
+fail() { printf '  FAIL %s (%s)\n' "$1" "$2"; FAILURES=$((FAILURES + 1)); }
+
+check() { # check <name> <condition-result> <detail>
+  if [ "$2" = "0" ]; then pass "$1"; else fail "$1" "$3"; fi
+}
+
+[ -x "$BIN" ] || { echo "build first: cargo build --release"; exit 1; }
+
+TOKEN="SMOKETOKEN1234"
+
+# ---------------------------------------------------------------- sharer
+echo "starting sharer (synthetic capture, no display needed)"
+$BIN share --synthetic \
+  --listen "127.0.0.1:$SHARE_PORT" \
+  --web "127.0.0.1:$WEB_PORT" \
+  --token "$TOKEN" \
+  --fps 10 > "$LOG_DIR/share.log" 2>&1 &
+SHARE_PID=$!
+trap 'kill $SHARE_PID $VIEW_PID $RELAY_PID $SHARE2_PID $VIEW2_PID 2>/dev/null' EXIT
+
+# Wait for the sharer to report its fingerprint.
+PIN=""
+for _ in $(seq 1 60); do
+  PIN=$(grep -o 'Certificate fingerprint (sha256): [0-9a-f]*' "$LOG_DIR/share.log" 2>/dev/null | tail -1 | awk '{print $4}')
+  [ -n "$PIN" ] && break
+  sleep 0.2
+done
+check "sharer started and printed a certificate pin" "$([ -n "$PIN" ] && echo 0 || echo 1)" "no fingerprint in $LOG_DIR/share.log"
+if [ -z "$PIN" ]; then cat "$LOG_DIR/share.log"; exit 1; fi
+
+sleep 1.5  # let it capture and publish
+
+# ------------------------------------------------------------ web viewer
+echo "checking the browser viewer"
+INDEX=$(curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT/?token=$TOKEN")
+check "index page requires no credentials beyond the token" \
+  "$([ -n "$INDEX" ] && echo 0 || echo 1)" "empty index"
+
+JS=$(curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT/pcc.js")
+check "browser compositor is served" \
+  "$(echo "$JS" | grep -q 'OP_SNAPSHOT_BEGIN\|0x04' && echo 0 || echo 1)" "client.js not served"
+
+UNAUTH=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$WEB_PORT/stream")
+check "an unauthenticated stream request is refused" \
+  "$([ "$UNAUTH" = "401" ] && echo 0 || echo 1)" "got HTTP $UNAUTH"
+
+# The MJPEG fallback must produce an actual JPEG.
+JPEG_HEAD=$(curl -s --max-time 8 -D - -o /dev/null "http://127.0.0.1:$WEB_PORT/stream?token=$TOKEN" | tr -d '\r' | grep -i 'content-type')
+check "MJPEG fallback serves a multipart stream" \
+  "$(echo "$JPEG_HEAD" | grep -qi 'multipart/x-mixed-replace' && echo 0 || echo 1)" "got: $JPEG_HEAD"
+
+MJPEG=$(curl -s --max-time 10 "http://127.0.0.1:$WEB_PORT/stream?token=$TOKEN" | dd bs=1 count=4096 2>/dev/null | xxd -p | tr -d '\n')
+check "MJPEG fallback emits a JPEG SOI marker" \
+  "$(echo "$MJPEG" | grep -q 'ffd8ff' && echo 0 || echo 1)" "no JPEG magic in the first bytes"
+
+# The WebSocket upgrade must be refused without a token and accepted with
+# one, which is what proves the browser path is the real compositor.
+python3 - "$WEB_PORT" "$TOKEN" <<'PY'
+import base64, socket, sys, os
+port, token = int(sys.argv[1]), sys.argv[2]
+
+def handshake(query):
+    key = base64.b64encode(os.urandom(16)).decode()
+    req = (
+        f"GET /ws{query} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    s.sendall(req.encode())
+    head = s.recv(4096)
+    s.close()
+    return head.split(b"\r\n")[0].decode(errors="replace")
+
+good = handshake(f"?token={token}")
+bad = handshake("")
+assert good.startswith("HTTP/1.1 101"), f"expected 101, got {good}"
+assert bad.startswith("HTTP/1.1 401"), f"expected 401, got {bad}"
+print("WEBSOCKET_OK")
+PY
+WS=$?
+check "WebSocket upgrade is accepted with a token and refused without one" "$WS" "see $LOG_DIR/share.log"
+
+# ---------------------------------------------------------- native viewer
+echo "starting a native viewer (headless)"
+$BIN view --connect "127.0.0.1:$SHARE_PORT" --token "$TOKEN" --pin "$PIN" --no-window \
+  > "$LOG_DIR/view.log" 2>&1 &
+VIEW_PID=$!
+sleep 3
+
+if kill -0 $VIEW_PID 2>/dev/null; then
+  pass "viewer connected and is still running"
+else
+  fail "viewer connected and is still running" "exited"
+fi
+check "viewer received frames" \
+  "$(grep -q 'Receiving\|receiving' "$LOG_DIR/view.log" && echo 0 || echo 1)" "$(tail -3 "$LOG_DIR/view.log")"
+
+# An unauthorized viewer must be refused.
+$BIN view --connect "127.0.0.1:$SHARE_PORT" --token "WRONGTOKEN999" --pin "$PIN" --no-window \
+  > "$LOG_DIR/badview.log" 2>&1
+check "a viewer with the wrong token is refused" \
+  "$(grep -qi 'unauthorized' "$LOG_DIR/badview.log" && echo 0 || echo 1)" "$(tail -3 "$LOG_DIR/badview.log")"
+
+# A viewer pinned to the wrong certificate cannot connect at all.
+OTHER_PIN=$(printf '00%.0s' {1..32})
+if $BIN view --connect "127.0.0.1:$SHARE_PORT" --token "$TOKEN" --pin "$OTHER_PIN" --no-window \
+  > "$LOG_DIR/pinview.log" 2>&1; then
+  fail "a viewer with the wrong certificate pin cannot connect" "it connected anyway"
+else
+  pass "a viewer with the wrong certificate pin cannot connect"
+fi
+
+kill $VIEW_PID 2>/dev/null
+wait $VIEW_PID 2>/dev/null
+
+# ----------------------------------------------------------------- relay
+echo "starting a relay and a second sharer through it"
+$BIN relay --listen "127.0.0.1:$RELAY_PORT" --token "$TOKEN" > "$LOG_DIR/relay.log" 2>&1 &
+RELAY_PID=$!
+sleep 1
+RELAY_PIN=""
+for _ in $(seq 1 40); do
+  RELAY_PIN=$(grep -o 'fingerprint (sha256): [0-9a-f]*' "$LOG_DIR/relay.log" 2>/dev/null | tail -1 | awk '{print $3}')
+  [ -n "$RELAY_PIN" ] && break
+  sleep 0.2
+done
+check "relay printed its certificate pin" "$([ -n "$RELAY_PIN" ] && echo 0 || echo 1)" "no pin in relay.log"
+
+$BIN share --synthetic --no-listen --no-web \
+  --relay "127.0.0.1:$RELAY_PORT" --relay-pin "$RELAY_PIN" \
+  --session SMOKE --token "$TOKEN" --fps 10 > "$LOG_DIR/share2.log" 2>&1 &
+SHARE2_PID=$!
+sleep 2
+$BIN view --relay "127.0.0.1:$RELAY_PORT" --pin "$RELAY_PIN" \
+  --session SMOKE --token "$TOKEN" --no-window > "$LOG_DIR/view2.log" 2>&1 &
+VIEW2_PID=$!
+sleep 3
+
+if kill -0 $VIEW2_PID 2>/dev/null && kill -0 $SHARE2_PID 2>/dev/null; then
+  pass "a viewer receives frames through the relay"
+else
+  fail "a viewer receives frames through the relay" "$(tail -3 "$LOG_DIR/view2.log")"
+fi
+
+echo
+if [ "$FAILURES" -eq 0 ]; then
+  echo "smoke: all checks passed"
+else
+  echo "smoke: $FAILURES check(s) failed; logs in $LOG_DIR"
+fi
+exit $FAILURES

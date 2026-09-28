@@ -1,144 +1,242 @@
 # PixelChangeCheck (PCC)
 
-A highly efficient screen sharing tool using PixelChangeCheck (PCC) for optimized data transmission, written in Rust. It shares your screen to:
+An efficient screen-sharing tool: it replicates your screen **exactly** and
+sends only the pixels that changed.
 
-- **Direct QUIC viewers** on your LAN or over the internet (with port forwarding)
-- **A relay server** for viewers behind NAT, with no port forwarding required
-- **Any web browser** -- including an iPhone's Safari -- via a plain MJPEG stream, no native client needed
+Rust. Shares to:
+
+- **Direct QUIC viewers** on your LAN or over the internet (with port
+  forwarding)
+- **A relay server** for viewers behind NAT, with no port forwarding
+  required
+- **Any web browser**, including an iPhone's Safari, over a WebSocket that
+  speaks the *same* change protocol the native client does
+
+## What makes it different
+
+A conventional screen stream re-encodes the whole picture every frame.
+PixelChangeCheck keeps a **lossless authoritative surface**: the sharer
+diffs each captured frame against the framebuffer viewers actually hold,
+and sends only what changed. For a terminal, an IDE, or a document, that
+is usually a few kilobytes per frame. When nothing changes, it sends
+nothing but a keep-alive.
+
+Three things make that claim hold up:
+
+- **Exactness is measured, not asserted.** The authoritative stream is
+  lossless end to end. After a snapshot plus its updates, a viewer's
+  pixels are byte-identical to the sender's reference; the test suite
+  asserts exactly that, including over a real socket and through the
+  browser's JavaScript compositor.
+- **Sub-threshold changes accumulate.** The sharer diffs against what
+  viewers hold, not against the previous capture, so a slow fade crosses
+  the threshold and gets sent instead of being silently discarded forever.
+- **Scrolling is a copy, not a repaint.** A verified displacement becomes
+  a `Copy` operation -- a few dozen bytes instead of a whole screen.
 
 ## Features
 
-- **Screen Capture**: Cross-platform screen capture using the `screenshots` crate, with an automatic synthetic-test-pattern fallback on headless machines
-- **Pixel Change Detection (PCC)**: Block-based pixel comparison that detects only changed regions between frames (RGB-aware, byte-accurate)
-- **JPEG Encoding**: Fast JPEG encoding with configurable quality for keyframes
-- **LZ4 Compression**: Additional lossless compression for changed pixel regions
-- **QUIC Transport**: Low-latency, reliable, length-framed messaging over QUIC for direct connections
-- **Relay Mode**: A lightweight TCP relay so a sharer and viewer that can't reach each other directly (both behind NAT) can still connect
-- **Browser Viewer**: An embedded MJPEG HTTP server so any device with a browser can watch, including phones
-- **Native Window Viewer**: `pcc view` opens a real window and renders the stream
-- **Adaptive Quality**: The sharer automatically lowers/raises JPEG quality based on whether it's keeping up with its frame budget
-- **Keep-Alives**: When nothing changes, only a tiny keep-alive message is sent
-
-## Project Structure
-
-```
-src/
-├── app/               # CLI orchestration for `share` and `view`
-├── capture/           # Screen capture (real + synthetic test pattern)
-├── encoder/           # JPEG encoding/decoding and LZ4 compression
-├── network/           # QUIC transport, message protocol, and resilience
-│   ├── config.rs      # Network and TLS/QUIC transport configuration
-│   ├── protocol.rs    # Length-framed Message protocol (FullFrame/PartialUpdate/...)
-│   ├── resilience.rs  # Retry logic and connection health
-│   └── transport.rs   # QUIC endpoints + MessageTransport trait
-├── relay/             # TCP relay server + relay-backed transport (NAT traversal)
-├── pcc/               # Pixel Change Check core logic
-│   ├── detector.rs    # Block-based, RGB-stride-aware change detection
-│   └── types.rs       # Frame, PixelChange, and trait definitions
-├── server/            # Viewer-side components
-│   └── renderer/      # Frame reconstruction, native window feed, MJPEG web server
-├── lib.rs             # Library exports
-└── main.rs            # `pcc` CLI entry point (share / view / relay)
-```
+- **Screen capture** via the `screenshots` crate, with an automatic
+  synthetic test-pattern fallback on headless machines
+- **Pixel Change Check**: allocation-free block comparison, tile-hash region
+  merging, and a bounded verified-displacement search for scroll reuse
+- **A three-way representation choice per region**: solid fill, verified
+  copy, or an exact LZ4 patch -- whichever is genuinely cheaper
+- **Cost-based fallback**: when the patches for a frame would cost more
+  than a fresh lossless snapshot, the sharer sends the snapshot
+- **Chunked, atomic snapshots**: bounded transfer with begin/chunk/commit,
+  so an interrupted snapshot can never half-replace a working surface
+- **Revisions and epochs**: one sequencer, so a late joiner, a recovered
+  viewer, and a viewer that fell behind all converge to the same pixels
+- **Authentication**: a viewer token authorizes access; a certificate pin
+  proves who you are talking to
+- **TLS on every path**, including the relay
+- **Browser viewer**: a WebSocket patch compositor (lossless), plus an
+  explicitly lossy MJPEG fallback for anything that cannot run one
+- **A relay** with per-viewer byte budgets, generational ownership, and a
+  defined slow-viewer policy
 
 ## Getting Started
 
 ### Prerequisites
 
-- Rust (1.70 or higher)
+- Rust (see `rust-version` in `Cargo.toml`)
 - System dependencies:
   - **Linux**: `libxcb1-dev`, `libxrandr-dev`, `libdbus-1-dev`
-  - **macOS/Windows**: No extra dependencies needed
+  - **macOS/Windows**: none
 
-### Installation
+### Build
 
-```bash
-git clone https://github.com/carterlasalle/PixelChangeCheck.git
-cd PixelChangeCheck
-
-# Install system dependencies (Linux)
-# sudo apt-get install -y libxcb1-dev libxrandr-dev libdbus-1-dev
-
-./setup.sh   # or just: cargo build
+```sh
+cargo build --release
 ```
 
-### Usage
+### Share your screen
 
-**Share your screen** (defaults: listens on `0.0.0.0:5800` for direct viewers, and serves a browser viewer on `0.0.0.0:8080`):
-
-```bash
-cargo run -- share
+```sh
+cargo run --release -- share
 ```
 
-Open `http://<this-machine's-ip>:8080/` from any browser -- including an iPhone's Safari on the same network -- to watch immediately, no client install required.
+That prints the certificate fingerprint and a complete, copy-pasteable
+viewer command:
 
-**View from another desktop, over the same LAN or the internet** (with the sharer's port forwarded):
-
-```bash
-cargo run -- view --connect <sharer-ip>:5800
+```text
+Certificate fingerprint (sha256): 9f2c...
+Direct viewers on 0.0.0.0:5800
+  pcc view --connect 192.168.1.20:5800 --token ABC... --pin 9f2c...
 ```
 
-**Behind NAT on both ends? Use a relay** (run this on any reachable host, e.g. a small cloud VM):
+### View it
 
-```bash
-cargo run -- relay --listen 0.0.0.0:5900
+**Native window**, on another machine:
+
+```sh
+pcc view --connect <sharer-ip>:5800 --token <token> --pin <fingerprint>
 ```
 
-Then, on the sharer:
+**Any browser**, including a phone: open
 
-```bash
-cargo run -- share --relay <relay-ip>:5900 --session MYCODE
+```text
+http://<sharer-ip>:8080/?token=<token>
 ```
 
-And on the viewer:
+That page runs the same compositor as the native client. If your browser
+cannot, `/fallback` serves a lossy MJPEG preview, labelled as such.
 
-```bash
-cargo run -- view --relay <relay-ip>:5900 --session MYCODE
+**Behind NAT on both ends?** Run a relay on any reachable host:
+
+```sh
+pcc relay --listen 0.0.0.0:5900
 ```
 
-Both sides only ever make *outbound* connections to the relay, so no port forwarding is needed on either end.
+It prints its own token and fingerprint. On the sharer:
 
-**Test everything locally, no display required** (uses a synthetic animated test pattern):
-
-```bash
-cargo run -- share --synthetic
-cargo run -- view --connect 127.0.0.1:5800 --no-window   # or open http://127.0.0.1:8080/
+```sh
+pcc share --relay <relay-ip>:5900 --relay-pin <relay-fingerprint> --token <token>
 ```
 
-Or run the fully self-contained demo, which spins up a sharer and viewer in one process over a real QUIC connection and prints the bandwidth PCC saved you:
+On the viewer:
 
-```bash
-cargo run --example simple_screen_share
+```sh
+pcc view --relay <relay-ip>:5900 --pin <relay-fingerprint> \
+         --session <code> --token <token>
+```
+
+Both sides make only *outbound* connections, so neither needs a port
+forward.
+
+**No display available?** Use the synthetic test pattern:
+
+```sh
+pcc share --synthetic
+pcc view --connect 127.0.0.1:5800 --token <token> --pin <fingerprint> --no-window
+```
+
+Or run the whole pipeline -- sharer and viewer in one process, over a
+real loopback QUIC connection, checking the result is pixel-exact:
+
+```sh
+cargo run --release --example simple_screen_share
+```
+
+### Browser over TLS
+
+The web port is plaintext unless you give it a real certificate, because a
+self-signed one would only produce a browser warning:
+
+```sh
+pcc share --web-cert cert.pem --web-key key.pem
+```
+
+### Commands
+
+```sh
+cargo run --release -- share --help
+cargo run --release -- view --help
+cargo run --release -- relay --help
 ```
 
 ### Testing
 
-```bash
-cargo test
+```sh
+cargo test                 # unit, replication, and real-socket end-to-end
+cargo clippy --all-targets # lint
 ```
-
-Includes real, over-the-loopback-network end-to-end tests for both the direct QUIC path and the relay path, not just in-process unit tests.
 
 ### Benchmarks
 
-```bash
-cargo run --example benchmarks
+```sh
+cargo run --release --example benchmarks
 ```
+
+`--release` is required: a debug build reports numbers that mean nothing
+for a codec. The benchmark drives the real pipeline end to end
+(detect -> plan -> compress -> serialise -> deserialise -> apply), counts
+allocations during the scan, and compares against a full-frame baseline.
 
 ## Architecture
 
-- **Sharer** (`pcc share`): captures the screen, detects changed pixels with PCC, encodes/compresses them, and fans them out to any direct QUIC viewers, a relay connection, and/or the built-in browser (MJPEG) viewer, all at once.
-- **Viewer** (`pcc view`): connects directly or through a relay, reconstructs the frame from keyframes + partial updates, and displays it in a native window (or headless status output if no display is available).
-- **Relay**: a TCP server that pairs a sharer and any number of viewers by session code and forwards frames between them, including replaying the last keyframe to viewers who join mid-session.
+```text
+              capture
+                 |
+                 v
+   reference  <- detect  <- current frame
+   (what          |         ^
+    viewers        v         |
+    hold)      planner (fill / copy / rect, cost-based)
+                 |
+                 v
+          snapshot  |  partial update      <- one sequencer: revision + epoch
+                 |
+                 v
+        encoded ONCE, shared with every viewer
+                 |
+   +-------------+--------------+-------------------+
+   v                            v                   v
+QUIC viewer                relay (TLS)        web (WS / MJPEG)
+   |                            |                   |
+   v                            v                   v
+Compositor  <--------------- forwards ------------> browser compositor
+                                                     (a JS port of the same
+                                                      state machine)
+```
 
-## How PCC Works
+- **Sharer** (`pcc share`): captures, diffs against the reference, plans,
+  encodes once, and fans the same bytes out to every viewer.
+- **Viewer** (`pcc view`): authenticates, reconstructs through the
+  `Compositor`, and presents.
+- **Relay** (`pcc relay`): pairs a host with viewers by session code and
+  forwards framed bytes. It never inspects frame contents, so
+  end-to-end encryption can be added without changing it.
 
-1. The sharer captures screen frames at the target frame rate.
-2. Each frame is compared against the previous frame using block-based, RGB-aware pixel comparison.
-3. Only blocks where pixel values changed beyond a configurable threshold are identified, and their exact bounding box is computed.
-4. Changed regions are extracted, lz4-compressed, and sent as a `PartialUpdate`; full frames are JPEG-encoded and sent periodically (or on first connect) as a `FullFrame`.
-5. Viewers apply `FullFrame`s wholesale and blit `PartialUpdate` regions into their reconstructed frame.
-6. If nothing changed, only a `KeepAlive` is sent.
+## How PCC works
+
+1. Capture a frame.
+2. Diff it against the **reference** -- the framebuffer an up-to-date
+   viewer holds. The reference advances only over rectangles that actually
+   shipped, so a change too small to send this frame is still there to be
+   sent later.
+3. If much of the screen moved as one displacement, verify it byte for
+   byte and emit a `Copy`; hash agreement alone is never trusted.
+4. Represent each remaining rectangle as a solid `Fill` or an exact,
+   LZ4-compressed patch, whichever is smaller.
+5. If the patches would cost more than a fresh lossless snapshot, send the
+   snapshot instead.
+6. Send nothing but a keep-alive if nothing changed.
+
+The viewer applies each transaction atomically against a single
+sequencing authority, and a `Copy` reads the surface as it was *before*
+the transaction -- which is what lets two regions swap in one update.
+
+## Known limitations
+
+- The browser path is plaintext unless you supply a certificate.
+- Screen capture is full-frame; platforms that expose dirty rectangles
+  (DXGI, ScreenCaptureKit, PipeWire) are not yet used to skip work.
+- Motion video is not implemented. The exact-replication path is the
+  product; see `docs/adr/0001-lossless-authoritative-surface.md` for why a
+  lossy base is not an option, and `docs/adr/` for the rest.
+- There is no input injection, audio, or clipboard sync.
 
 ## License
 

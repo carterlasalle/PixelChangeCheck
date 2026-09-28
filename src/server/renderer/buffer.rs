@@ -1,132 +1,100 @@
-use anyhow::Result;
-use std::{
-    collections::VecDeque,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
-use tokio::sync::Mutex;
-use tracing::warn;
+//! One immutable screen, shared by every consumer.
+//!
+//! Publishing swaps a pointer. Readers take an `Arc` and keep it as long
+//! as they need. The JPEG preview is derived at most once per
+//! (frame, quality) pair and then shared, so opening a fifth browser tab
+//! costs a socket, not a JPEG encode of the whole screen.
 
-const MAX_BUFFER_SIZE: usize = 3; // Maximum number of frames to keep in buffer
-const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+use crate::encoder::encode_jpeg;
+use crate::pcc::types::Frame;
+use anyhow::Result;
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct FrameBuffer {
-    frames: Arc<Mutex<VecDeque<BufferedFrame>>>,
-    current_frame: Arc<Mutex<Option<BufferedFrame>>>,
+struct State {
     width: u32,
     height: u32,
+    rgb: Arc<Vec<u8>>,
+    /// Quality the cached preview was encoded at, as raw float bits.
+    quality_bits: u32,
+    generation: u64,
+    preview: Option<(u64, Arc<Vec<u8>>)>,
 }
 
-#[derive(Debug, Clone)]
-pub struct BufferedFrame {
-    pub id: u64,
-    pub timestamp: SystemTime,
-    pub data: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
+#[derive(Debug)]
+pub struct SharedSurface {
+    state: Mutex<State>,
 }
 
-impl FrameBuffer {
-    pub fn new(width: u32, height: u32) -> Self {
+impl SharedSurface {
+    pub fn new(width: u32, height: u32, quality: f32) -> Self {
         Self {
-            frames: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_BUFFER_SIZE))),
-            current_frame: Arc::new(Mutex::new(None)),
-            width,
-            height,
+            state: Mutex::new(State {
+                width,
+                height,
+                rgb: Arc::new(Vec::new()),
+                quality_bits: quality.to_bits(),
+                generation: 0,
+                preview: None,
+            }),
         }
     }
 
-    // Add a new frame to the buffer
-    pub async fn push_frame(&self, frame: crate::pcc::Frame) -> Result<()> {
-        let mut frames = self.frames.lock().await;
-        
-        // Remove oldest frame if buffer is full
-        if frames.len() >= MAX_BUFFER_SIZE {
-            frames.pop_front();
-        }
-        
-        // Add new frame
-        frames.push_back(BufferedFrame {
-            id: frame.id,
-            timestamp: frame.timestamp,
-            data: frame.data,
-            width: frame.width,
-            height: frame.height,
-        });
-        
-        Ok(())
-    }
-
-    // Apply frame updates to the current frame
-    pub async fn apply_updates(&self, updates: Vec<crate::pcc::PixelChange>) -> Result<()> {
-        let mut current = self.current_frame.lock().await;
-        
-        if let Some(frame) = current.as_mut() {
-            // Apply each update to the current frame
-            for update in updates {
-                let start_x = update.x;
-                let start_y = update.y;
-                let width = update.width;
-                let height = update.height;
-
-                if start_x + width > self.width || start_y + height > self.height {
-                    warn!(
-                        "Discarding out-of-bounds update at ({start_x},{start_y}) size {width}x{height}"
-                    );
-                    continue;
-                }
-
-                // Update pixel data
-                for y in 0..height {
-                    let frame_offset = ((start_y + y) * self.width + start_x) as usize * 3;
-                    let update_offset = (y * width) as usize * 3;
-                    let update_end = update_offset + (width as usize * 3);
-                    
-                    frame.data[frame_offset..frame_offset + (width as usize * 3)]
-                        .copy_from_slice(&update.data[update_offset..update_end]);
-                }
+    /// Install a freshly captured frame. A frame with the same geometry and
+    /// identical bytes does not advance the generation, so an idle screen
+    /// does not invalidate anybody's cached preview.
+    pub fn publish(&self, frame: &Frame, quality: f32) {
+        let mut state = self.state.lock();
+        let same = state.width == frame.width
+            && state.height == frame.height
+            && state.rgb.len() == frame.data.len()
+            && state.rgb.as_ref() == frame.data.as_slice();
+        if same {
+            if state.quality_bits != quality.to_bits() {
+                // Same pixels, different preview quality: the cached JPEG
+                // is stale even though the frame is not.
+                state.quality_bits = quality.to_bits();
+                state.preview = None;
             }
-        } else {
-            warn!("No current frame to update");
+            return;
         }
-        
-        Ok(())
+        state.width = frame.width;
+        state.height = frame.height;
+        state.rgb = Arc::new(frame.data.clone());
+        state.quality_bits = quality.to_bits();
+        state.generation += 1;
     }
 
-    // Get the next frame for rendering
-    pub async fn next_frame(&self) -> Result<Option<BufferedFrame>> {
-        let mut frames = self.frames.lock().await;
-        
-        // Remove expired frames
-        while let Some(frame) = frames.front() {
-            if frame.timestamp.elapsed()? > FRAME_TIMEOUT {
-                frames.pop_front();
-            } else {
-                break;
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        let state = self.state.lock();
+        (!state.rgb.is_empty()).then_some((state.width, state.height))
+    }
+
+    /// The current frame, shared rather than copied.
+    pub fn snapshot(&self) -> Option<Arc<Vec<u8>>> {
+        let state = self.state.lock();
+        (!state.rgb.is_empty()).then(|| state.rgb.clone())
+    }
+
+    /// The current frame as a lossy JPEG preview. Explicitly *not* the
+    /// authoritative surface: it exists for `<img src=...>`, which cannot
+    /// composite patches.
+    pub fn jpeg_preview(&self) -> Result<Option<Arc<Vec<u8>>>> {
+        let mut state = self.state.lock();
+        if state.rgb.is_empty() {
+            return Ok(None);
+        }
+        let generation = state.generation;
+        if let Some((cached_gen, data)) = &state.preview {
+            if *cached_gen == generation {
+                return Ok(Some(data.clone()));
             }
         }
-        
-        // Get next frame
-        if let Some(frame) = frames.pop_front() {
-            let mut current = self.current_frame.lock().await;
-            *current = Some(frame.clone());
-            Ok(Some(frame))
-        } else {
-            Ok(None)
-        }
+        let quality = f32::from_bits(state.quality_bits);
+        let encoded = encode_jpeg(state.width, state.height, quality, &state.rgb)?;
+        let encoded = Arc::new(encoded);
+        state.preview = Some((generation, encoded.clone()));
+        Ok(Some(encoded))
     }
-
-    // Get the current frame without advancing
-    pub async fn current_frame(&self) -> Option<BufferedFrame> {
-        self.current_frame.lock().await.clone()
-    }
-
-    // Clear the buffer
-    pub async fn clear(&self) {
-        let mut frames = self.frames.lock().await;
-        frames.clear();
-        let mut current = self.current_frame.lock().await;
-        *current = None;
-    }
-} 
+}
