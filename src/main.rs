@@ -186,9 +186,14 @@ fn main() -> Result<()> {
     // The guard must outlive everything, or the last events are dropped.
     let _log_guard =
         telemetry::logging::init(&cli.log_level, cli.log_format, cli.log_file.as_deref())?;
+    // One runtime for the whole process. The telemetry tasks below are
+    // spawned before the subcommand's own runtime exists, so they need a
+    // reactor already in place.
+    let rt = tokio::runtime::Runtime::new()?;
     let metrics = Metrics::shared();
     if cli.stats_interval > 0 {
         telemetry::spawn_interval_reporter(
+            rt.handle(),
             metrics.clone(),
             std::time::Duration::from_secs(cli.stats_interval),
         );
@@ -196,20 +201,17 @@ fn main() -> Result<()> {
     if let Some(addr) = &cli.metrics_listen {
         let addr = addr.to_string();
         let metrics = metrics.clone();
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(async move {
-                let addr = pixel_change_check_client::network::resolve(&addr)
-                    .await
-                    .with_context(|| format!("Invalid --metrics-listen address '{addr}'"))?;
-                tokio::spawn(async move {
-                    if let Err(e) = telemetry::logging::serve_metrics(addr, metrics).await {
-                        tracing::error!("Metrics endpoint stopped: {e}");
-                    }
-                });
-                Ok::<(), anyhow::Error>(())
-            })?;
+        rt.block_on(async move {
+            let addr = pixel_change_check_client::network::resolve(&addr)
+                .await
+                .with_context(|| format!("Invalid --metrics-listen address '{addr}'"))?;
+            tokio::spawn(async move {
+                if let Err(e) = telemetry::logging::serve_metrics(addr, metrics).await {
+                    tracing::error!("Metrics endpoint stopped: {e}");
+                }
+            });
+            Ok::<(), anyhow::Error>(())
+        })?;
     }
 
     match cli.command {
@@ -257,7 +259,6 @@ fn main() -> Result<()> {
                 },
                 audio,
             };
-            let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(share::run_share(args, metrics))
         }
         Commands::View {
@@ -293,8 +294,7 @@ fn main() -> Result<()> {
             // Answers "do I need a relay?" without contacting anyone. The
             // STUN probe is a single UDP round trip to a public server,
             // which is the only rung that can be tested without a peer.
-            let runtime = tokio::runtime::Runtime::new()?;
-            let report = runtime.block_on(pixel_change_check_client::reach::diagnose(None));
+            let report = rt.block_on(pixel_change_check_client::reach::diagnose(None));
             print!("{}", pixel_change_check_client::reach::render(&report));
             Ok(())
         }
@@ -305,7 +305,6 @@ fn main() -> Result<()> {
                 pixel_change_check_client::network::generate_identity()
                     .context("Failed to create the relay identity")?,
             );
-            let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async move {
                 let addr = pixel_change_check_client::network::resolve(&listen)
                     .await

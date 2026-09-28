@@ -329,13 +329,21 @@ impl Metrics {
     }
 }
 
-/// Start the interval reporter. Returns immediately; it runs on its own
-/// task and stops when the process does.
-pub fn spawn_interval_reporter(metrics: SharedMetrics, every: Duration) {
+/// Start the interval reporter on `runtime`.
+///
+/// The handle is taken explicitly rather than assumed: a `Runtime` that
+/// merely exists has not been *entered* on this thread, so a bare
+/// `tokio::spawn` from `main` would panic with "no reactor running".
+/// Returns immediately; the task stops when the process does.
+pub fn spawn_interval_reporter(
+    runtime: &tokio::runtime::Handle,
+    metrics: SharedMetrics,
+    every: Duration,
+) {
     if every.is_zero() {
         return;
     }
-    tokio::spawn(async move {
+    runtime.spawn(async move {
         let started = Instant::now();
         let mut ticker = tokio::time::interval(every);
         // The first tick fires immediately; skip it so the first line
