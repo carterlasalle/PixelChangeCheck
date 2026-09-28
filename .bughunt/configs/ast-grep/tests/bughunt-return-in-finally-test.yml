@@ -1,0 +1,20 @@
+id: bughunt-return-in-finally
+valid:
+  - |
+      try:
+        work()
+      finally:
+        cleanup()
+invalid:
+  - |
+      def f():
+        try:
+          work()
+        finally:
+          return 1
+  - |
+      while True:
+        try:
+          work()
+        finally:
+          break

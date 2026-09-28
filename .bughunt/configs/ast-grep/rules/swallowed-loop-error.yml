@@ -1,0 +1,17 @@
+id: bughunt-swallowed-loop-error
+language: Python
+severity: error
+message: Exception handler discards the error with continue; the failing
+  iteration is silently skipped and the loop reports success.
+rule:
+  any:
+    - pattern: |
+        try:
+          $$$BODY
+        except $EXC:
+          continue
+    - pattern: |
+        try:
+          $$$BODY
+        except:
+          continue

@@ -1,0 +1,13 @@
+id: bughunt-swallowed-exception
+valid:
+  - |
+      try:
+        work()
+      except ValueError:
+        handle()
+invalid:
+  - |
+      try:
+        work()
+      except ValueError:
+        pass

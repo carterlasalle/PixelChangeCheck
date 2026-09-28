@@ -1,0 +1,43 @@
+id: bughunt-return-in-finally
+language: Python
+severity: error
+message: return/break/continue inside finally can suppress exceptions or override
+  control flow.
+rule:
+  any:
+    - pattern: |
+        try:
+          $$$BODY
+        finally:
+          return $RET
+          $$$REST
+    - pattern: |
+        try:
+          $$$BODY
+        finally:
+          $$$REST
+          return $RET
+    - pattern: |
+        try:
+          $$$BODY
+        finally:
+          break
+          $$$REST
+    - pattern: |
+        try:
+          $$$BODY
+        finally:
+          $$$REST
+          break
+    - pattern: |
+        try:
+          $$$BODY
+        finally:
+          continue
+          $$$REST
+    - pattern: |
+        try:
+          $$$BODY
+        finally:
+          $$$REST
+          continue

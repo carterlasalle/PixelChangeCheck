@@ -1,0 +1,11 @@
+id: bughunt-repo-relative-resource
+language: Python
+severity: error
+message: Repo-layout-dependent runtime resource; importable packages must
+  use importlib.resources instead of assuming a source checkout.
+rule:
+  any:
+    - pattern: Path(__file__).resolve().parent.parent.parent / $REST
+    - pattern: Path(__file__).parent.parent.parent / $REST
+    - pattern: Path.cwd() / "data" / $REST
+    - pattern: Path.cwd() / "data"

@@ -3,9 +3,8 @@ use clap::{Parser, Subcommand};
 use pixel_change_check_client::app::{share, view};
 use pixel_change_check_client::network::{SessionToken, DEFAULT_PORT};
 use pixel_change_check_client::relay;
+use pixel_change_check_client::telemetry::{self, LogFormat, Metrics};
 use std::time::Duration;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
 
 const DEFAULT_RELAY_PORT: u16 = 5900;
 const DEFAULT_WEB_PORT: u16 = 8080;
@@ -17,6 +16,22 @@ const DEFAULT_WEB_PORT: u16 = 8080;
     about = "PixelChangeCheck: exact, lossless desktop replication"
 )]
 struct Cli {
+    /// Minimum log level: error, warn, info, debug, trace.
+    /// RUST_LOG overrides this and wins for per-module filtering.
+    #[arg(long, global = true, default_value = "info")]
+    log_level: String,
+    /// How to render log events.
+    #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
+    /// Write logs here as well, rotating hourly.
+    #[arg(long, global = true)]
+    log_file: Option<String>,
+    /// Print a metrics summary to stderr every N seconds. 0 disables.
+    #[arg(long, global = true, default_value_t = 0)]
+    stats_interval: u64,
+    /// Serve Prometheus metrics on this address.
+    #[arg(long, global = true)]
+    metrics_listen: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -106,6 +121,9 @@ enum Commands {
         #[arg(long)]
         reconnect: bool,
     },
+    /// Report what this machine can do and which path to the internet it
+    /// has, without connecting to anything.
+    Diagnose,
     /// Run a relay so a sharer and a viewer that cannot reach each other
     /// directly can still connect: both sides dial out to this relay.
     Relay {
@@ -119,30 +137,47 @@ enum Commands {
     },
 }
 
-fn init_logging() {
-    let _ = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_file(false)
-        .compact()
-        .try_init();
-}
-
 fn token_from(arg: Option<&String>, what: &str) -> Result<SessionToken> {
     match arg {
         Some(t) => SessionToken::parse(t).with_context(|| format!("Invalid {what}")),
         None => {
             let t = SessionToken::generate();
-            info!("Generated {what}: {}", t.as_str());
+            tracing::info!("Generated {what}: {}", t.as_str());
             Ok(t)
         }
     }
 }
 
 fn main() -> Result<()> {
-    init_logging();
     let cli = Cli::parse();
+    // The guard must outlive everything, or the last events are dropped.
+    let _log_guard =
+        telemetry::logging::init(&cli.log_level, cli.log_format, cli.log_file.as_deref())?;
+    let metrics = Metrics::shared();
+    if cli.stats_interval > 0 {
+        telemetry::spawn_interval_reporter(
+            metrics.clone(),
+            std::time::Duration::from_secs(cli.stats_interval),
+        );
+    }
+    if let Some(addr) = &cli.metrics_listen {
+        let addr = addr.to_string();
+        let metrics = metrics.clone();
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async move {
+                let addr = pixel_change_check_client::network::resolve(&addr)
+                    .await
+                    .with_context(|| format!("Invalid --metrics-listen address '{addr}'"))?;
+                tokio::spawn(async move {
+                    if let Err(e) = telemetry::logging::serve_metrics(addr, metrics).await {
+                        tracing::error!("Metrics endpoint stopped: {e}");
+                    }
+                });
+                Ok::<(), anyhow::Error>(())
+            })?;
+    }
 
     match cli.command {
         Commands::Share {
@@ -203,6 +238,15 @@ fn main() -> Result<()> {
                 reconnect,
             };
             view::run_view(args)
+        }
+        Commands::Diagnose => {
+            // Answers "do I need a relay?" without contacting anyone. The
+            // STUN probe is a single UDP round trip to a public server,
+            // which is the only rung that can be tested without a peer.
+            let runtime = tokio::runtime::Runtime::new()?;
+            let report = runtime.block_on(pixel_change_check_client::reach::diagnose(None));
+            print!("{}", pixel_change_check_client::reach::render(&report));
+            Ok(())
         }
         Commands::Relay { listen, token } => {
             let token = token_from(token.as_ref(), "relay token")?;

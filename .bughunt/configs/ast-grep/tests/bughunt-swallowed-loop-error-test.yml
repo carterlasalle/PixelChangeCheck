@@ -1,0 +1,21 @@
+id: bughunt-swallowed-loop-error
+valid:
+  - |
+      for item in items:
+        try:
+          work(item)
+        except ValueError:
+          record(item)
+invalid:
+  - |
+      for item in items:
+        try:
+          work(item)
+        except ValueError:
+          continue
+  - |
+      while True:
+        try:
+          work()
+        except:
+          continue

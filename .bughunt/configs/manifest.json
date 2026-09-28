@@ -1,0 +1,317 @@
+{
+  "schema_version": 3,
+  "artifacts": [
+    {
+      "name": "Ruff",
+      "path": ".bughunt/configs/ruff.toml",
+      "state": "READY",
+      "detail": "ALL + preview rules; test-idiom scoped; tool/runtime excluded"
+    },
+    {
+      "name": "basedpyright",
+      "path": ".bughunt/configs/basedpyrightconfig.json",
+      "state": "READY",
+      "detail": "typeCheckingMode=all; Any/Unknown/unreachable/unsafe ignores are errors"
+    },
+    {
+      "name": "mypy",
+      "path": ".bughunt/configs/mypy.ini",
+      "state": "READY",
+      "detail": "strict plus Any ban, unreachable analysis, and optional correctness error codes"
+    },
+    {
+      "name": "ty",
+      "path": ".bughunt/configs/ty.toml",
+      "state": "READY",
+      "detail": "all rules=error; strict equality/generic narrowing; generic type:ignore disabled"
+    },
+    {
+      "name": "Pyrefly",
+      "path": ".bughunt/configs/pyrefly.toml",
+      "state": "READY",
+      "detail": "preset=all; no import-to-Any escape hatches; unannotated bodies checked; constants treated final"
+    },
+    {
+      "name": "Pylint-Tests",
+      "path": ".bughunt/configs/pylintrc-tests",
+      "state": "READY",
+      "detail": "relaxed test-idiom contract: docstring/magic/imports/args relaxed"
+    },
+    {
+      "name": "Pylint",
+      "path": ".bughunt/configs/pylintrc",
+      "state": "READY",
+      "detail": "all bundled checkers/messages enabled; strict complexity/design thresholds"
+    },
+    {
+      "name": "Complexipy",
+      "path": ".bughunt/configs/complexipy.toml",
+      "state": "READY",
+      "detail": "cognitive complexity <=10; ignores disabled and ignored functions reported"
+    },
+    {
+      "name": "Bandit",
+      "path": ".bughunt/configs/bandit.yaml",
+      "state": "READY",
+      "detail": "all installed security tests; first-party source roots only"
+    },
+    {
+      "name": "complexity budgets",
+      "path": "bughunt.toml",
+      "state": "EXISTING",
+      "detail": "existing [complexity] budgets preserved"
+    },
+    {
+      "name": "environment contract",
+      "path": ".env.example",
+      "state": "N/A",
+      "detail": "no static environment-variable use detected; no .env.example generated"
+    },
+    {
+      "name": "ast-grep",
+      "path": ".bughunt/configs/sgconfig.yml",
+      "state": "READY",
+      "detail": "generated structural rule pack + test directory"
+    },
+    {
+      "name": "ast-grep rule",
+      "path": ".bughunt/configs/ast-grep/rules/swallowed-exception.yml",
+      "state": "READY",
+      "detail": "high-confidence structural bug rule"
+    },
+    {
+      "name": "ast-grep rule",
+      "path": ".bughunt/configs/ast-grep/rules/return-in-finally.yml",
+      "state": "READY",
+      "detail": "high-confidence structural bug rule"
+    },
+    {
+      "name": "ast-grep rule",
+      "path": ".bughunt/configs/ast-grep/rules/swallowed-loop-error.yml",
+      "state": "READY",
+      "detail": "high-confidence structural bug rule"
+    },
+    {
+      "name": "ast-grep rule",
+      "path": ".bughunt/configs/ast-grep/rules/unguarded-first-index.yml",
+      "state": "READY",
+      "detail": "high-confidence structural bug rule"
+    },
+    {
+      "name": "ast-grep rule",
+      "path": ".bughunt/configs/ast-grep/rules/fillna-zero.yml",
+      "state": "READY",
+      "detail": "high-confidence structural bug rule"
+    },
+    {
+      "name": "ast-grep rule",
+      "path": ".bughunt/configs/ast-grep/rules/runtime-assert.yml",
+      "state": "READY",
+      "detail": "high-confidence structural bug rule"
+    },
+    {
+      "name": "ast-grep rule",
+      "path": ".bughunt/configs/ast-grep/rules/repo-relative-resource.yml",
+      "state": "READY",
+      "detail": "high-confidence structural bug rule"
+    },
+    {
+      "name": "ast-grep rule test",
+      "path": ".bughunt/configs/ast-grep/tests/bughunt-swallowed-exception-test.yml",
+      "state": "READY",
+      "detail": "positive/negative regression fixtures for shipped structural rule"
+    },
+    {
+      "name": "ast-grep rule test",
+      "path": ".bughunt/configs/ast-grep/tests/bughunt-return-in-finally-test.yml",
+      "state": "READY",
+      "detail": "positive/negative regression fixtures for shipped structural rule"
+    },
+    {
+      "name": "ast-grep rule test",
+      "path": ".bughunt/configs/ast-grep/tests/bughunt-swallowed-loop-error-test.yml",
+      "state": "READY",
+      "detail": "positive/negative regression fixtures for shipped structural rule"
+    },
+    {
+      "name": "ast-grep rule test",
+      "path": ".bughunt/configs/ast-grep/tests/bughunt-unguarded-first-index-test.yml",
+      "state": "READY",
+      "detail": "positive/negative regression fixtures for shipped structural rule"
+    },
+    {
+      "name": "ast-grep rule test",
+      "path": ".bughunt/configs/ast-grep/tests/bughunt-fillna-zero-test.yml",
+      "state": "READY",
+      "detail": "positive/negative regression fixtures for shipped structural rule"
+    },
+    {
+      "name": "ast-grep rule test",
+      "path": ".bughunt/configs/ast-grep/tests/bughunt-runtime-assert-test.yml",
+      "state": "READY",
+      "detail": "positive/negative regression fixtures for shipped structural rule"
+    },
+    {
+      "name": "ast-grep rule test",
+      "path": ".bughunt/configs/ast-grep/tests/bughunt-repo-relative-resource-test.yml",
+      "state": "READY",
+      "detail": "positive/negative regression fixtures for shipped structural rule"
+    },
+    {
+      "name": "Import Linter",
+      "path": "",
+      "state": "REVIEW",
+      "detail": "could not safely infer an importable first-party package root"
+    },
+    {
+      "name": "Pysa/Pyre",
+      "path": ".pyre_configuration",
+      "state": "EXISTING",
+      "detail": "existing project Pyre configuration preserved"
+    },
+    {
+      "name": "Pysa taint config",
+      "path": ".bughunt/configs/pysa/taint.config",
+      "state": "READY",
+      "detail": "valid BugHunt source/sink namespace and taint rule"
+    },
+    {
+      "name": "Pysa starter models",
+      "path": ".bughunt/configs/pysa/bughunt.pysa",
+      "state": "READY",
+      "detail": "valid model file; semantic app models intentionally require evidence"
+    },
+    {
+      "name": "Hypothesis",
+      "path": ".bughunt/configs/hypothesis_plugin.py",
+      "state": "READY",
+      "detail": "2,000 examples, 100 state steps, shrinking + multiple bug reporting, no health-check suppression"
+    },
+    {
+      "name": "coverage.py",
+      "path": ".bughunt/configs/coverage.ini",
+      "state": "READY",
+      "detail": "branch=true; missing lines/branches become first-class findings and feed risk/mutation prioritization"
+    },
+    {
+      "name": "Blockbuster",
+      "path": ".bughunt/configs/blockbuster_plugin.py",
+      "state": "READY",
+      "detail": "autouse asyncio blocking-call detector for the runtime verification pass"
+    },
+    {
+      "name": "Python environment matrix",
+      "path": ".bughunt/generated/noxfile.py",
+      "state": "READY",
+      "detail": "CPython 3.11-3.14 plus 3.14t when supported; deterministic Nox definition generated"
+    },
+    {
+      "name": "Schemathesis",
+      "path": ".bughunt/configs/schemathesis.toml",
+      "state": "READY",
+      "detail": "all generation modes, shrinking, x00/extra params, continue-on-failure, auto workers"
+    },
+    {
+      "name": "Semgrep",
+      "path": ".bughunt/configs/semgrep/rules",
+      "state": "READY",
+      "detail": "13 bundled correctness-first rules + local/generated rules; p/default runs as registry baseline; security-audit/secrets are opt-in"
+    },
+    {
+      "name": "CodeQL",
+      "path": ".bughunt/configs/codeql/queries",
+      "state": "READY",
+      "detail": "upstream security-and-quality suite plus local query directory"
+    },
+    {
+      "name": "mutmut",
+      "path": ".bughunt/configs/mutmut-snippet.toml",
+      "state": "REVIEW",
+      "detail": "no pyproject.toml; generated a mergeable config snippet"
+    },
+    {
+      "name": "CrossHair",
+      "path": "bughunt.toml",
+      "state": "READY",
+      "detail": "asserts + PEP316 + Deal + icontract; extended solver budgets in deep/all"
+    },
+    {
+      "name": "Deal",
+      "path": "bughunt.toml",
+      "state": "READY",
+      "detail": "Deal lint across first-party source roots"
+    },
+    {
+      "name": "Vulture",
+      "path": "bughunt.toml",
+      "state": "READY",
+      "detail": "confidence floor: PR 80, deep 40, all 0 for maximum dead-code recall"
+    },
+    {
+      "name": "BugHunt policy pack",
+      "path": "built-in",
+      "state": "READY",
+      "detail": "env contract/secrets, persistence-boundary coupling, export round-trip coverage, and implementation-coupled test heuristics"
+    },
+    {
+      "name": "BugHunt complexity",
+      "path": "bughunt.toml",
+      "state": "READY",
+      "detail": "cyclomatic + LOC + ABC + built asset budgets; complements Ruff/Pylint/Complexipy/Lizard/Radon"
+    },
+    {
+      "name": "deptry",
+      "path": "bughunt.toml",
+      "state": "READY",
+      "detail": "all dependency rules; first-party source roots with runtime/generated exclusions"
+    },
+    {
+      "name": "Atheris",
+      "path": ".bughunt/generated/targets.json",
+      "state": "AUTO",
+      "detail": "safe parser/decoder harness discovery follows config generation"
+    },
+    {
+      "name": "repository capability inventory",
+      "path": ".bughunt/generated/capabilities.json",
+      "state": "READY",
+      "detail": "9 technology capability class(es) detected; non-applicable engines are N/A, not blind spots"
+    },
+    {
+      "name": "Hadolint",
+      "path": ".bughunt/configs/hadolint.yaml",
+      "state": "READY",
+      "detail": "Dockerfile correctness/best-practice checks; warning threshold"
+    },
+    {
+      "name": "Oxlint",
+      "path": ".bughunt/configs/oxlintrc.json",
+      "state": "READY",
+      "detail": "correctness+suspicious strict; pedantic/restriction/perf warnings; style disabled"
+    },
+    {
+      "name": "Knip",
+      "path": ".bughunt/configs/knip.json",
+      "state": "READY",
+      "detail": "harness/runtime/dependency dirs ignored so dynamically loaded entry points are not reported unused"
+    },
+    {
+      "name": "ESLint",
+      "path": ".bughunt/configs/eslint.config.mjs",
+      "state": "READY",
+      "detail": "correctness-first JS plus strict type-aware typescript-eslint when TypeScript is detected; project-owned ESLint configs remain supported"
+    },
+    {
+      "name": "custom semantic campaigns",
+      "path": "bughunt.toml",
+      "state": "READY",
+      "detail": "0 high-confidence repository-specific campaign(s) written to managed [[custom.checks]] entries"
+    },
+    {
+      "name": "Pysa inferred semantic models",
+      "path": ".bughunt/configs/pysa/bughunt.pysa",
+      "state": "READY",
+      "detail": "0 high-confidence direct source/sink wrapper model(s) inferred; evidence in .bughunt/generated/pysa-models.json"
+    }
+  ]
+}

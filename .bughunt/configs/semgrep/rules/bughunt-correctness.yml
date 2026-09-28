@@ -1,0 +1,249 @@
+rules:
+  - id: bughunt.cached-generator
+    message: Caching a generator reuses the same consumable iterator; later cache hits
+      can silently return an exhausted generator.
+    languages: [python]
+    severity: ERROR
+    metadata: {category: correctness, confidence: high}
+    pattern-either:
+      - pattern: |
+          @functools.lru_cache(...)
+          def $F(...):
+            ...
+            yield ...
+      - pattern: |
+          @functools.cache
+          def $F(...):
+            ...
+            yield ...
+
+  - id: bughunt.unconsumed-threadpool-map
+    message: ThreadPoolExecutor.map results are never consumed, so worker exceptions may
+      never be observed by the caller.
+    languages: [python]
+    severity: ERROR
+    metadata: {category: correctness, confidence: high}
+    patterns:
+      - pattern-inside: |
+          with concurrent.futures.ThreadPoolExecutor(...) as $POOL:
+            ...
+      - pattern: $POOL.map(...)
+      - pattern-not-inside: |
+          for $X in $POOL.map(...):
+            ...
+      - pattern-not-inside: |
+          list($POOL.map(...))
+      - pattern-not-inside: |
+          tuple($POOL.map(...))
+      - pattern-not-inside: |
+          $RESULTS = $POOL.map(...)
+          ...
+          for $X in $RESULTS:
+            ...
+
+  - id: bughunt.dict-delete-during-iteration
+    message: Deleting entries from the dictionary being iterated can raise RuntimeError
+      or invalidate iteration semantics.
+    languages: [python]
+    severity: ERROR
+    metadata: {category: correctness, confidence: high}
+    pattern-either:
+      - pattern: |
+          for $K in $D:
+            ...
+            del $D[$K]
+      - pattern: |
+          for $K in $D.keys():
+            ...
+            del $D[$K]
+      - pattern: |
+          for $K, $V in $D.items():
+            ...
+            del $D[$K]
+
+  - id: bughunt.list-mutation-during-iteration
+    message: Mutating the list currently being iterated changes iterator behavior and
+      commonly skips, repeats, or indefinitely extends work.
+    languages: [python]
+    severity: WARNING
+    metadata: {category: correctness, confidence: medium}
+    pattern-either:
+      - pattern: |
+          for $X in $L:
+            ...
+            $L.append(...)
+      - pattern: |
+          for $X in $L:
+            ...
+            $L.extend(...)
+      - pattern: |
+          for $X in $L:
+            ...
+            $L.remove(...)
+      - pattern: |
+          for $X in $L:
+            ...
+            $L.pop(...)
+      - pattern: |
+          for $X in $L:
+            ...
+            del $L[...]
+
+  - id: bughunt.sync-sleep-in-async
+    message: time.sleep inside async code blocks the event loop; use an async wait or
+      move blocking work off the loop.
+    languages: [python]
+    severity: ERROR
+    metadata: {category: correctness, confidence: high}
+    patterns:
+      - pattern: time.sleep(...)
+      - pattern-inside: |
+          async def $F(...):
+            ...
+      - pattern-not-inside: |
+          async def $F(...):
+            def $INNER(...):
+              ...
+
+  - id: bughunt.file-rebound-before-close
+    message: This file handle is overwritten before it is closed, leaking the original
+      resource until garbage collection.
+    languages: [python]
+    severity: ERROR
+    metadata: {category: correctness, confidence: high}
+    patterns:
+      - pattern: |
+          $F = open($A, ...)
+          ...
+          $F = open($B, ...)
+      - pattern-not: |
+          $F = open($A, ...)
+          ...
+          $F.close()
+          ...
+          $F = open($B, ...)
+
+  - id: bughunt.named-tempfile-name-before-flush
+    message: A NamedTemporaryFile path is consumed after writes but before flush/close,
+      so another reader may observe incomplete data.
+    languages: [python]
+    severity: ERROR
+    metadata: {category: correctness, confidence: high}
+    patterns:
+      - pattern-inside: |
+          $F = tempfile.NamedTemporaryFile(...)
+          ...
+          $F.write(...)
+          ...
+      - pattern: $F.name
+      - pattern-not-inside: |
+          $F = tempfile.NamedTemporaryFile(...)
+          ...
+          $F.write(...)
+          ...
+          $F.flush()
+          ...
+          $F.name
+      - pattern-not-inside: |
+          $F = tempfile.NamedTemporaryFile(...)
+          ...
+          $F.write(...)
+          ...
+          $F.close()
+          ...
+          $F.name
+
+  - id: bughunt.assertion-free-test
+    message: This test contains no assertion, so it passes silently no matter what the
+      code under test does. Add assert statements, or with pytest.raises / pytest.fail
+      / unittest assert methods. (Assertions living in shared helpers are the known
+      exception; hoist one assertion into the test itself.)
+    languages: [python]
+    paths:
+      include:
+        - "tests/**"
+        - "test_*.py"
+        - "*_test.py"
+    severity: ERROR
+    metadata: {category: correctness, confidence: high}
+    patterns:
+      - pattern: |
+          def $F(...):
+            ...
+      - metavariable-regex:
+          metavariable: $F
+          regex: "test_.*"
+      - pattern-not-inside: |
+          def $F(...):
+            ...
+            assert ...
+            ...
+      - pattern-not-inside: |
+          def $F(...):
+            ...
+            with pytest.raises(...):
+              ...
+      - pattern-not-inside: |
+          def $F(...):
+            ...
+            pytest.fail(...)
+            ...
+      - pattern-not-regex: (?s)\.assert\w+\s*\(
+
+  - id: bughunt.ignored-warnings-filter
+    message: This warnings filter discards warnings process-wide instead of surfacing
+      them. Scope it to a specific module/category, or fix the underlying warning.
+    languages: [python]
+    severity: WARNING
+    metadata: {category: correctness, confidence: medium}
+    pattern-either:
+      - pattern: warnings.filterwarnings("ignore", ...)
+      - pattern: warnings.filterwarnings(..., action="ignore", ...)
+      - pattern: warnings.simplefilter("ignore", ...)
+      - pattern: warnings.simplefilter(..., action="ignore", ...)
+
+  - id: bughunt.suppressed-exception
+    message: contextlib.suppress silently discards the listed exceptions. Confirm each
+      one is truly safe to swallow here; prefer handling or logging otherwise.
+    languages: [python]
+    severity: WARNING
+    metadata: {category: correctness, confidence: high}
+    pattern-either:
+      - pattern: |
+          with contextlib.suppress(...):
+            ...
+      - pattern: |
+          with suppress(...):
+            ...
+
+  - id: bughunt.boolean-env-denylist
+    message: Denylist boolean parsing treats every unexpected value as true;
+      use an explicit allowlist mapping instead.
+    languages: [python]
+    severity: ERROR
+    metadata: {category: correctness, confidence: high}
+    patterns:
+      - pattern-either:
+          - pattern: os.getenv(...) not in {...}
+          - pattern: os.environ.get(...) not in {...}
+          - pattern: $V not in {"0", "false", "no", ...}
+      - pattern-not-regex: (?s)in\s*\{\s*"1"\s*,\s*"true"
+
+  - id: bughunt.duplicated-version-constant
+    message: Authority/version literal shape duplicated across files; hoist
+      to one constant. The native BHCONST check flags cross-file dupes.
+    languages: [python]
+    severity: WARNING
+    metadata: {category: correctness, confidence: medium}
+    patterns:
+      - pattern-regex: "[A-Za-z][A-Za-z0-9_-]*-v\\d+(\\.\\d+)*"
+
+  - id: bughunt.hardcoded-success-claim
+    message: Hardcoded success claim after computed validation; report the
+      computed counts instead of a literal zero.
+    languages: [python]
+    severity: WARNING
+    metadata: {category: correctness, confidence: medium}
+    pattern-either:
+      - pattern-regex: ERROR count\s*=\s*0
+      - pattern-regex: errors\s*=\s*0

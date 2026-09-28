@@ -1,0 +1,28 @@
+{
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "pedantic": "warn",
+    "perf": "warn",
+    "restriction": "warn",
+    "style": "off",
+    "nursery": "warn"
+  },
+  "plugins": [
+    "unicorn",
+    "typescript",
+    "oxc",
+    "import",
+    "promise"
+  ],
+  "rules": {
+    "eqeqeq": "error",
+    "array-callback-return": "error",
+    "guard-for-in": "error",
+    "no-new-func": "error",
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-non-null-assertion": "warn",
+    "typescript/no-misused-promises": "error",
+    "typescript/switch-exhaustiveness-check": "error"
+  }
+}

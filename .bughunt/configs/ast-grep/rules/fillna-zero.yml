@@ -1,0 +1,9 @@
+id: bughunt-fillna-zero
+language: Python
+severity: warning
+message: fillna(0) turns missing measurement into physical zero; the
+  native BHMISS001 rule decides at the quantitative sink.
+rule:
+  any:
+    - pattern: $SERIES.fillna(0)
+    - pattern: $SERIES.fillna(0.0)

@@ -1,0 +1,10 @@
+id: bughunt-unguarded-first-index
+valid:
+  - |
+      lines = proc.stdout.splitlines()
+      first = lines[0] if lines else ""
+invalid:
+  - |
+      first = proc.stdout.splitlines()[0]
+  - |
+      name = run(["whoami"], capture_output=True, text=True).stdout.splitlines()[0]

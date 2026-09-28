@@ -1,0 +1,26 @@
+[Unit]
+Description=PixelChangeCheck relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pcc-relay
+Group=pcc-relay
+EnvironmentFile=/etc/pcc-relay/pcc-relay.env
+ExecStart=/usr/local/bin/pcc relay --listen ${PCC_RELAY_LISTEN} --token ${PCC_RELAY_TOKEN}
+Restart=always
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+CPUQuota=50%
+ReadWritePaths=/var/lib/pcc-relay
+
+[Install]
+WantedBy=multi-user.target

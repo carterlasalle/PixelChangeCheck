@@ -1,0 +1,17 @@
+id: bughunt-swallowed-exception
+language: Python
+severity: error
+message: Exception is silently swallowed; this hides failures and can corrupt
+  control flow.
+rule:
+  any:
+    - pattern: |
+        try:
+          $$$BODY
+        except $EXC:
+          pass
+    - pattern: |
+        try:
+          $$$BODY
+        except:
+          pass

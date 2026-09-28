@@ -1,0 +1,7 @@
+id: bughunt-fillna-zero
+valid:
+  - |
+      vals = series.fillna(method="ffill")
+invalid:
+  - |
+      vals = series.fillna(0)
