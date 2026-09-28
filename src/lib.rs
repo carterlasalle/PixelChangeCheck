@@ -1,5 +1,6 @@
 pub mod app;
 pub mod capture;
+pub mod codec;
 pub mod encoder;
 pub mod network;
 pub mod pcc;

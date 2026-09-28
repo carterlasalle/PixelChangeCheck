@@ -118,8 +118,10 @@ See `docs/adr/0002-token-and-pin.md` and `SECURITY.md`.
 
 - **Inter-frame video.** Motion content is the case a pixel-diff protocol
   is worst at, and the honest answer is a negotiated video codec rather
-  than a cleverer diff. It is not implemented; the exact path is the
-  product.
+  than a cleverer diff. The registry, identifiers and capability probing
+  are in `src/codec/`; no encoder is linked, and the two pure-Rust
+  candidates were rejected on evidence recorded in that module. The
+  exact path is the product until an encoder is actually available.
 - **Platform damage metadata.** DXGI, ScreenCaptureKit and PipeWire all
   expose dirty rectangles, and using them would skip work. Capture is
   full-frame today.

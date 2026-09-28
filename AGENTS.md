@@ -2772,6 +2772,10 @@ must be changed together.
   one, read once before closing, or the viewer reports "connection lost".
 - `scripts/smoke.sh` is the only check that exercises the CLI end to end.
   `cargo test` passes while the printed pin does not work.
+- No video encoder is linked. `rav1e` 0.6.3 aborts on Rust's `unsafe`
+  precondition checks (out-of-bounds in `context/cdf_context.rs`, any
+  frame size); 0.6.6 pins `clap =4.0.32`, conflicting with this
+  project's `clap 4.5`. Do not re-add it without re-testing that.
 - TraceLayer is **not** configured here (no `.trace/trace.toml`), despite
   the invariant trailer at the bottom of this file. `trace verify
   --changed` exits 0 with an explanatory message. Do not add `trace:v1`
