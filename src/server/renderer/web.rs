@@ -77,6 +77,15 @@ const FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 
 const CLIENT_JS: &str = include_str!("client.js");
 
+/// Produces the encoded message sequence that brings a receiver up to
+/// date, from whatever the sharer currently believes viewers hold.
+///
+/// The sharer supplies this because only it owns the authoritative
+/// surface. Without it a browser that connects mid-session would get
+/// patches against a base it never had, which is the stale-join bug in a
+/// different costume.
+pub type SnapshotFn = Arc<dyn Fn() -> Vec<Vec<u8>> + Send + Sync>;
+
 /// Serve the browser viewer. Blocks the calling thread, so run it on its
 /// own OS thread.
 pub fn run_web_server(
@@ -86,6 +95,7 @@ pub fn run_web_server(
     token: SessionToken,
     fingerprint: String,
     tls: Option<Arc<rustls::ServerConfig>>,
+    snapshot: SnapshotFn,
 ) -> Result<()> {
     let gate = Arc::new(Semaphore::new(MAX_STREAMS));
     let live = Arc::new(AtomicUsize::new(0));
@@ -134,13 +144,16 @@ pub fn run_web_server(
             let token = token.clone();
             let acceptor = acceptor.clone();
             let updates = updates.resubscribe();
+            let snapshot = snapshot.clone();
             tokio::spawn(async move {
                 let result = match acceptor {
                     Some(acceptor) => match acceptor.accept(tcp).await {
-                        Ok(stream) => handle(&surface, &updates, &token, stream, Some(peer)).await,
+                        Ok(stream) => {
+                            handle(&surface, &updates, &token, &snapshot, stream, Some(peer)).await
+                        }
                         Err(e) => Err(e.into()),
                     },
-                    None => handle(&surface, &updates, &token, tcp, Some(peer)).await,
+                    None => handle(&surface, &updates, &token, &snapshot, tcp, Some(peer)).await,
                 };
                 if let Err(e) = result {
                     warn!("Web client {peer}: {e}");
@@ -161,6 +174,7 @@ async fn handle<S: ByteStream>(
     surface: &SharedSurface,
     _updates: &broadcast::Receiver<Arc<Vec<u8>>>,
     token: &SessionToken,
+    snapshot: &SnapshotFn,
     mut stream: S,
     peer: Option<SocketAddr>,
 ) -> Result<()> {
@@ -213,7 +227,7 @@ async fn handle<S: ByteStream>(
                 .clone()
                 .context("missing Sec-WebSocket-Key: this is not a WebSocket upgrade")?;
             info!("WebSocket viewer connected from {peer:?}");
-            serve_websocket(&mut stream, &key, _updates).await
+            serve_websocket(&mut stream, &key, _updates, snapshot.clone()).await
         }
         _ => respond(&mut stream, 404, "text/plain; charset=utf-8", b"not found").await,
     }
@@ -373,6 +387,7 @@ async fn serve_websocket<S: ByteStream>(
     stream: &mut S,
     key: &str,
     updates: &broadcast::Receiver<Arc<Vec<u8>>>,
+    snapshot: SnapshotFn,
 ) -> Result<()> {
     let response = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
@@ -384,6 +399,16 @@ async fn serve_websocket<S: ByteStream>(
     // The sharer publishes the encoded message envelope; the browser reads
     // the version byte first, so the framing prefix is not part of it.
     let mut updates = updates.resubscribe();
+
+    // Catch this viewer up before any live update, exactly as the native
+    // viewer does. Subscribing first means nothing produced in between is
+    // lost, and the compositor discards anything it already holds.
+    for msg in snapshot() {
+        if ws_write_frame(stream, 0x2, &msg).await.is_err() {
+            return Ok(());
+        }
+    }
+
     loop {
         let update = tokio::select! {
             update = updates.recv() => match update {

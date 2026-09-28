@@ -42,7 +42,11 @@ class Reject extends Error {}
 
 class Reader {
   constructor(view, offset = 0) {
+    // A DataView for little-endian reads and a Uint8Array over the same
+    // bytes for slicing: they are different objects and only one of them
+    // can be sliced.
     this.view = view;
+    this.bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
     this.offset = offset;
   }
   get remaining() { return this.view.byteLength - this.offset; }
@@ -60,7 +64,7 @@ class Reader {
     this.offset += 8;
     return Number(v);
   }
-  take(n) { this.need(n); const v = this.view.subarray(this.offset, this.offset + n); this.offset += n; return v; }
+  take(n) { this.need(n); const v = this.bytes.subarray(this.offset, this.offset + n); this.offset += n; return v; }
   allocLen(max, what) {
     const n = this.u32();
     if (n > max) throw new Reject(`${what} too large: ${n} (max ${max})`);
@@ -478,10 +482,13 @@ class Session {
       }
     } catch (e) {
       if (e instanceof Rejected) {
-        // The state machine tells us exactly what is missing; ask for it
-        // rather than guessing.
-        this.status(`repairing: ${e.reason}`);
-        this.requestKeyframe();
+        // A revision we already hold is the expected consequence of
+        // joining mid-stream: the join snapshot covers it. Only a missing
+        // base is worth repairing.
+        if (e.reason === 'needs-snapshot' || e.reason === 'stale-epoch') {
+          this.status(`repairing: ${e.reason}`);
+          this.requestKeyframe();
+        }
       } else {
         this.status(`invalid update: ${e.message}`);
         this.requestKeyframe();
