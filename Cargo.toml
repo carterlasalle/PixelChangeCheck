@@ -53,7 +53,7 @@ screenshots = "0.8.5"
 display-info = "0.4.3"
 
 # Image processing
-image = { version = "0.24", features = ["jpeg", "png"] }
+image = { version = "0.25", features = ["jpeg", "png"] }
 rgb = "0.8"
 jpeg-encoder = { version = "0.5", features = ["simd"] }
 
