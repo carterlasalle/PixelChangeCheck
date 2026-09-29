@@ -946,8 +946,22 @@ async fn capture_loop(
             .map(|(_, d)| d.len())
             .unwrap_or(usize::MAX);
         let (width, height) = surface_size;
-        // A mutable view of the shared surface; this copies only if a
-        // joining viewer is holding the same allocation right now.
+        // A mutable view of the shared surface.
+        //
+        // The comment here used to claim this "copies only if a joining
+        // viewer is holding the same allocation right now". That was
+        // wrong: the loop publishes `reference.clone()` below, which is
+        // an Arc clone, so the second strong count is always there and
+        // this deep-copies the whole framebuffer every frame.
+        //
+        // Measured on an M-series Mac at 1920x1080: 0.236 ms/frame, about
+        // 1.4% of a 60 fps budget. Real traffic, small wall clock -- the
+        // copy engine moves 5.9 MiB in a quarter of a millisecond.
+        //
+        // It is left in place deliberately. Publishing the surface every
+        // frame is what makes a late joiner see what is on screen *now*,
+        // and that is a bug this code shipped once already. Trading 1.4%
+        // of a frame budget for a chance to reintroduce it is a bad deal.
         let rgb: &mut Vec<u8> = Arc::make_mut(&mut reference);
 
         let detect_start = Instant::now();

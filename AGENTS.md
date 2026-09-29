@@ -2802,6 +2802,15 @@ must be changed together.
   a live sharer, and fails when the real file is wrong. It does not
   catch a session dropped only after the sharer reads something from
   the browser; that path needs a real browser.
+- `Arc::make_mut` on the capture loop's `reference` deep-copies the
+  whole framebuffer every frame, because the loop publishes an `Arc`
+  clone of the same buffer immediately below. The comment claimed the
+  copy was conditional; it is not. Measured at 0.236 ms/frame for
+  1920x1080 on an M-series Mac, roughly 1.4% of a 60 fps budget, so it
+  was left in place deliberately: publishing the surface every frame is
+  what makes a late joiner see what is on screen *now*, and that bug
+  shipped once already. Do not "optimise" it away without a way to
+  prove the late joiner still gets the current surface.
 - The browser compositor's surface is **RGBA**, not RGB. `ImageData` is
   RGBA and nothing else, and every rect/copy/fill indexes the surface
   four bytes at a time. The wire format stays RGB; the widening happens
