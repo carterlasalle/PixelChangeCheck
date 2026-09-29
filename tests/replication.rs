@@ -839,3 +839,76 @@ fn pixel_change_validation_reports_the_shape_it_rejected() {
         "unhelpful: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// "Lag then keep changing: a viewer that missed a few revisions replays
+// them instead of paying for a whole snapshot"
+// ---------------------------------------------------------------------------
+
+/// Drive the planner the way the capture loop does, encode each revision
+/// the way the broadcast does, and apply the replayed tail to a viewer
+/// that missed exactly those revisions.
+#[test]
+fn a_viewer_that_missed_a_few_revisions_replays_them() {
+    let planner = Planner::default();
+    let mut reference = blank();
+    let mut model = blank().data;
+
+    // The viewer holds rev 0; the sharer ships revs 1..=3.
+    let mut viewer = Compositor::new();
+    install(&mut viewer, &reference, 0, 0);
+
+    let mut shipped: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut rev = 0u64;
+    for i in 0..3 {
+        let mut current = Frame::new(0, W, H, model.clone()).unwrap();
+        px(&mut current, i, i, [50 + i as u8 * 10, 60, 70]);
+        let plan = planner
+            .plan(&mut reference.data, W, H, &current, limits())
+            .unwrap();
+        assert!(!plan.ops.is_empty(), "each round must ship an update");
+        rev += 1;
+        let bytes = Message::PartialUpdate {
+            rev,
+            pts_us: 0,
+            epoch: 0,
+            ops: plan.ops,
+        }
+        .encode()
+        .unwrap();
+        shipped.push((rev, bytes));
+        model = current.data;
+    }
+
+    // The viewer missed revs 1..=2 but its floor (0) is still covered, so
+    // replaying the tail converges it without a snapshot.
+    let replay: Vec<&[u8]> = shipped
+        .iter()
+        .filter(|(r, _)| *r > 0)
+        .take(2)
+        .map(|(_, b)| b.as_slice())
+        .collect();
+    assert_eq!(replay.len(), 2);
+    for bytes in replay {
+        let Message::PartialUpdate {
+            rev, epoch, ops, ..
+        } = Message::decode(bytes).unwrap()
+        else {
+            panic!("the ring replays encoded updates, not snapshots");
+        };
+        viewer.apply_ops(rev, epoch, &ops).unwrap();
+    }
+    // One revision still missing: the viewer is behind, not corrupt.
+    let Message::PartialUpdate {
+        rev, epoch, ops, ..
+    } = Message::decode(&shipped[2].1).unwrap()
+    else {
+        panic!("the ring replays encoded updates, not snapshots");
+    };
+    viewer.apply_ops(rev, epoch, &ops).unwrap();
+    assert_eq!(
+        viewer.buffer(),
+        &model[..],
+        "replaying the missed revisions must converge the viewer"
+    );
+}

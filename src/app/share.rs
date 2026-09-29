@@ -104,6 +104,11 @@ struct Published {
     /// Encoded snapshot, tagged with the revision it represents, produced
     /// on demand and then shared by every joiner and every repair.
     encoded: Option<(Rev, Arc<Vec<u8>>)>,
+    /// Bounded replay of recent broadcast payloads. The capture loop pushes
+    /// every message it broadcasts; `serve_viewer` reads it when a viewer
+    /// lags or asks for a refresh. Same bytes as the broadcast, second
+    /// copy, bounded — never a second source of truth.
+    ring: RevisionRing,
 }
 
 impl Published {
@@ -117,6 +122,246 @@ impl Published {
 
 type Shared = Arc<RwLock<Published>>;
 type EncodedBroadcast = broadcast::Sender<Arc<Vec<u8>>>;
+
+/// Bounded replay of recent revisions, so a viewer that only missed a few
+/// updates is caught up by replay instead of a whole snapshot.
+///
+/// Placement: the capture loop owns the ring and pushes every encoded
+/// message the broadcast carries (updates, snapshots-as-sequences, and
+/// keep-alives — the revision chain, not just the interesting parts).
+/// `serve_viewer` borrows it read-only when a viewer lags or asks for a
+/// refresh: contiguous coverage from the viewer's floor means replay,
+/// anything else means snapshot. The ring never changes what the
+/// broadcast carries; it is a second copy of the same bytes, bounded in
+/// both entries and bytes so a busy screen cannot grow it without limit.
+/// An epoch change clears it: rectangles from an older geometry are
+/// meaningless, and replaying them would corrupt rather than repair.
+#[derive(Debug, Default, Clone)]
+struct RevisionRing {
+    entries: std::collections::VecDeque<RingEntry>,
+    bytes: usize,
+}
+
+/// One ring entry: the encoded broadcast payload plus the revision and
+/// epoch it belongs to. Snapshots span several messages at one revision;
+/// every message of the sequence is stored, so replay reproduces the
+/// exact byte stream the broadcast carried.
+#[derive(Debug, Clone)]
+struct RingEntry {
+    rev: Rev,
+    epoch: Epoch,
+    bytes: Arc<Vec<u8>>,
+}
+
+/// Keep roughly half a minute of revisions: long enough to ride out a
+/// transient stall, short enough that replay stays cheaper than a
+/// snapshot. The byte cap is the binding limit on a busy screen.
+const RING_MAX_ENTRIES: usize = 512;
+/// Bytes of recent revisions retained. A 1080p busy screen emits on the
+/// order of a few hundred KB/s of deltas; 16 MiB is minutes of that, so
+/// the entry cap binds first and this caps pathological snapshots.
+const RING_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+impl RevisionRing {
+    /// Record one broadcast payload. Snapshots arrive as several messages
+    /// at one revision; each is stored, so replay is byte-identical.
+    fn push(&mut self, rev: Rev, epoch: Epoch, bytes: Arc<Vec<u8>>) {
+        // An epoch change invalidates every rectangle sent so far.
+        if let Some(back) = self.entries.back() {
+            if back.epoch != epoch {
+                self.entries.clear();
+                self.bytes = 0;
+            }
+        }
+        self.bytes += bytes.len();
+        self.entries.push_back(RingEntry { rev, epoch, bytes });
+        while self.entries.len() > RING_MAX_ENTRIES || self.bytes > RING_MAX_BYTES {
+            if let Some(old) = self.entries.pop_front() {
+                self.bytes = self.bytes.saturating_sub(old.bytes.len());
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Record a keep-alive, unless the ring already ends at this revision.
+    /// Idle frames all carry the current rev and add no information, so
+    /// storing each one would churn real history out of the ring within
+    /// seconds on an idle screen.
+    fn push_keepalive(&mut self, rev: Rev, epoch: Epoch, bytes: Arc<Vec<u8>>) {
+        if let Some(back) = self.entries.back() {
+            if back.rev == rev && back.epoch == epoch {
+                return;
+            }
+        }
+        self.push(rev, epoch, bytes);
+    }
+
+    /// Messages after `floor` at `epoch`, in broadcast order, when the
+    /// ring covers them contiguously. `None` means replay is impossible:
+    /// the floor predates the ring, the epoch moved on, or a revision in
+    /// between is missing (a snapshot sequence that was truncated by the
+    /// bounds, never a partial hole — pushes are in order).
+    fn replay_from(&self, floor: Rev, epoch: Epoch) -> Option<Vec<Arc<Vec<u8>>>> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        // The ring must still hold the floor itself to prove contiguity:
+        // replay starts *after* it, but a gap between the floor and the
+        // oldest entry means unknown history.
+        let mut start = None;
+        let mut prev_rev: Option<Rev> = None;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.epoch != epoch {
+                return None;
+            }
+            if entry.rev <= floor {
+                // A snapshot sequence shares one revision across several
+                // messages; the floor is covered if any of them is at or
+                // below it, and replay starts after the whole sequence.
+                if entry.rev == floor {
+                    start = Some(i + 1);
+                } else {
+                    start = None;
+                }
+                prev_rev = Some(entry.rev);
+                continue;
+            }
+            // Past the floor: revisions must advance by exactly one per
+            // sequence. Several messages may share a revision (one
+            // snapshot), but a jump of two or more is a hole.
+            match prev_rev {
+                Some(prev) if entry.rev == prev || entry.rev == prev + 1 => {}
+                _ => return None,
+            }
+            // The floor itself is gone: entries after it prove nothing
+            // about what the viewer missed in between.
+            start?;
+            prev_rev = Some(entry.rev);
+        }
+        let start = start?;
+        if start >= self.entries.len() {
+            return Some(Vec::new());
+        }
+        Some(
+            self.entries
+                .range(start..)
+                .map(|e| e.bytes.clone())
+                .collect(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod revision_ring_tests {
+    use super::*;
+
+    fn msg(rev: Rev, _epoch: Epoch) -> Arc<Vec<u8>> {
+        // The ring stores the epoch alongside the bytes (KeepAlive carries
+        // none), so the bytes stay valid envelopes `peek_rev` can read.
+        Arc::new(Message::KeepAlive { rev }.encode().unwrap())
+    }
+
+    #[test]
+    fn replay_returns_everything_after_the_floor_in_order() {
+        let mut ring = RevisionRing::default();
+        for rev in 1..=5 {
+            ring.push(rev, 0, msg(rev, 0));
+        }
+        let out = ring.replay_from(2, 0).expect("contiguous coverage replays");
+        assert_eq!(out.len(), 3);
+        assert_eq!(crate::network::peek_rev(&out[0]), Some(3));
+        assert_eq!(crate::network::peek_rev(&out[2]), Some(5));
+    }
+
+    #[test]
+    fn a_floor_that_predates_the_ring_falls_back_to_snapshot() {
+        let mut ring = RevisionRing::default();
+        for rev in 10..=12 {
+            ring.push(rev, 0, msg(rev, 0));
+        }
+        assert!(
+            ring.replay_from(3, 0).is_none(),
+            "unknown history must not replay"
+        );
+    }
+
+    #[test]
+    fn a_hole_in_the_middle_falls_back_to_snapshot() {
+        let mut ring = RevisionRing::default();
+        for rev in [1u64, 2, 4, 5] {
+            ring.push(rev, 0, msg(rev, 0));
+        }
+        assert!(
+            ring.replay_from(1, 0).is_none(),
+            "a missing revision is not replayable"
+        );
+    }
+
+    #[test]
+    fn an_epoch_change_clears_the_ring() {
+        let mut ring = RevisionRing::default();
+        for rev in 1..=3 {
+            ring.push(rev, 0, msg(rev, 0));
+        }
+        ring.push(4, 1, msg(4, 1));
+        assert!(
+            ring.replay_from(2, 0).is_none(),
+            "old-epoch rectangles would corrupt"
+        );
+        // The clear dropped everything before the epoch change. A viewer
+        // still on the old epoch gets a snapshot (tested by the None
+        // above); once it holds rev 4 there is nothing after it to replay.
+        let out = ring.replay_from(4, 1).expect("caught-up floor replays");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn the_bounds_evict_oldest_first() {
+        let mut ring = RevisionRing::default();
+        for rev in 1..=(RING_MAX_ENTRIES as u64 + 10) {
+            ring.push(rev, 0, msg(rev, 0));
+        }
+        assert_eq!(ring.entries.len(), RING_MAX_ENTRIES);
+        assert!(
+            ring.replay_from(1, 0).is_none(),
+            "evicted history must not replay"
+        );
+        let floor = RING_MAX_ENTRIES as u64 + 9;
+        assert!(
+            ring.replay_from(floor, 0).is_some(),
+            "retained tail must replay"
+        );
+    }
+
+    #[test]
+    fn idle_keepalives_do_not_churn_real_history() {
+        let mut ring = RevisionRing::default();
+        for rev in 1..=3 {
+            ring.push(rev, 0, msg(rev, 0));
+        }
+        // An idle screen emits the same rev hundreds of times. Only the
+        // first is informative; the rest must not evict real history.
+        for _ in 0..(RING_MAX_ENTRIES + 10) {
+            ring.push_keepalive(3, 0, msg(3, 0));
+        }
+        // revs 1, 2, 3 plus the one deduped keep-alive at rev 3.
+        assert_eq!(ring.entries.len(), 3);
+        let out = ring.replay_from(2, 0).expect("history must survive idling");
+        assert_eq!(out.len(), 1);
+        assert_eq!(crate::network::peek_rev(&out[0]), Some(3));
+    }
+
+    #[test]
+    fn an_idle_floor_with_nothing_after_replays_empty() {
+        let mut ring = RevisionRing::default();
+        for rev in 1..=3 {
+            ring.push(rev, 0, msg(rev, 0));
+        }
+        let out = ring.replay_from(3, 0).expect("caught up replays empty");
+        assert!(out.is_empty());
+    }
+}
 
 /// The capture loop and the datagram pump share one frame shape instead
 /// of two parallel structs with a `From` between them.
@@ -132,6 +377,10 @@ const AUDIO_QUEUE: usize = 256;
 #[derive(Debug, Default)]
 struct ViewerStats {
     lag_events: u32,
+    /// Newest revision the viewer confirmed it applied. Starts at the
+    /// snapshot floor and only moves forward; the pressure loop reads it
+    /// to tell a merely-slow viewer from one that has stalled entirely.
+    acked_rev: Rev,
 }
 
 /// Adaptive pressure from real network feedback, 0.0 (healthy) upward.
@@ -200,6 +449,7 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
             first_frame.data.clone(),
         )?),
         encoded: None,
+        ring: RevisionRing::default(),
     }));
     if let Some(surface) = &surface {
         surface.publish(&first_frame, target_quality);
@@ -950,6 +1200,10 @@ async fn serve_viewer(
             return;
         }
     };
+    // The snapshot floor is applied by definition: the viewer holds it.
+    if let Some(v) = viewers.lock().get_mut(&id) {
+        v.acked_rev = floor;
+    }
 
     // Viewer control messages run on their own task so a refresh request is
     // not stuck behind a slow write.
@@ -991,7 +1245,7 @@ async fn serve_viewer(
                         break;
                     }
                     warn!("{label} fell behind by {missed} updates; repairing");
-                    match send_snapshot(&mut sink, &published).await {
+                    match repair_viewer(&mut sink, &published, floor).await {
                         Ok(rev) => {
                             floor = rev;
                             consecutive_lags = 0;
@@ -1013,7 +1267,13 @@ async fn serve_viewer(
                             Err(e) => { warn!("{label} refresh failed: {e}"); break; }
                         }
                     }
-                    Message::Ack { .. } => {}
+                    Message::Ack { rev } => {
+                        // Cumulative applied watermark, monotonic: an old
+                        // duplicate says nothing new.
+                        if let Some(v) = viewers.lock().get_mut(&id) {
+                            v.acked_rev = v.acked_rev.max(rev);
+                        }
+                    }
                     Message::Bye => break,
                     Message::Hello { .. } => {
                         let _ = sink.send(&Message::Error("Already authorized.".into())).await;
@@ -1026,6 +1286,34 @@ async fn serve_viewer(
     }
     viewers.lock().remove(&id);
     info!("{label} disconnected");
+}
+
+/// Catch a lagging viewer up: replay the revision ring when it covers
+/// the viewer's floor, else fall back to a fresh snapshot. Returns the new
+/// floor. A viewer that only missed a few updates gets those exact bytes
+/// replayed; one that is far behind, predates the ring, or crossed an
+/// epoch gets a snapshot. A `RequestKeyframe` still means snapshot — the
+/// viewer declared its state unusable, so replaying against it would be wrong.
+async fn repair_viewer(
+    sink: &mut Box<dyn MessageSink>,
+    published: &Shared,
+    floor: Rev,
+) -> Result<Rev> {
+    let replay = {
+        let p = published.read().await;
+        p.ring.replay_from(floor, p.epoch)
+    };
+    let Some(msgs) = replay else {
+        return send_snapshot(sink, published).await;
+    };
+    let mut new_floor = floor;
+    for bytes in &msgs {
+        sink.send_encoded(bytes).await?;
+        if let Some(rev) = crate::network::peek_rev(bytes) {
+            new_floor = new_floor.max(rev);
+        }
+    }
+    Ok(new_floor)
 }
 
 /// Take (or reuse) the current snapshot and send it whole. Returns the
@@ -1249,7 +1537,13 @@ async fn capture_loop(
             for msg in publish_snapshot(&published, &reference, width, height, rev, epoch).await? {
                 metrics.observe_message_bytes(msg.len());
                 metrics.bytes_snapshot.add(msg.len() as u64);
-                let _ = tx.send(Arc::new(msg));
+                let shared = Arc::new(msg);
+                published
+                    .write()
+                    .await
+                    .ring
+                    .push(rev, epoch, shared.clone());
+                let _ = tx.send(shared);
             }
             metrics.encode.record_duration(encode_start.elapsed());
         } else if !idle {
@@ -1274,7 +1568,13 @@ async fn capture_loop(
                 Ok(bytes) => {
                     metrics.observe_message_bytes(bytes.len());
                     metrics.serialize.record_duration(serialize_start.elapsed());
-                    let _ = tx.send(Arc::new(bytes));
+                    let shared = Arc::new(bytes);
+                    published
+                        .write()
+                        .await
+                        .ring
+                        .push(rev, epoch, shared.clone());
+                    let _ = tx.send(shared);
                 }
                 Err(e) => {
                     // Oversized: replace with a snapshot rather than
@@ -1286,7 +1586,13 @@ async fn capture_loop(
                     for msg in
                         publish_snapshot(&published, &reference, width, height, rev, epoch).await?
                     {
-                        let _ = tx.send(Arc::new(msg));
+                        let shared = Arc::new(msg);
+                        published
+                            .write()
+                            .await
+                            .ring
+                            .push(rev, epoch, shared.clone());
+                        let _ = tx.send(shared);
                     }
                 }
             }
@@ -1297,7 +1603,13 @@ async fn capture_loop(
             metrics.frames_idle.incr();
             if let Ok(bytes) = (Message::KeepAlive { rev }).encode() {
                 metrics.bytes_keepalive.add(bytes.len() as u64);
-                let _ = tx.send(Arc::new(bytes));
+                let shared = Arc::new(bytes);
+                published
+                    .write()
+                    .await
+                    .ring
+                    .push_keepalive(rev, epoch, shared.clone());
+                let _ = tx.send(shared);
             }
         }
 
@@ -1319,11 +1631,25 @@ async fn capture_loop(
         }
 
         // Real feedback-driven adaptation: viewers that fall behind are
-        // the signal, not local CPU overrun.
+        // the signal, not local CPU overrun. Lag events say a viewer
+        // missed the broadcast; the ack watermark says how far behind it
+        // actually is — a viewer acking every revision is merely slow,
+        // one whose watermark has stalled is stuck.
         pressure.decay(loop_start.elapsed());
-        let lagging = viewers.lock().values().filter(|v| v.lag_events > 0).count();
+        let current = rev;
+        let stats: Vec<(u32, Rev)> = viewers
+            .lock()
+            .values()
+            .map(|v| (v.lag_events, v.acked_rev))
+            .collect();
+        let lagging = stats.iter().filter(|(lags, _)| *lags > 0).count();
+        let stalled = stats
+            .iter()
+            .filter(|(lags, acked)| *lags > 0 && current.saturating_sub(*acked) > 30)
+            .count();
         if lagging > 0 {
-            pressure.penalise(lagging as f32);
+            // Stalled viewers weigh double: they are not catching up.
+            pressure.penalise(lagging as f32 + stalled as f32);
         }
         if pressure.is_pressured() && effective_fps > 10 {
             effective_fps = (effective_fps * 3 / 4).max(10);

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Revision replay ring.** The sharer retains the last 512 broadcast
+  payloads (16 MiB cap, epoch-cleared), and a viewer that lags a few
+  updates behind gets those exact bytes replayed instead of a whole
+  snapshot. Far-behind, evicted, or cross-epoch viewers still get a
+  snapshot. Idle keep-alives dedup so they cannot churn real history.
+- **Per-viewer ack watermark.** The sharer records each viewer's newest
+  applied revision and feeds the gap into the fps pressure loop: a
+  viewer acking every revision is merely slow, one whose watermark has
+  stalled weighs double.
+- **Adaptive audio jitter hold.** Arrival variance drives a 20–100 ms
+  hold before a missing frame is concealed; stable links stay near one
+  frame, jittery links grow enough to stop glitching.
+- **Opus loss concealment and in-band FEC.** The encoder emits FEC, and
+  the viewer fills each pts gap in order — FEC for the first missing
+  frame, concealment for the rest — instead of leaving a hole.
+
 ## 0.1.2
 
 ### Fixed
