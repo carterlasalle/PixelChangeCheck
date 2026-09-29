@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # The default branch is master. Watching for main here means CI never
+    # runs on a push at all, silently.
+    branches: [master]
   pull_request:
 
 env:
