@@ -68,7 +68,7 @@ cargo test && cargo clippy --all-targets && cargo fmt --all
 cargo build --release && bash scripts/smoke.sh   # against the real binaries
 
 # bump version in Cargo.toml, update CHANGELOG.md, commit
-git tag v0.1.0 && git push origin main --tags
+git tag v0.1.0 && git push origin master --tags
 ```
 
 Publishing uses OIDC, so there is no crates.io API token in this
