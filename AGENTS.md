@@ -2785,6 +2785,23 @@ must be changed together.
   one, read once before closing, or the viewer reports "connection lost".
 - `scripts/smoke.sh` is the only check that exercises the CLI end to end.
   `cargo test` passes while the printed pin does not work.
+- The browser client is served as a **classic script**, not a module. A
+  single `export` keyword anywhere in `client.js` is a syntax error that
+  takes down the whole file, and the page then sits at "connecting…" with
+  no error anywhere. Check with `new Function(src)`, not by importing it.
+- `run_web_server` hands its `std::net::TcpListener` to
+  `TcpListener::from_std`, which **requires it to be non-blocking**. Any
+  test that starts its own listener must call `set_nonblocking(true)`
+  first, or the server exits silently and the test hangs on a read that
+  will never be answered.
+- Rust and JavaScript must agree byte for byte on the browser handshake.
+  `proof_of_public` exists only so the JavaScript can be checked against
+  a fixed vector, and `scripts/smoke.sh` does exactly that with an
+  independent Python implementation. A divergence here fails every
+  handshake in production with no useful error, so never "fix" it by
+  changing one side alone.
+- `p256` is pinned to 0.13. Version 0.14 moved `diffie_hellman` and
+  `to_encoded_point` off the types this code calls them on.
 - No video encoder is linked. `rav1e` 0.6.3 aborts on Rust's `unsafe`
   precondition checks (out-of-bounds in `context/cdf_context.rs`, any
   frame size); 0.6.6 pins `clap =4.0.32`, conflicting with this

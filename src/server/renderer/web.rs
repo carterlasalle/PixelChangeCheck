@@ -227,7 +227,14 @@ async fn handle<S: ByteStream>(
                 .clone()
                 .context("missing Sec-WebSocket-Key: this is not a WebSocket upgrade")?;
             info!("WebSocket viewer connected from {peer:?}");
-            serve_websocket(&mut stream, &key, _updates, snapshot.clone()).await
+            serve_websocket(
+                &mut stream,
+                &key,
+                _updates,
+                snapshot.clone(),
+                token.as_str().to_string(),
+            )
+            .await
         }
         _ => respond(&mut stream, 404, "text/plain; charset=utf-8", b"not found").await,
     }
@@ -383,11 +390,18 @@ async fn serve_mjpeg<S: ByteStream>(stream: &mut S, surface: &SharedSurface) -> 
 /// Upgrade to a WebSocket and forward the sharer's own encoded messages.
 /// The browser parses exactly the bytes the native viewer parses; nothing
 /// about the stream is re-encoded for the web path.
+/// Serve one WebSocket viewer.
+///
+/// The browser does the same handshake the native client does, with
+/// WebCrypto primitives instead of native ones. There is no plaintext
+/// fallback: a browser that cannot complete the handshake is disconnected,
+/// because silently serving it in the clear would defeat the point.
 async fn serve_websocket<S: ByteStream>(
     stream: &mut S,
     key: &str,
     updates: &broadcast::Receiver<Arc<Vec<u8>>>,
     snapshot: SnapshotFn,
+    token: String,
 ) -> Result<()> {
     let response = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
@@ -396,7 +410,22 @@ async fn serve_websocket<S: ByteStream>(
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
 
-    // The sharer publishes the encoded message envelope; the browser reads
+    // The browser completes the same handshake the native client does,
+    // with WebCrypto primitives. The first frame it sends is its offer;
+    // nothing else flows until the session exists, so a browser that
+    // cannot finish is disconnected rather than served in the clear.
+    let mut session = match browser_handshake(stream, &token).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Web viewer handshake failed: {e}");
+            let _ =
+                ws_write_frame(stream, 0x1, format!("{{\"error\":\"{}\"}}", e).as_bytes()).await;
+            return Ok(());
+        }
+    };
+    info!("Web viewer sealed");
+
+    // The sharer publishes encoded message envelopes; the browser reads
     // the version byte first, so the framing prefix is not part of it.
     let mut updates = updates.resubscribe();
 
@@ -404,7 +433,10 @@ async fn serve_websocket<S: ByteStream>(
     // viewer does. Subscribing first means nothing produced in between is
     // lost, and the compositor discards anything it already holds.
     for msg in snapshot() {
-        if ws_write_frame(stream, 0x2, &msg).await.is_err() {
+        if ws_write_frame(stream, 0x2, &session.send.seal(&msg)?)
+            .await
+            .is_err()
+        {
             return Ok(());
         }
     }
@@ -435,17 +467,83 @@ async fn serve_websocket<S: ByteStream>(
                     }
                     continue;
                 }
-                WsFrame::Other | WsFrame::Binary => continue,
+                WsFrame::Other => continue,
+                WsFrame::Binary(payload) => {
+                    // The only thing a browser sends on the data path is
+                    // a control message, and it arrives sealed.
+                    match session.receive.open(&payload) {
+                        Ok(plain) => {
+                            // A refresh request arrives sealed like
+                            // everything else on this stream.
+                            if let Ok(crate::network::Message::RequestKeyframe) =
+                                crate::network::Message::decode(&plain)
+                            {
+                                for m in snapshot() {
+                                    if ws_write_frame(stream, 0x2, &session.send.seal(&m)?)
+                                        .await
+                                        .is_err()
+                                    {
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Web viewer sent a frame we could not open: {e}");
+                            return Ok(());
+                        }
+                    }
+                    continue;
+                }
             },
         };
-        if ws_write_frame(stream, 0x2, &update).await.is_err() {
+        if ws_write_frame(stream, 0x2, &session.send.seal(&update)?)
+            .await
+            .is_err()
+        {
             return Ok(());
         }
     }
 }
 
+/// Complete the browser handshake: take its offer, answer, and return the
+/// session.
+async fn browser_handshake<S: ByteStream>(
+    stream: &mut S,
+    token: &str,
+) -> Result<crate::network::web_e2e::BrowserSession> {
+    use crate::network::web_e2e::{accept, BrowserKeyPair, BrowserOffer};
+    const K_BROWSER_OFFER: u8 = 0x22;
+    const K_BROWSER_REPLY: u8 = 0x23;
+    let frame = read_ws_frame(stream).await?;
+    let WsFrame::Binary(payload) = frame else {
+        anyhow::bail!("the first browser frame was not a handshake offer")
+    };
+    let mut cur = crate::network::Cursor::new(&payload);
+    if cur.u8()? != K_BROWSER_OFFER {
+        anyhow::bail!(
+            "expected a browser offer, got kind 0x{:02x}",
+            cur.u8().unwrap_or(0)
+        );
+    }
+    let mut public = [0u8; 65];
+    public.copy_from_slice(cur.take(65)?);
+    let mut proof = [0u8; 32];
+    proof.copy_from_slice(cur.take(32)?);
+
+    let offer = BrowserOffer { public, proof };
+    let mine = BrowserKeyPair::generate();
+    let (reply, session) = accept(&offer, &mine, token)?;
+    let mut out = Vec::with_capacity(1 + 65 + 32);
+    out.push(K_BROWSER_REPLY);
+    out.extend_from_slice(&reply.public);
+    out.extend_from_slice(&reply.proof);
+    ws_write_frame(stream, 0x2, &out).await?;
+    Ok(session)
+}
+
 enum WsFrame {
-    Binary,
+    Binary(Vec<u8>),
     Close,
     Ping(Vec<u8>),
     Other,
@@ -488,7 +586,7 @@ async fn read_ws_frame<S: ByteStream>(stream: &mut S) -> Result<WsFrame> {
     Ok(match opcode {
         0x8 => WsFrame::Close,
         0x9 => WsFrame::Ping(payload),
-        0x2 => WsFrame::Binary,
+        0x2 => WsFrame::Binary(payload),
         _ => WsFrame::Other,
     })
 }

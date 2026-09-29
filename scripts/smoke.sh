@@ -109,6 +109,69 @@ PY
 WS=$?
 check "WebSocket upgrade is accepted with a token and refused without one" "$WS" "see $LOG_DIR/share.log"
 
+# The proof of token possession is computed independently in Rust and in
+# JavaScript. If those two ever disagree, every browser handshake fails
+# with no useful error, so compare them here rather than by inspection.
+PROOF=$(python3 - "$WEB_PORT" "$TOKEN" <<'PY2'
+import base64, hashlib, os, socket, struct, sys
+port, token = int(sys.argv[1]), sys.argv[2]
+
+# A fixed public key: the P-256 generator. The proof does not depend on
+# which key it is, only on the bytes and the construction.
+PUB = bytes.fromhex(
+    "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+    "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+)
+
+def frame(opcode, payload, mask):
+    out = bytearray([0x80 | opcode])
+    n = len(payload)
+    if n < 126:
+        out.append(0x80 | n)
+    else:
+        out.append(0x80 | 126); out += struct.pack(">H", n)
+    out += mask
+    out += bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return bytes(out)
+
+def read_frame(sock):
+    head = sock.recv(2)
+    ln = head[1] & 0x7F
+    if ln == 126:
+        ln = struct.unpack(">H", sock.recv(2))[0]
+    elif ln == 127:
+        ln = struct.unpack(">Q", sock.recv(8))[0]
+    data = b""
+    while len(data) < ln:
+        data += sock.recv(ln - len(data))
+    return data
+
+key = base64.b64encode(os.urandom(16)).decode()
+s = socket.create_connection(("127.0.0.1", port), timeout=5)
+s.sendall((
+    f"GET /ws?token={token} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+    f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+    f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+).encode())
+head = b""
+while not head.endswith(b"\r\n\r\n"):
+    head += s.recv(1)
+assert head.startswith(b"HTTP/1.1 101"), head[:40]
+
+proof = hashlib.sha256(b"pcc/web/v1" + b"proof" + PUB + token.encode()).digest()
+s.sendall(frame(0x2, bytes([0x22]) + PUB + proof, os.urandom(4)))
+reply = read_frame(s)
+s.close()
+assert reply[0] == 0x23, f"expected a reply, got {reply[0]}"
+# The server's own proof over its key, checked here for the same reason.
+expect = hashlib.sha256(b"pcc/web/v1" + b"proof" + reply[1:66] + token.encode()).digest()
+assert reply[66:98] == expect, "the server's proof does not match the construction"
+print("PROOF_OK")
+PY2
+)
+check "the browser proof construction agrees with the sharer" \
+  "$(echo "$PROOF" | grep -q 'PROOF_OK' && echo 0 || echo 1)" "$PROOF"
+
 # ---------------------------------------------------------- native viewer
 echo "starting a native viewer (headless)"
 $BIN view --connect "127.0.0.1:$SHARE_PORT" --token "$TOKEN" --pin "$PIN" --no-window \

@@ -389,25 +389,27 @@ pub fn read_len_prefix(len_buf: &[u8; 4]) -> Result<usize> {
 
 // ---------------------------------------------------------------- decoding
 
-struct Cursor<'a> {
+pub struct Cursor<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Cursor<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+    /// A reader over an encoded body. The web server uses it to parse a
+    /// browser handshake, which is a message like any other.
+    pub fn new(body: &'a [u8]) -> Self {
+        Self { buf: body, pos: 0 }
     }
 
-    fn remaining(&self) -> usize {
+    pub fn remaining(&self) -> usize {
         self.buf.len() - self.pos
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.remaining() == 0
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+    pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if n > self.remaining() {
             anyhow::bail!(
                 "Truncated message: need {n} more bytes, have {}",
@@ -419,7 +421,7 @@ impl<'a> Cursor<'a> {
         Ok(out)
     }
 
-    fn u8(&mut self) -> Result<u8> {
+    pub fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
 

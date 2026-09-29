@@ -291,7 +291,13 @@ Decisions already taken live in `docs/adr/`.
 
 ## Known limitations
 
-- The browser path is plaintext unless you supply a certificate.
+- A browser gets a sealed stream, but over a *different* primitive than
+  the native client. `crypto.subtle` has no X25519 in the versions most
+  people run, so the browser does ECDH on P-256 with HKDF and AES-GCM
+  while the native client does X25519 with ChaCha20-Poly1305. The protocol
+  shape is identical; the primitives differ. A certificate is still worth
+  supplying, because it stops the key exchange from being readable on the
+  wire, but the surface content is encrypted either way.
 - Screen capture is full-frame; platforms that expose dirty rectangles
   (DXGI, ScreenCaptureKit, PipeWire) are not yet used to skip work.
 - Motion video is not implemented. The exact-replication path is the
