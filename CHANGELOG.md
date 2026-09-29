@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+A security release. `0.1.0` shipped quinn 0.10.2 and rustls 0.21, and
+carries two remote denial-of-service advisories against the QUIC
+endpoint this product exposes to the internet. Upgrade to `0.1.1`.
+
 ## Unreleased
 
 The wire protocol is version 5. Viewers and sharers must be the same

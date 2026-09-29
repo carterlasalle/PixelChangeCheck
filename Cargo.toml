@@ -1,6 +1,6 @@
 [package]
 name = "pixel-change-check-client"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # The floor CI tests. Raise this and the MSRV job together.
 # 1.88 is not a preference: every `time` release carrying the
