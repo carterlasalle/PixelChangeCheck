@@ -423,13 +423,13 @@ pub fn tile_hashes_of(data: &[u8], width: u32, height: u32, grid: Grid) -> Vec<u
             for row in 0..h {
                 let start = (y0 + row) as usize * row_stride + x0 as usize * BYTES_PER_PIXEL;
                 let row_bytes = &data[start..start + w as usize * BYTES_PER_PIXEL];
-                let mut chunks = row_bytes.chunks_exact(8);
-                for c in &mut chunks {
-                    let word = u64::from_le_bytes(c.try_into().expect("chunks_exact(8)"));
+                let (words, tail) = row_bytes.as_chunks::<8>();
+                for c in words {
+                    let word = u64::from_le_bytes(*c);
                     hash = (hash ^ word).wrapping_mul(0x9E3779B97F4A7C15);
                     hash ^= hash >> 29;
                 }
-                for &b in chunks.remainder() {
+                for &b in tail {
                     hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
                 }
             }

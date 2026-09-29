@@ -122,7 +122,7 @@ pub fn fingerprint_hex(der: &[u8]) -> String {
 pub fn hex_to_der(hex: &str) -> Result<Vec<u8>> {
     let hex = hex.trim();
     anyhow::ensure!(
-        hex.len() % 2 == 0,
+        hex.len().is_multiple_of(2),
         "a SHA-256 fingerprint is 64 hex characters, got {}",
         hex.len()
     );

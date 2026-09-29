@@ -565,7 +565,13 @@ fn run_window_loop(surface: Arc<Mutex<Surface>>) -> Result<()> {
         if frame.data.len() != expected {
             continue;
         }
-        for (i, px) in frame.data.chunks_exact(BYTES_PER_PIXEL).enumerate() {
+        for (i, px) in frame
+            .data
+            .as_chunks::<BYTES_PER_PIXEL>()
+            .0
+            .iter()
+            .enumerate()
+        {
             argb[i] = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
         }
         window.update_with_buffer(&argb, current.0 as usize, current.1 as usize)?;
