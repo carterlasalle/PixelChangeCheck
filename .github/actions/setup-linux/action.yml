@@ -1,0 +1,27 @@
+name: 'Set up Linux build dependencies'
+description: >-
+  Install the system libraries the crate links against on Linux. Every
+  Linux job in this repository needs them; forgetting one is a build
+  failure, not a degraded feature.
+
+runs:
+  using: composite
+  steps:
+    - name: Install
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends -y \
+          pkg-config \
+          libasound2-dev \
+          libdbus-1-dev \
+          libudev-dev \
+          libxcb1-dev \
+          libxrandr-dev
+      env:
+        # alsa-sys, which cpal pulls in for audio capture, runs pkg-config
+        # at build time and panics when the headers are missing. macOS and
+        # Windows need none of this, which is why this is a separate step
+        # and not something cargo can discover.
+        DEBIAN_FRONTEND: noninteractive
