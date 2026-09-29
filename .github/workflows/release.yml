@@ -23,7 +23,7 @@ env:
   # Must match `rust-version` in Cargo.toml and CI's MSRV.
   MSRV: "1.88.0"
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-  BINARY: pixel-change-check-client
+  BINARY: pcc
 
 jobs:
   build:

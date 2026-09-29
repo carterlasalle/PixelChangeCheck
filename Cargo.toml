@@ -16,10 +16,17 @@ license = "AGPL-3.0-only"
 # benchmarks`, not through the bench harness. Without this, cargo
 # auto-discovers it as a bench too and the same file becomes two targets.
 autobenches = false
+# The binary is `pcc`, which is what the README, the help text and every
+# printed viewer command have always said. Cargo's default name comes from
+# the package, so without this it installed as `pixel-change-check-client`
+# and every documented command failed. Declaring the bin also suppresses
+# the auto-discovered one, so there is exactly one binary.
+autobins = false
 description = "Replicates your screen exactly and sends only the pixels that changed, over QUIC or a relay, to a native or browser viewer."
 repository = "https://github.com/carterlasalle/pixelchangecheck"
 readme = "README.md"
 keywords = ["screen-share", "remote-desktop", "quic", "pixel-diff", "streaming"]
+
 categories = ["multimedia::video", "network-programming", "command-line-utilities"]
 # Tooling that belongs to this repository's development, not to its
 # consumers. Without this, `cargo publish` ships 6 MB of agent config and
@@ -38,6 +45,10 @@ exclude = [
     "/audit.toml",
     "/.dockerignore",
 ]
+
+[[bin]]
+name = "pcc"
+path = "src/main.rs"
 
 [[example]]
 name = "simple_screen_share"

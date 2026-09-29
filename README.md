@@ -101,7 +101,7 @@ viewer command:
 
 ```text
 Certificate fingerprint (sha256): 9f2c...
-Browser viewer: http://192.168.1.20:8080/?token=ABC...
+Browser viewer: http://192.168.1.20:8080/#token=ABC...
 Direct viewers on 0.0.0.0:5800
   pcc view --connect 192.168.1.20:5800 --token ABC... --pin 9f2c...
 ```
@@ -120,7 +120,7 @@ pcc view --connect <sharer-ip>:5800 --token <token> --pin <fingerprint>
 **Any browser**, including a phone: open
 
 ```text
-http://<sharer-ip>:8080/?token=<token>
+http://<sharer-ip>:8080/#token=<token>
 ```
 
 That page runs the same compositor as the native client. If your browser

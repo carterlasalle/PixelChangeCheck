@@ -61,10 +61,19 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <img id="fallback" hidden />
   <script src="/pcc.js"></script>
   <script>
-    const q = new URLSearchParams(location.search);
-    const token = q.get('token');
-    if (!token) { document.getElementById('status').textContent = 'missing ?token='; }
-    else { window.pcc.connect(token); }
+    // The secret is in the fragment. Everything after '#' is handled by
+    // the browser and never sent in a request, so it stays out of server
+    // logs, proxy logs, browser history and referrers.
+    const fragment = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const token = fragment.get('token');
+    if (!token) {
+      document.getElementById('status').textContent =
+        'no token -- open the exact link your sharer printed';
+    } else {
+      // Do not leave the secret sitting in the address bar.
+      history.replaceState(null, '', location.pathname + location.search);
+      window.pcc.connect(token);
+    }
   </script>
 </body>
 </html>"#;
@@ -183,6 +192,12 @@ async fn handle<S: ByteStream>(
     let presented = head.query.get("token").map(|s| s.as_str()).unwrap_or("");
     let authorized = crate::network::verify_token(token, presented);
 
+    // The page and the script carry no secret and no screen data, so they
+    // are served to anyone who asks. The token now travels in the URL
+    // fragment, which the browser never puts in a request, so the page
+    // load cannot authenticate -- and must not pretend to. The WebSocket
+    // handshake is where the token is checked, before a single byte of
+    // surface data can move.
     if path == "/pcc.js" {
         return respond(
             &mut stream,
@@ -192,25 +207,26 @@ async fn handle<S: ByteStream>(
         )
         .await;
     }
+    if matches!(path.as_str(), "/" | "/index.html") {
+        return respond(
+            &mut stream,
+            200,
+            "text/html; charset=utf-8",
+            INDEX_HTML.as_bytes(),
+        )
+        .await;
+    }
     if !authorized {
         return respond(
             &mut stream,
             401,
             "text/plain; charset=utf-8",
-            b"Unauthorized: open the exact URL your sharer printed, including ?token=...",
+            b"Unauthorized: open the exact link your sharer printed, including #token=...",
         )
         .await;
     }
     match path.as_str() {
-        "/" | "/index.html" => {
-            respond(
-                &mut stream,
-                200,
-                "text/html; charset=utf-8",
-                INDEX_HTML.as_bytes(),
-            )
-            .await
-        }
+        // "/" is handled above, before the token check.
         "/fallback" => {
             respond(
                 &mut stream,

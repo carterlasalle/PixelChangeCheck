@@ -430,8 +430,12 @@ async fn start_web(
     listener
         .set_nonblocking(true)
         .context("Failed to put the web listener into non-blocking mode")?;
+    // The secret goes after the fragment, never in the query. A query
+    // string is sent in the request line, kept in browser history, and
+    // can leak through referrers, proxy logs and screenshots of the URL.
+    // Everything after `#` is handled by the browser and never leaves it.
     info!(
-        "Browser viewer: {scheme}://{addr}/?token={}",
+        "Browser viewer: {scheme}://{addr}/#token={}",
         token.as_str()
     );
     std::thread::spawn(move || {

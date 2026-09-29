@@ -7,7 +7,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/target/release/pixel-change-check-client"
+BIN="$ROOT/target/release/pcc"
 BASE_PORT=$(( 15000 + (RANDOM % 2000) * 3 ))
 SHARE_PORT=$BASE_PORT
 WEB_PORT=$(( BASE_PORT + 1 ))
@@ -59,9 +59,16 @@ sleep 1.5  # let it capture and publish
 
 # ------------------------------------------------------------ web viewer
 echo "checking the browser viewer"
-INDEX=$(curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT/?token=$TOKEN")
-check "index page requires no credentials beyond the token" \
+# The page carries no secret, so it is served to anyone who asks. The
+# secret travels in the fragment, which the browser never puts in a
+# request, so the page load cannot and does not authenticate.
+INDEX=$(curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT/")
+check "index page is served without credentials" \
   "$([ -n "$INDEX" ] && echo 0 || echo 1)" "empty index"
+check "the page reads the secret from the fragment, not the query" \
+  "$(echo "$INDEX" | grep -q 'location.hash' && echo 0 || echo 1)" "no location.hash in the page"
+check "the page does not read the secret from the query string" \
+  "$(echo "$INDEX" | grep -q 'URLSearchParams(location.search)' && echo 1 || echo 0)" "still reading location.search"
 
 JS=$(curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT/pcc.js")
 check "browser compositor is served" \

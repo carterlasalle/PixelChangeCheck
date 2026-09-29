@@ -4,6 +4,28 @@
 
 ### Fixed
 
+- **The binary is `pcc`.** The README, the help text and every printed
+  viewer command have always said `pcc`, but Cargo took the name from the
+  package, so `cargo install pixel-change-check-client` produced
+  `pixel-change-check-client` and every documented command failed. It is
+  a breaking change for anyone who installed 0.1.0-0.1.2 and is used the
+  old name.
+- **The session secret moved to the URL fragment.** It was in the query
+  string, which is sent in the request line and kept in browser history,
+  and which can leak through server logs, proxy logs and referrers. The
+  page and the script carry no secret, so they are now served to anyone;
+  the WebSocket handshake is where the token is checked, before a byte of
+  surface data can move. The page scrubs the fragment from the address
+  bar once it has read it.
+- **A race in the browser client dropped frames.** `onmessage` was async
+  and a WebSocket does not await its handler, so a sealed frame could be
+  opened while the handshake before it was still deriving keys -- failing
+  with "not sealed yet" on a session that was about to work. Frames are
+  now handled strictly in order. Before: 7 passes in 10. After: 15 in 15.
+- `setup.sh` was missing `libasound2-dev` and `libudev-dev`, so it built
+  a tree the audio path cannot link. It now installs the same list CI
+  does, and prints the real commands.
+
 The browser viewer did not work. Three separate bugs, all in the
 end-to-end encryption path, and none of them visible to a test that
 reimplements the protocol:

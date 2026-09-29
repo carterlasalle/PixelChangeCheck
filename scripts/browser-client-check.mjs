@@ -93,7 +93,16 @@ socket.onopen = async () => {
     return;
   }
 
-  socket.onmessage = async (event) => {
+  // A serial queue, for the same reason the shipped client has one: an
+  // `async` handler is not awaited by the socket, so a sealed frame would
+  // be opened while the handshake before it was still deriving keys.
+  let queue = Promise.resolve();
+  socket.onmessage = (event) => {
+    queue = queue.then(() => handle(event))
+      .catch((e) => done(false, `handler threw: ${e.message}`));
+  };
+
+  const handle = async (event) => {
     const bytes = new Uint8Array(event.data);
     if (bytes[0] === 0x23) { // K_BROWSER_REPLY
       try {

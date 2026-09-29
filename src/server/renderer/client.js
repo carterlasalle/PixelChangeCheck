@@ -652,26 +652,38 @@ class Session {
       this.status(`disconnected (code ${event.code}); retrying in 2s`);
       setTimeout(() => this.connect(), 2000);
     };
-    socket.onmessage = async (event) => {
-      const bytes = new Uint8Array(event.data);
-      // The handshake reply is a plain message, not sealed surface data.
-      // It has to come through here: a WebSocket delivers every frame to
-      // every listener, so a second one used for the reply would also
-      // see it, and this handler would try to open it as surface data
-      // and kill the session.
-      if (this.resolveReply) {
-        const resolve = this.resolveReply;
-        this.resolveReply = null;
-        resolve(bytes);
-        return;
-      }
-      try {
-        await this.onMessage(await this.codec.openBytes(bytes));
-      } catch (e) {
-        this.status(`could not open a frame: ${e.message}`);
-        socket.close();
-      }
+    // Frames are handled strictly in order, one at a time. An `async`
+    // handler is not awaited by the WebSocket, so a sealed frame could
+    // otherwise be opened while the handshake that precedes it is still
+    // deriving keys -- and fail with "not sealed yet" on a session that
+    // was about to be fine.
+    let queue = Promise.resolve();
+    socket.onmessage = (event) => {
+      queue = queue.then(() => this.handleFrame(event, socket)).catch(() => {});
     };
+  }
+
+  // Handle one inbound frame. Called from a serial queue, never directly
+  // from the socket.
+  async handleFrame(event, socket) {
+    const bytes = new Uint8Array(event.data);
+    // The handshake reply is a plain message, not sealed surface data.
+    // It has to come through here: a WebSocket delivers every frame to
+    // every listener, so a second one used for the reply would also see
+    // it, and this handler would try to open it as surface data and kill
+    // the session.
+    if (this.resolveReply) {
+      const resolve = this.resolveReply;
+      this.resolveReply = null;
+      resolve(bytes);
+      return;
+    }
+    try {
+      await this.onMessage(await this.codec.openBytes(bytes));
+    } catch (e) {
+      this.status(`could not open a frame: ${e.message}`);
+      socket.close();
+    }
   }
 
   // Every frame the browser sends is sealed, the acknowledgements
