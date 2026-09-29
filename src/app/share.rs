@@ -961,8 +961,14 @@ async fn capture_loop(
                 max_update_bytes: SEND_BUDGET,
             },
         )?;
-        metrics.detect.record_duration(detect_start.elapsed());
-        metrics.plan.record_duration(detect_start.elapsed());
+        // Two phases, two numbers. Recording the same span twice made
+        // pcc_detect_seconds and pcc_plan_seconds identical, so neither
+        // said which phase was actually expensive.
+        let total = detect_start.elapsed();
+        metrics.detect.record_duration(plan.detect);
+        metrics
+            .plan
+            .record_duration(total.saturating_sub(plan.detect));
         metrics.frames_total.incr();
         let total_pixels = (width as f64) * (height as f64);
         metrics.changed_area_fraction.set(if total_pixels > 0.0 {

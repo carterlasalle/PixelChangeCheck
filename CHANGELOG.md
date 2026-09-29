@@ -2,7 +2,46 @@
 
 ## 0.1.2
 
-Supply-chain and CI hardening. No change to what the program does.
+### Fixed
+
+The browser viewer did not work. Three separate bugs, all in the
+end-to-end encryption path, and none of them visible to a test that
+reimplements the protocol:
+
+- The proof of token possession never included the token. The browser
+  computed `SHA-256(prefix || "proof" || public_key)` and the sharer
+  expected `SHA-256(prefix || "proof" || public_key || token)`, so
+  every browser handshake was refused and the page sat at "connecting"
+  retrying forever.
+- The handshake reply was delivered to two handlers. A WebSocket
+  delivers every frame to every listener, so the sealed-data handler also
+  saw the plaintext reply, tried to open it, and killed the session.
+- Acknowledgements and keyframe requests were sent unencrypted. The
+  sharer could not open them and dropped the connection -- which is what
+  the retry loop was.
+
+- The browser surface was RGB in the compositor and RGBA after a PNG
+  snapshot, while the paint path handed it to `ImageData`, which is
+  RGBA and nothing else. Every patch applied to a PNG-seeded surface
+  landed on the wrong pixels. The surface is now RGBA throughout and the
+  wire format is still RGB; the widening happens on the way in.
+
+- `pcc_detect_seconds` and `pcc_plan_seconds` recorded the same span, so
+  neither said which phase was expensive. `plan` runs detection
+  internally and now reports how long that took.
+
+### Verification
+
+- `scripts/browser-client-check.mjs` fetches the *served* `pcc.js`, runs
+  that exact text under Node's WebCrypto against a live sharer, and
+  completes a sealed session. Reintroducing either proof bug makes it
+  fail. This exists because two reimplementations agreed with the server
+  while the shipped file did not, and a check that is quietly weaker
+  than it looks is worse than none.
+- A real browser was driven end to end: `1280x720 rev 200`, 921,600
+  pixels painted, all fully opaque.
+
+### Packaging and CI
 
 - Every GitHub Action is pinned to a commit SHA rather than a moving tag,
   so whoever controls a tag cannot change what runs with the repository's

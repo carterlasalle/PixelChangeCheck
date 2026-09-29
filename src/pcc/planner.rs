@@ -16,6 +16,7 @@ use super::detector::{
 use super::types::{Frame, PixelChange, BYTES_PER_PIXEL};
 use crate::network::WireOp;
 use anyhow::Result;
+use std::time::Duration;
 
 /// Run the displacement search only when the frame is churning this much.
 ///
@@ -53,26 +54,40 @@ pub struct Plan {
     pub wire_len: usize,
     /// Area of the frame the ops rewrite, in pixels.
     pub changed_pixels: u64,
+    /// How long the detection phase alone took.
+    ///
+    /// `plan` runs detection internally, so without this the caller can
+    /// only time detect+plan together and report the same number as both
+    /// metrics -- which is what it was doing, making `pcc_detect_seconds`
+    /// and `pcc_plan_seconds` identical and useless for telling which
+    /// phase is expensive.
+    pub detect: Duration,
 }
 
 impl Plan {
     /// A plan that sends nothing.
-    pub fn idle() -> Self {
+    pub fn idle(detect: Duration) -> Self {
         Self {
             ops: Vec::new(),
             wire_len: 0,
             changed_pixels: 0,
+            detect,
         }
     }
 
     /// A plan whose patches were measured and found not worth sending; the
     /// caller should ship a snapshot instead. `wire_len` still carries the
     /// measured cost so the decision is visible.
-    pub fn prefer_snapshot(measured_wire_len: usize, changed_pixels: u64) -> Self {
+    pub fn prefer_snapshot(
+        measured_wire_len: usize,
+        changed_pixels: u64,
+        detect: Duration,
+    ) -> Self {
         Self {
             ops: Vec::new(),
             wire_len: measured_wire_len,
             changed_pixels,
+            detect,
         }
     }
 }
@@ -144,11 +159,13 @@ impl Planner {
                 current.height
             );
         }
+        let detect_start = std::time::Instant::now();
         let changes = self
             .detector
             .detect(reference, &current.data, width, height)?;
+        let detect = detect_start.elapsed();
         if changes.is_empty() {
-            return Ok(Plan::idle());
+            return Ok(Plan::idle(detect));
         }
 
         let mut ops: Vec<WireOp> = Vec::new();
@@ -189,7 +206,7 @@ impl Planner {
         if wire_len > limits.snapshot_bytes || wire_len > limits.max_update_bytes {
             // The reference is left untouched: nothing shipped, so nothing
             // may be marked as delivered.
-            return Ok(Plan::prefer_snapshot(wire_len, changed_pixels));
+            return Ok(Plan::prefer_snapshot(wire_len, changed_pixels, detect));
         }
 
         // The reference now describes exactly what an up-to-date viewer
@@ -204,6 +221,7 @@ impl Planner {
             ops,
             wire_len,
             changed_pixels,
+            detect,
         })
     }
 

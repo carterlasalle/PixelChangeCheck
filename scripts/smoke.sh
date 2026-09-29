@@ -172,6 +172,19 @@ PY2
 check "the browser proof construction agrees with the sharer" \
   "$(echo "$PROOF" | grep -q 'PROOF_OK' && echo 0 || echo 1)" "$PROOF"
 
+# The shipped browser client, run verbatim against the live sharer. A
+# reimplementation proves nothing: two of them agreed with the server
+# while the real client.js did not.
+if command -v node >/dev/null 2>&1; then
+  curl -s --max-time 10 "http://127.0.0.1:$WEB_PORT/pcc.js" -o "$LOG_DIR/pcc.js"
+  SHIPPED=$(node "$ROOT/scripts/browser-client-check.mjs" \
+    "$LOG_DIR/pcc.js" "ws://127.0.0.1:$WEB_PORT/ws?token=$TOKEN" "$TOKEN" 2>&1)
+  check "the shipped browser client completes a sealed session" \
+    "$(echo "$SHIPPED" | grep -q 'SHIPPED_CLIENT_OK' && echo 0 || echo 1)" "$SHIPPED"
+else
+  echo "  skip  the shipped browser client check (node is not installed)"
+fi
+
 # ---------------------------------------------------------- native viewer
 echo "starting a native viewer (headless)"
 $BIN view --connect "127.0.0.1:$SHARE_PORT" --token "$TOKEN" --pin "$PIN" --no-window \

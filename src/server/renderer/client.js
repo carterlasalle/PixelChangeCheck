@@ -57,15 +57,26 @@ const enc = new TextEncoder();
 const PROOF_PREFIX = enc.encode('pcc/web/v1');
 const PROOF_WORD = enc.encode('proof');
 
-async function proofOfKey(publicKey) {
-  return proofOfBytes(new Uint8Array(await crypto.subtle.exportKey('raw', publicKey)));
+// The token is part of the preimage. Without it the proof says only
+// "I generated this key", which proves nothing about authorisation, and
+// the sharer rejects it.
+async function proofOfKey(publicKey, token) {
+  return proofOfBytes(
+    new Uint8Array(await crypto.subtle.exportKey('raw', publicKey)),
+    token,
+  );
 }
 
-async function proofOfBytes(raw) {
-  const data = new Uint8Array(PROOF_PREFIX.length + PROOF_WORD.length + raw.length);
-  data.set(PROOF_PREFIX, 0);
-  data.set(PROOF_WORD, PROOF_PREFIX.length);
-  data.set(raw, PROOF_PREFIX.length + PROOF_WORD.length);
+async function proofOfBytes(raw, token) {
+  const secret = enc.encode(token);
+  let at = 0;
+  const data = new Uint8Array(
+    PROOF_PREFIX.length + PROOF_WORD.length + raw.length + secret.length,
+  );
+  for (const part of [PROOF_PREFIX, PROOF_WORD, raw, secret]) {
+    data.set(part, at);
+    at += part.length;
+  }
   return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
 }
 
@@ -121,7 +132,7 @@ class SealedCodec {
     this.token = token;
     return {
       public: new Uint8Array(await crypto.subtle.exportKey('raw', this.pair.publicKey)),
-      proof: await proofOfKey(this.pair.publicKey),
+      proof: await proofOfKey(this.pair.publicKey, token),
     };
   }
 
@@ -137,8 +148,8 @@ class SealedCodec {
   }
 
   // --- sharer side, used by the Rust server to check a browser's proof.
-  async checkProof(offer) {
-    return constantTimeEqual(await proofOfBytes(offer.public), offer.proof);
+  async checkProof(offer, token) {
+    return constantTimeEqual(await proofOfBytes(offer.public, token), offer.proof);
   }
 
   async sealBytes(bytes) {
@@ -309,12 +320,16 @@ class Compositor {
       throw new Reject(`snapshot is ${inc.received} bytes, expected ${inc.totalLen}`);
     }
 
-    let rgb;
+    let surface;
     if (inc.format === FMT_RAW) {
-      rgb = new Uint8ClampedArray(inc.totalLen);
-      rgb.set(inc.parts[0]);
+      // Already four bytes per pixel in the widest path the sharer uses.
+      surface = new Uint8ClampedArray(inc.width * inc.height * STRIDE);
+      surface.set(inc.parts[0].subarray(0, surface.length));
     } else if (inc.format === FMT_LZ4) {
-      rgb = lz4DecodeSizePrepended(join(inc.parts, inc.totalLen), inc.width * inc.height * 3);
+      surface = widenRgb(
+        lz4DecodeSizePrepended(join(inc.parts, inc.totalLen), inc.width * inc.height * 3),
+        inc.width * inc.height,
+      );
     } else {
       const blob = new Blob(inc.parts, { type: 'image/png' });
       const bitmap = await createImageBitmap(blob);
@@ -324,10 +339,13 @@ class Compositor {
       const off = new OffscreenCanvas(inc.width, inc.height);
       const ctx = off.getContext('2d');
       ctx.drawImage(bitmap, 0, 0);
-      rgb = ctx.getImageData(0, 0, inc.width, inc.height).data;
+      surface = ctx.getImageData(0, 0, inc.width, inc.height).data;
       bitmap.close();
-      if (rgb.length > MAX_FRAME_BYTES) throw new Reject('decoded snapshot exceeds the frame budget');
     }
+    if (surface.length !== inc.width * inc.height * STRIDE) {
+      throw new Reject(`snapshot decoded to ${surface.length} bytes, expected ${surface.length === inc.width * inc.height * 3 ? 'an RGB body' : inc.width * inc.height * STRIDE}`);
+    }
+    const rgb = surface;
 
     // Nothing above this line touched `this`, so a failed commit leaves
     // the displayed surface exactly as it was.
@@ -368,7 +386,10 @@ class Compositor {
     const base = needsSnapshot ? this.buffer.slice() : null;
 
     for (const op of staged) {
-      if (op.kind === OP_RECT) blit(this.buffer, this.width, op.x, op.y, op.w, op.h, op.pixels);
+      // The wire carries RGB; the surface is RGBA, so widen on the way in.
+      if (op.kind === OP_RECT) {
+        blit(this.buffer, this.width, op.x, op.y, op.w, op.h, widenRgb(op.pixels, op.w * op.h));
+      }
       else if (op.kind === OP_FILL) fill(this.buffer, this.width, op.x, op.y, op.w, op.h, op.color);
       else blitRegion(this.buffer, this.width, op.x, op.y, op.w, op.h, base, op.srcX, op.srcY);
     }
@@ -388,27 +409,52 @@ function join(parts, totalLen) {
   return out;
 }
 
+// The surface is RGBA, four bytes per pixel. It has to be: the paint
+// path hands this buffer straight to `new ImageData`, which is RGBA and
+// nothing else. It used to be RGB here and RGBA after a PNG snapshot, so
+// the two disagreed and every patch applied to a PNG-seeded surface
+// landed on the wrong pixels. The wire format is still RGB; the widening
+// happens where a snapshot enters the surface.
+const STRIDE = 4;
+
+/** Widen three-byte RGB into the four-byte surface the compositor holds. */
+function widenRgb(rgb, pixels) {
+  const out = new Uint8ClampedArray(pixels * STRIDE);
+  for (let i = 0, j = 0; j < out.length; i += 3, j += STRIDE) {
+    out[j] = rgb[i];
+    out[j + 1] = rgb[i + 1];
+    out[j + 2] = rgb[i + 2];
+    out[j + 3] = 255;
+  }
+  return out;
+}
+
 function blit(dst, dstWidth, x, y, w, h, src) {
-  const rowBytes = w * 3;
+  const rowBytes = w * STRIDE;
   for (let row = 0; row < h; row++) {
-    dst.set(src.subarray(row * rowBytes, (row + 1) * rowBytes), ((y + row) * dstWidth + x) * 3);
+    dst.set(src.subarray(row * rowBytes, (row + 1) * rowBytes), ((y + row) * dstWidth + x) * STRIDE);
   }
 }
 
 function blitRegion(dst, dstWidth, x, y, w, h, src, sx, sy) {
-  const rowBytes = w * 3;
+  const rowBytes = w * STRIDE;
   for (let row = 0; row < h; row++) {
-    const to = ((y + row) * dstWidth + x) * 3;
-    const from = ((sy + row) * dstWidth + sx) * 3;
+    const to = ((y + row) * dstWidth + x) * STRIDE;
+    const from = ((sy + row) * dstWidth + sx) * STRIDE;
     dst.set(src.subarray(from, from + rowBytes), to);
   }
 }
 
 function fill(dst, dstWidth, x, y, w, h, color) {
-  const row = new Uint8ClampedArray(w * 3);
-  for (let i = 0; i < w; i++) { row[i * 3] = color[0]; row[i * 3 + 1] = color[1]; row[i * 3 + 2] = color[2]; }
+  const row = new Uint8ClampedArray(w * STRIDE);
+  for (let i = 0; i < w; i++) {
+    row[i * STRIDE] = color[0];
+    row[i * STRIDE + 1] = color[1];
+    row[i * STRIDE + 2] = color[2];
+    row[i * STRIDE + 3] = 255;
+  }
   for (let r = 0; r < h; r++) {
-    dst.set(row, ((y + r) * dstWidth + x) * 3);
+    dst.set(row, ((y + r) * dstWidth + x) * STRIDE);
   }
 }
 
@@ -537,7 +583,9 @@ class Session {
     this.ctx.putImageData(new ImageData(new Uint8ClampedArray(c.buffer), c.width, c.height), 0, 0);
     if (c.rev !== this.lastAck) {
       this.lastAck = c.rev;
-      this.sendAck(c.rev);
+      // Fire and forget: a failed acknowledgement must not interrupt
+      // painting the frame that produced it.
+      this.sendAck(c.rev).catch(() => {});
     }
   }
 
@@ -567,7 +615,16 @@ class Session {
         framed.set(offer.proof, 1 + offer.public.length);
         socket.send(framed);
 
-        const replyFrame = await this.nextBinary();
+        // Routed through the single onmessage path below rather than a
+        // second listener: a WebSocket delivers every frame to both, so a
+        // listener here would also see this frame, and onmessage would
+        // try to open the *reply* as sealed surface data and kill the
+        // session.
+        this.pendingReply = new Promise((resolve, reject) => {
+          this.resolveReply = resolve;
+          this.rejectReply = reject;
+        });
+        const replyFrame = await this.pendingReply;
         const cur = new Reader(new DataView(
           replyFrame.buffer, replyFrame.byteOffset, replyFrame.byteLength), 0);
         if (cur.u8() !== K_BROWSER_REPLY) throw new Error('expected an encryption reply');
@@ -596,9 +653,20 @@ class Session {
       setTimeout(() => this.connect(), 2000);
     };
     socket.onmessage = async (event) => {
+      const bytes = new Uint8Array(event.data);
+      // The handshake reply is a plain message, not sealed surface data.
+      // It has to come through here: a WebSocket delivers every frame to
+      // every listener, so a second one used for the reply would also
+      // see it, and this handler would try to open it as surface data
+      // and kill the session.
+      if (this.resolveReply) {
+        const resolve = this.resolveReply;
+        this.resolveReply = null;
+        resolve(bytes);
+        return;
+      }
       try {
-        const sealed = new Uint8Array(event.data);
-        await this.onMessage(await this.codec.openBytes(sealed));
+        await this.onMessage(await this.codec.openBytes(bytes));
       } catch (e) {
         this.status(`could not open a frame: ${e.message}`);
         socket.close();
@@ -606,22 +674,13 @@ class Session {
     };
   }
 
-  // Resolve with the next binary frame the sharer sends.
-  nextBinary() {
-    return new Promise((resolve, reject) => {
-      const onMessage = (event) => {
-        this.socket.removeEventListener('message', onMessage);
-        resolve(new Uint8Array(event.data));
-      };
-      this.socket.addEventListener('message', onMessage);
-      this.socket.addEventListener('close', () => reject(new Error('closed')), { once: true });
-    });
-  }
-
-  sendAck(rev) {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(encodeAck(rev));
-    }
+  // Every frame the browser sends is sealed, the acknowledgements
+  // included. Sending one in the clear is a 14-byte frame the sharer
+  // cannot open, and it drops the session.
+  async sendAck(rev) {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    if (!this.codec || !this.codec.ready) return;
+    this.socket.send(await this.codec.sealBytes(encodeAck(rev)));
   }
 
   async onMessage(bytes) {
@@ -670,19 +729,22 @@ class Session {
         // base is worth repairing.
         if (e.reason === 'needs-snapshot' || e.reason === 'stale-epoch') {
           this.status(`repairing: ${e.reason}`);
-          this.requestKeyframe();
+          this.requestKeyframe().catch(() => {});
         }
       } else {
         this.status(`invalid update: ${e.message}`);
-        this.requestKeyframe();
+        this.requestKeyframe().catch(() => {});
       }
     }
   }
 
-  requestKeyframe() {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(encodeRequestKeyframe());
-    }
+  // Sealed like every other frame the browser sends. In the clear this
+  // was a 9-byte frame the sharer could not open, and it dropped the
+  // session exactly when a viewer most needed to recover.
+  async requestKeyframe() {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    if (!this.codec || !this.codec.ready) return;
+    this.socket.send(await this.codec.sealBytes(encodeRequestKeyframe()));
   }
 }
 
@@ -718,4 +780,12 @@ window.pcc = {
   lz4Decode,
   Compositor,
   PROTOCOL_VERSION,
+  // The handshake code, so a test can drive the *shipped* implementation
+  // against the server rather than a reimplementation of it. A
+  // reimplementation proved nothing: it agreed with the server while the
+  // real file did not, because the real file dropped the token from the
+  // proof preimage and no test ever ran it.
+  SealedCodec,
+  Session,
+  proofOfBytes,
 };

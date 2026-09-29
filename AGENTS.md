@@ -2794,6 +2794,22 @@ must be changed together.
   test that starts its own listener must call `set_nonblocking(true)`
   first, or the server exits silently and the test hangs on a read that
   will never be answered.
+- **Never verify the browser client with a reimplementation.** Two of
+  them agreed with the server byte for byte while the shipped
+  `client.js` did not, and the browser was broken for every user until
+  a human opened one. `scripts/browser-client-check.mjs` fetches the
+  served `pcc.js`, runs that exact text under Node's WebCrypto against
+  a live sharer, and fails when the real file is wrong. It does not
+  catch a session dropped only after the sharer reads something from
+  the browser; that path needs a real browser.
+- The browser compositor's surface is **RGBA**, not RGB. `ImageData` is
+  RGBA and nothing else, and every rect/copy/fill indexes the surface
+  four bytes at a time. The wire format stays RGB; the widening happens
+  where a payload enters the surface. Mixing the two silently shifts
+  every patch by a third of the frame.
+- `pcc_detect_seconds` and `pcc_plan_seconds` must not record the same
+  span. `plan` runs detection internally and reports its duration as
+  `Plan::detect`.
 - Rust and JavaScript must agree byte for byte on the browser handshake.
   `proof_of_public` exists only so the JavaScript can be checked against
   a fixed vector, and `scripts/smoke.sh` does exactly that with an
