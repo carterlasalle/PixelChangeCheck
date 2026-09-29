@@ -91,8 +91,8 @@ pub struct ServerIdentity {
 pub fn generate_identity() -> Result<ServerIdentity> {
     let cert = generate_simple_self_signed(vec!["pcc".to_string()])
         .context("Failed to generate a self-signed certificate")?;
-    let private_key = cert.serialize_private_key_der();
-    let certificate = cert.serialize_der()?;
+    let private_key = cert.key_pair.serialize_der();
+    let certificate = cert.cert.der().to_vec();
     let fingerprint = fingerprint_hex(&certificate);
     Ok(ServerIdentity {
         certificate,
@@ -142,6 +142,13 @@ pub fn hex_to_der(hex: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The one crypto provider this build uses. Named in a single place so
+/// the ambiguity between the providers rustls can auto-select from is
+/// resolved here rather than by which dependency happens to be enabled.
+fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
 /// Accept only the certificate whose SHA-256 fingerprint we were told to
 /// expect.
 ///
@@ -149,23 +156,23 @@ pub fn hex_to_der(hex: &str) -> Result<Vec<u8>> {
 /// command line, rather than a few hundred bytes of DER. Comparing the
 /// presented certificate's digest against the pin is what makes those two
 /// representations interchangeable.
+#[derive(Debug)]
 struct PinningVerifier {
     expected: [u8; 32],
 }
 
-impl rustls::client::ServerCertVerifier for PinningVerifier {
+impl rustls::client::danger::ServerCertVerifier for PinningVerifier {
     fn verify_server_cert(
         &self,
-        end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        let presented: [u8; 32] = Sha256::digest(&end_entity.0).into();
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let presented: [u8; 32] = Sha256::digest(end_entity).into();
         if presented == self.expected {
-            Ok(rustls::client::ServerCertVerified::assertion())
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General(format!(
                 "server certificate fingerprint mismatch: expected sha256:{}, got sha256:{}",
@@ -173,6 +180,43 @@ impl rustls::client::ServerCertVerifier for PinningVerifier {
                 hex(&presented),
             )))
         }
+    }
+
+    // Pinning replaces the chain-of-trust check, not the signature check:
+    // the peer's key must still prove it holds the pinned certificate's
+    // private key, or a third party could replay a copy of it.
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -206,22 +250,34 @@ impl NetworkConfig {
                 pin.len()
             )
         })?;
-        let mut config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(PinningVerifier { expected }))
+        // A pin replaces the root store: there is no chain to build, and
+        // an empty one makes that explicit rather than accidental.
+        // The provider is named rather than inferred. Something else in
+        // the tree enables `aws-lc-rs`, and with both present rustls
+        // refuses to guess and panics at the first handshake.
+        let mut config = rustls::ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(rustls::ALL_VERSIONS)
+            .expect("the ring provider supports these versions")
+            .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
+        config
+            .dangerous()
+            .set_certificate_verifier(Arc::new(PinningVerifier { expected }));
         config.alpn_protocols = vec![b"pcc".to_vec()];
         Ok(config)
     }
 
     /// Server TLS config from an already-generated identity.
     pub fn server_crypto_config(identity: &ServerIdentity) -> Result<rustls::ServerConfig> {
-        let mut config = rustls::ServerConfig::builder()
-            .with_safe_defaults()
+        let mut config = rustls::ServerConfig::builder_with_provider(provider())
+            .with_protocol_versions(rustls::ALL_VERSIONS)
+            .expect("the ring provider supports these versions")
             .with_no_client_auth()
             .with_single_cert(
-                vec![rustls::Certificate(identity.certificate.clone())],
-                rustls::PrivateKey(identity.private_key.clone()),
+                vec![rustls::pki_types::CertificateDer::from(
+                    identity.certificate.clone(),
+                )],
+                rustls::pki_types::PrivatePkcs8KeyDer::from(identity.private_key.clone()).into(),
             )
             .map_err(|e| anyhow::anyhow!("Failed to build the QUIC server config: {e}"))?;
         config.alpn_protocols = vec![b"pcc".to_vec()];

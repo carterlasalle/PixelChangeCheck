@@ -1,0 +1,49 @@
+# cargo-audit configuration.
+#
+# Only two advisories are ignored, and both are ignored for a specific,
+# checkable reason rather than because the count was inconvenient.
+
+[advisories]
+ignore = [
+    # quick-xml RUSTSEC-2026-0194 (quadratic run time checking a start tag
+    # for duplicate attribute names) and RUSTSEC-2026-0195 (unbounded
+    # namespace-declaration allocation in `NsReader`).
+    #
+    # Both are memory-exhaustion and quadratic-time denial of service in
+    # an XML *parser*, and they matter only if an attacker controls the
+    # XML being parsed. Here the XML is the Wayland protocol definition
+    # and the X11 protocol definition, read at build time off the local
+    # machine by `wayland-scanner` (a proc-macro) and by `xcb`'s build
+    # script. Neither is reachable at runtime, and neither is reachable
+    # by anything but this user on this build host.
+    #
+    # The fix is quick-xml >= 0.41. Reaching it needs `wayland-scanner`
+    # 0.31, which needs `wayland-client` 0.31, which needs `libwayshot`
+    # above 0.2.0, which needs a `screenshots` release above 0.8.10 --
+    # and 0.8.10 is the newest that exists. So this is not a choice; it
+    # is what the published dependency graph currently permits. It lifts
+    # as soon as `screenshots` moves.
+    #
+    # Re-check on every `cargo update`: if `screenshots` gains a release
+    # that reaches quick-xml 0.41, delete these two lines and let the
+    # gate fail until the tree is genuinely clean.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
+
+# `cargo audit` also reports unmaintained and unsound crates as warnings.
+# They are not ignored, so they stay visible in the log; this only records
+# that the ones we knowingly carry are understood rather than missed.
+#
+# - `bincode` (RUSTSEC-2025-0141, unmaintained). The protocol carries
+#   positional binary records whose layout is part of the wire contract;
+#   serde/bincode is what that format is. It is replaced wholesale, not
+#   upgraded, if the format ever changes.
+# - `instant`, `fxhash` (unmaintained). Transitive, no patch available, no
+#   security impact.
+# - `tokio` broadcast unsoundness (RUSTSEC-2025-0023). The shared surface
+#   broadcast carries `Arc<Vec<u8>>`; the advisory is about `clone` being
+#   called in parallel for a type that is not `Sync`, and nothing here
+#   relies on that guarantee.
+# - `xcb` I/O safety (RUSTSEC-2025-0051). Build-time and screenshot
+#   capture only; we do not call the affected entry points.

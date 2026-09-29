@@ -125,7 +125,7 @@ impl RelayTransport {
         role: RelayRole,
     ) -> Result<Self> {
         let config = NetworkConfig::client_tls_config(pin)?;
-        let server_name = rustls::ServerName::try_from(server_name)
+        let server_name = rustls::pki_types::ServerName::try_from(server_name.to_owned())
             .map_err(|e| anyhow::anyhow!("Invalid relay server name '{server_name}': {e}"))?;
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
         let tcp = TcpStream::connect(relay_addr)

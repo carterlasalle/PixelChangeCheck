@@ -12,6 +12,12 @@ env:
   RUST_BACKTRACE: 1
   # Must match `rust-version` in Cargo.toml.
   MSRV: "1.85.0"
+  # The native dependencies every Linux job needs. `alsa-sys`, pulled in by
+  # cpal, runs pkg-config at build time and panics without the headers, so
+  # its absence is a build failure rather than a missing-feature warning.
+  LINUX_DEPS: >-
+    pkg-config libasound2-dev libdbus-1-dev libudev-dev libxcb1-dev
+    libxrandr-dev
 
 jobs:
   # The floor the crate claims. `rust-version` in Cargo.toml must not be
@@ -21,6 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y $LINUX_DEPS
       - run: rustup toolchain install "$MSRV" --profile minimal
       - run: rustup default "$MSRV"
       - run: cargo check --all-targets --locked
@@ -38,6 +49,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y $LINUX_DEPS
       - run: rustup toolchain install stable --profile minimal --component clippy
       - run: cargo clippy --all-targets --locked -- -D warnings
 
@@ -50,6 +66,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y $LINUX_DEPS
       - run: rustup toolchain install stable --profile minimal
       - run: cargo test --locked --all-targets
 
@@ -60,6 +81,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y $LINUX_DEPS
       - run: rustup toolchain install stable --profile minimal
       - run: cargo test --locked --test replication --test transport -- --test-threads=1
       - run: cargo run --release --example simple_screen_share
