@@ -21,9 +21,15 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   # Must match `rust-version` in Cargo.toml and CI's MSRV.
-  MSRV: "1.85.0"
+  MSRV: "1.88.0"
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
   BINARY: pixel-change-check-client
+  # The native dependencies every Linux build needs. `alsa-sys`, which
+  # cpal pulls in, runs pkg-config at build time and panics without the
+  # ALSA headers, so a missing package is a build failure.
+  LINUX_DEPS: >-
+    pkg-config libasound2-dev libdbus-1-dev libudev-dev libxcb1-dev
+    libxrandr-dev
 
 jobs:
   build:
@@ -39,6 +45,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y $LINUX_DEPS
       - run: rustup toolchain install "$MSRV" --profile minimal
       - run: rustup default "$MSRV"
       - uses: actions/cache@v4
