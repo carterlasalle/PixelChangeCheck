@@ -63,6 +63,17 @@ reimplements the protocol:
 - A real browser was driven end to end: `1280x720 rev 200`, 921,600
   pixels painted, all fully opaque.
 
+### Security
+
+- **The relay no longer holds the end-to-end secret.** The session token
+  authenticates the encryption handshake, and it was also sent to the
+  relay during registration, so a relay that learned it could compute a
+  valid viewer proof and sit in the middle of a stream it claims not to
+  be able to read. Peers now present `HMAC(token, "pcc/relay/v1")` to the
+  relay and the token itself never leaves the two endpoints. The claim
+  holds against the operator running the relay, which is the only
+  adversary it was ever really about.
+
 ### Known: the relay serves one viewer
 
 The host calls `serve_viewer` once for the whole relay connection, so

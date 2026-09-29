@@ -122,6 +122,7 @@ rand_core = "0.6"
 aes-gcm = "0.10"
 hkdf = "0.12"
 p256 = { version = "0.13", features = ["ecdh"] }
+hmac = "0.12"
 
 [profile.release]
 opt-level = 3

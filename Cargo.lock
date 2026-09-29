@@ -1956,6 +1956,7 @@ dependencies = [
  "cpal",
  "display-info",
  "hkdf",
+ "hmac",
  "image",
  "jpeg-encoder",
  "lz4_flex",

@@ -255,8 +255,11 @@ Compositor  <--------------- forwards ------------> browser compositor
 - **Viewer** (`pcc view`): authenticates, reconstructs through the
   `Compositor`, and presents.
 - **Relay** (`pcc relay`): pairs a host with viewers by session code and
-  forwards framed bytes. It never inspects frame contents, so
-  end-to-end encryption can be added without changing it.
+  forwards framed bytes. It authenticates a session with a value derived
+  from the session token, so it never holds the secret that authenticates
+  the end-to-end encryption handshake. A relay that learns that derived
+  value still cannot forge a viewer's proof, and so cannot read a stream
+  it claims not to be able to read.
 
 ## Safety model
 

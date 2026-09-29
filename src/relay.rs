@@ -21,7 +21,7 @@
 //!   tears the whole connection down.
 
 use crate::network::{
-    read_len_prefix, verify_token, write_encoded, Message, MessageSink, MessageSource,
+    read_len_prefix, relay_credential, write_encoded, Message, MessageSink, MessageSource,
     MessageTransport, NetworkConfig, ServerIdentity, SessionToken,
 };
 use anyhow::{Context, Result};
@@ -70,6 +70,19 @@ const MAX_PEER_QUEUE_MESSAGES: usize = 64;
 
 /// Maximum concurrent sessions the relay will host.
 const MAX_SESSIONS: usize = 1024;
+
+/// Constant-time string equality, for a credential compared against a
+/// remote peer on every connection. The loop runs over the longer of the
+/// two so a length mismatch does not leak through timing.
+fn same_credential(expected: &str, presented: &str) -> bool {
+    let a = expected.as_bytes();
+    let b = presented.as_bytes();
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..a.len().max(b.len()) {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
+}
 
 /// Maximum viewers per session.
 const MAX_VIEWERS_PER_SESSION: usize = 64;
@@ -139,7 +152,7 @@ impl RelayTransport {
         let reg = RelayRegister {
             session,
             role,
-            token: token.as_str().to_string(),
+            token: relay_credential(&token),
         };
         let bytes = bincode::serialize(&reg)?;
         stream
@@ -311,9 +324,17 @@ async fn handle_client(
     // supervised together by `select!` below.
     let (mut read_half, mut write_half) = tokio::io::split(stream);
     let reg = read_registration(&mut read_half).await?;
-    if !verify_token(&expected_token, &reg.token) {
-        warn!("Relay: rejected {:?} from {peer} (bad token)", reg.role);
-        anyhow::bail!("bad viewer token");
+    // Compared against a value derived from the session token, never
+    // against the token itself: a relay that learns the session secret
+    // could forge a viewer's encryption proof, and "the relay cannot read
+    // the screen" is exactly the claim that has to hold against the
+    // operator running it, not only against someone sniffing the wire.
+    if !same_credential(relay_credential(&expected_token).as_str(), &reg.token) {
+        warn!(
+            "Relay: rejected {:?} from {peer} (bad credential)",
+            reg.role
+        );
+        anyhow::bail!("bad viewer credential");
     }
     // The registration was good; clear the peer's failure count.
     failures.lock().await.remove(&peer);

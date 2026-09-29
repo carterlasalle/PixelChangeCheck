@@ -79,6 +79,27 @@ pub fn verify_token(expected: &SessionToken, presented: &str) -> bool {
     diff == 0
 }
 
+/// The credential a peer shows the relay, derived from the session token.
+///
+/// The relay must be able to authenticate a session without being told
+/// the session secret. The secret is what authenticates the
+/// end-to-end encryption handshake, so a relay that learned it could
+/// forge a viewer's proof and sit in the middle of a stream it claims
+/// not to be able to read. Deriving a separate value keeps the relay's
+/// knowledge useless for that: it can prove it belongs to the session
+/// without being able to impersonate anyone inside it.
+///
+/// Domain-separated, so this value can never collide with a proof or a
+/// key derived anywhere else.
+pub fn relay_credential(token: &SessionToken) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(b"pcc/relay/v1").expect("Hmac accepts a key of any length");
+    mac.update(token.as_str().as_bytes());
+    hex(&mac.finalize().into_bytes())
+}
+
 /// The sharer's self-signed certificate plus the fingerprint a viewer pins.
 #[derive(Clone)]
 pub struct ServerIdentity {
