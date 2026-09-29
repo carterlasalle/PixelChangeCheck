@@ -2830,6 +2830,16 @@ must be changed together.
   dependency needs a newer rustc. Trust CI, or `cargo clean` first.
 - The MSRV is 1.88 because every patched `time` requires it, not because
   it was chosen. If `time` ever goes, the floor can drop.
+- `macos-13` was removed from the release matrix. It is the last Intel
+  macOS image, it sat queued for over an hour with no runner, and the
+  `release` job needs every matrix entry, so one dead label blocks every
+  release instead of degrading it.
+- A `run:` step defaults to PowerShell on Windows, where `"$MSRV"` is a
+  PowerShell variable and expands to the empty string. Any step using a
+  workflow `env:` var needs an explicit `shell: bash`.
+- `gh release create` needs a git checkout in its job. The `release` job
+  only downloaded artifacts and failed with "not a git repository" after
+  the builds had already succeeded.
 - `Cargo.toml`'s `exclude` list is load-bearing, not tidiness. Anything
   committed to the repository is packaged unless it is named there, and
   `.bughunt/`, `.omp/` and `.scc/` are megabytes of local tooling. Check
