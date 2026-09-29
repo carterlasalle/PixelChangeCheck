@@ -65,7 +65,25 @@ Three things make that claim hold up:
   - **Linux**: `libxcb1-dev`, `libxrandr-dev`, `libdbus-1-dev`
   - **macOS/Windows**: none
 
-### Build
+### Install
+
+From crates.io, on any machine with a Rust toolchain:
+
+```sh
+cargo install pixel-change-check-client
+```
+
+That installs one binary, `pcc`. If you would rather not build it, the
+release page carries prebuilt archives for macOS, Linux and Windows:
+
+```text
+https://github.com/carterlasalle/pixelchangecheck/releases
+```
+
+Either route still needs the system dependencies above on Linux,
+because the capture path links against them.
+
+### Build from source
 
 ```sh
 cargo build --release

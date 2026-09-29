@@ -5,8 +5,33 @@ edition = "2021"
 # The floor CI tests. Raise this and the MSRV job together.
 rust-version = "1.85"
 authors = ["Carter LaSalle"]
-description = "High-performance screen capture client with PCC (Pixel Change Check)"
+# AGPL-3.0 only, not "or later": the choice is deliberate, so say it
+# precisely rather than leaving a consumer to infer it.
+license = "AGPL-3.0-only"
+# benchmarks/benchmarks.rs is run as `cargo run --release --example
+# benchmarks`, not through the bench harness. Without this, cargo
+# auto-discovers it as a bench too and the same file becomes two targets.
 autobenches = false
+description = "Replicates your screen exactly and sends only the pixels that changed, over QUIC or a relay, to a native or browser viewer."
+repository = "https://github.com/carterlasalle/pixelchangecheck"
+readme = "README.md"
+keywords = ["screen-share", "remote-desktop", "quic", "pixel-diff", "streaming"]
+categories = ["multimedia::video", "network-programming", "command-line-utilities"]
+# Tooling that belongs to this repository's development, not to its
+# consumers. Without this, `cargo publish` ships 6 MB of agent config and
+# a stale status file to every downloader.
+exclude = [
+    "/.omp",
+    "/.bughunt",
+    "/.scc",
+    "/.tmp",
+    "/.pyre_configuration",
+    "/bughunt.toml",
+    "/AGENTS.md",
+    "/StatusToDoComplete.md",
+    "/scripts",
+    "/.dockerignore",
+]
 
 [[example]]
 name = "simple_screen_share"

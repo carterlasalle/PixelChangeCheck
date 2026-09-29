@@ -2802,6 +2802,16 @@ must be changed together.
   changing one side alone.
 - `p256` is pinned to 0.13. Version 0.14 moved `diffie_hellman` and
   `to_encoded_point` off the types this code calls them on.
+- Publishing is `git tag v<version> && git push --tags`. The tag drives
+  both the GitHub Release and the crates.io publish, and the workflow
+  refuses a tag that disagrees with `Cargo.toml` or a version that
+  already exists. A crates.io version can never be reused, not even
+  after a yank. See `CONTRIBUTING.md` for the one-time trusted-publisher
+  setup and `LICENSE` for the licence choice.
+- `Cargo.toml`'s `exclude` list is load-bearing, not tidiness. Anything
+  committed to the repository is packaged unless it is named there, and
+  `.bughunt/`, `.omp/` and `.scc/` are megabytes of local tooling. Check
+  `cargo package --list` after adding a top-level directory.
 - No video encoder is linked. `rav1e` 0.6.3 aborts on Rust's `unsafe`
   precondition checks (out-of-bounds in `context/cdf_context.rs`, any
   frame size); 0.6.6 pins `clap =4.0.32`, conflicting with this

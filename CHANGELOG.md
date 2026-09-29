@@ -8,6 +8,23 @@ mis-parsed. Version 4 added the end-to-end encryption handshake; version
 5 adds `pts_us` to every visual message, so a viewer can schedule a frame
 against the audio clock.
 
+### Packaging
+
+- The crate now carries the metadata crates.io requires: a licence, a
+  repository, a readme, keywords and categories. It is installable with
+  `cargo install pixel-change-check-client`.
+- Licensed **AGPL-3.0-only** -- version 3 only, not "or later". Say so
+  precisely rather than leaving a consumer to infer which.
+- Development tooling is excluded from the published package. Without it,
+  `cargo publish` shipped 6 MB of agent configuration and a stale status
+  file to every downloader: 149 of 228 packaged files. It is now 74.
+- `spin` and `lz4_flex` were pinned to yanked releases. Both moved
+  forward a patch to a non-yanked version, so an install no longer
+  pulls known-bad versions through `ring` and into the TLS path.
+- A tag whose version disagrees with `Cargo.toml` is refused before
+  anything is published, and a version that already exists is refused
+  rather than silently failing mid-upload.
+
 ### Browser encryption
 
 - The browser viewer is sealed end to end. There is no plaintext
