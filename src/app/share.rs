@@ -117,6 +117,25 @@ impl Published {
 type Shared = Arc<RwLock<Published>>;
 type EncodedBroadcast = broadcast::Sender<Arc<Vec<u8>>>;
 
+/// One encoded audio frame, ready for any viewer's stream.
+///
+/// Encoded **once** in the capture loop and shared, for the same reason
+/// visual messages are: N viewers must not mean N Opus encodes.
+#[derive(Clone)]
+struct EncodedAudio {
+    pts_us: u64,
+    pcm_len: u32,
+    opus: Arc<Vec<u8>>,
+}
+
+type AudioBroadcast = broadcast::Sender<Arc<EncodedAudio>>;
+
+/// How many audio frames may queue per viewer. 256 frames is five
+/// seconds at 20 ms, which is far more than any healthy viewer needs and
+/// still bounded: past it the viewer is not keeping up with audio, and a
+/// gap is a click rather than a stall.
+const AUDIO_QUEUE: usize = 256;
+
 /// Per-viewer feedback, used for adaptation and for saying who is behind.
 #[derive(Debug, Default)]
 struct ViewerStats {
@@ -161,6 +180,12 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
 
     let surface = Arc::new(SharedSurface::new(width, height, target_quality));
     let (tx, keepalive) = broadcast::channel::<Arc<Vec<u8>>>(BROADCAST_DEPTH);
+    // Audio is encoded once here and shared, exactly as visual messages
+    // are, so N viewers do not mean N Opus encodes.
+    let (audio_tx, audio_rx) = tokio::sync::broadcast::channel::<Arc<EncodedAudio>>(AUDIO_QUEUE);
+    if args.audio {
+        start_audio_capture(audio_tx.clone());
+    }
     // The web viewer is another consumer of the very same stream, so it
     // gets a receiver of its own rather than a second encode path.
     let web_updates = tx.subscribe();
@@ -268,6 +293,7 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
             token.clone(),
             viewers.clone(),
             next_viewer_id.clone(),
+            Some((audio_tx.clone(), audio_rx.resubscribe())),
         );
     }
 
@@ -290,6 +316,7 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
             published.clone(),
             viewers.clone(),
             next_viewer_id.clone(),
+            Some((audio_tx.clone(), audio_rx.resubscribe())),
         );
     }
 
@@ -314,6 +341,46 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
         },
     )
     .await
+}
+
+/// Start capture and the encode pump.
+///
+/// The pump runs on its own thread because the capture callback must
+/// never wait on the share loop, and the share loop must never wait on
+/// audio. Each frame is encoded **once** here and broadcast, so N viewers
+/// do not mean N Opus encodes.
+fn start_audio_capture(audio_tx: AudioBroadcast) {
+    let source = match crate::audio::capture::default_source() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("No audio capture device: {e}");
+            return;
+        }
+    };
+    let name = source.device_name().to_string();
+    let mut source = source;
+    match source.start() {
+        Ok(rx) => {
+            let start = Instant::now();
+            std::thread::spawn(move || {
+                let Ok(mut encoder) = crate::audio::AudioSender::new((), Default::default()) else {
+                    return;
+                };
+                while let Ok(frame) = rx.recv() {
+                    let Ok(opus) = encoder.encode_frame(&frame.pcm) else {
+                        continue;
+                    };
+                    let _ = audio_tx.send(Arc::new(EncodedAudio {
+                        pts_us: frame.capture_time.duration_since(start).as_micros() as u64,
+                        pcm_len: frame.pcm.len() as u32,
+                        opus: Arc::new(opus),
+                    }));
+                }
+            });
+            info!("Audio capture started from {name}");
+        }
+        Err(e) => warn!("Audio capture could not start: {e}"),
+    }
 }
 
 async fn start_web(
@@ -379,6 +446,7 @@ async fn start_web(
 
 // ------------------------------------------------------------- accepting
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_accept_loop(
     endpoint: quinn::Endpoint,
     tx: EncodedBroadcast,
@@ -386,6 +454,7 @@ fn spawn_accept_loop(
     token: SessionToken,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_id: Arc<AtomicU64>,
+    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
 ) {
     tokio::spawn(async move {
         let failures: Arc<Mutex<HashMap<SocketAddr, (u32, Instant)>>> =
@@ -398,18 +467,22 @@ fn spawn_accept_loop(
             }
             match connecting.await {
                 Ok(connection) => {
-                    let (tx, published, token, viewers, next_id) = (
+                    let (tx, published, token, viewers, next_id, audio) = (
                         tx.clone(),
                         published.clone(),
                         token.clone(),
                         viewers.clone(),
                         next_id.clone(),
+                        audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
                     );
                     tokio::spawn(async move {
                         match connection.accept_bi().await {
                             Ok((send, recv)) => {
-                                let transport =
-                                    crate::network::QuicTransport::new(send, recv, connection);
+                                let transport = crate::network::QuicTransport::new(
+                                    send,
+                                    recv,
+                                    connection.clone(),
+                                );
                                 serve_viewer(
                                     Box::new(transport),
                                     peer,
@@ -419,6 +492,8 @@ fn spawn_accept_loop(
                                     token,
                                     viewers,
                                     next_id,
+                                    audio,
+                                    Some(connection),
                                 )
                                 .await;
                             }
@@ -442,6 +517,7 @@ fn spawn_relay_loop(
     published: Shared,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_id: Arc<AtomicU64>,
+    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
 ) {
     tokio::spawn(async move {
         // Reconnect forever: a sharer is long-lived, and a relay restart is
@@ -472,6 +548,8 @@ fn spawn_relay_loop(
                         token.clone(),
                         viewers.clone(),
                         next_id.clone(),
+                        audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
+                        None,
                     )
                     .await;
                     warn!("Relay connection lost; reconnecting");
@@ -496,6 +574,8 @@ async fn serve_viewer(
     token: SessionToken,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_viewer_id: Arc<AtomicU64>,
+    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    quic: Option<quinn::Connection>,
 ) {
     // Subscribe *before* anything else, so no update can slip between the
     // snapshot we are about to take and the stream we are about to start.
@@ -573,6 +653,52 @@ async fn serve_viewer(
         crate::network::SealedSource::new(source, session.viewer_to_host),
     );
 
+    // Audio rides its own unidirectional stream, opened once the viewer
+    // is authorized. It is never a `Message`, so a multi-megabyte
+    // snapshot can never delay a 20 ms audio frame.
+    if let (Some((_, atx)), Some(mut arx), Some(connection)) = (
+        audio.as_ref(),
+        audio.as_ref().map(|(_, r)| r.resubscribe()),
+        quic.as_ref(),
+    ) {
+        // quinn 0.10 has no typed uni streams, so the header written by
+        // `open_stream` is what marks this one as audio.
+        match connection.open_uni().await {
+            Ok(mut stream) => {
+                if let Err(e) = crate::audio::transport::open_stream(&mut stream).await {
+                    warn!("{label} audio header failed: {e}");
+                } else {
+                    let _ = &atx;
+                    let audio_label = label.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            let frame = match arx.recv().await {
+                                Ok(f) => f,
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    // A viewer that cannot keep up with
+                                    // audio loses a click, not a session.
+                                    warn!("{audio_label} audio fell behind by {n} frames");
+                                    continue;
+                                }
+                                Err(broadcast::error::RecvError::Closed) => break,
+                            };
+                            let mut out = Vec::with_capacity(16 + frame.opus.len());
+                            out.extend_from_slice(&frame.pts_us.to_le_bytes());
+                            out.extend_from_slice(&frame.pcm_len.to_le_bytes());
+                            out.extend_from_slice(&(frame.opus.len() as u32).to_le_bytes());
+                            out.extend_from_slice(&frame.opus);
+                            if stream.write_all(&out).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    info!("{label} audio stream open");
+                }
+            }
+            Err(e) => warn!("{label} audio stream refused: {e}"),
+        }
+    }
+
     let mut floor = match send_snapshot(&mut sink, &published).await {
         Ok(rev) => rev,
         Err(e) => {
@@ -597,7 +723,9 @@ async fn serve_viewer(
         tokio::select! {
             update = rx.recv() => match update {
                 Ok(bytes) => {
-                    let Some(rev) = peek_rev(&bytes) else { continue };
+                    let Some(rev) = crate::network::peek_rev(&bytes) else {
+                        continue;
+                    };
                     if rev <= floor {
                         continue; // already contained in the snapshot we sent
                     }
@@ -713,6 +841,7 @@ fn snapshot_messages(
     out.push(
         Message::SnapshotBegin {
             rev,
+            pts_us: 0,
             epoch,
             width,
             height,
@@ -732,27 +861,15 @@ fn snapshot_messages(
             .encode()?,
         );
     }
-    out.push(Message::SnapshotCommit { rev, epoch }.encode()?);
-    Ok(out)
-}
-
-/// Read a message's revision without decoding its payload.
-pub(crate) fn peek_rev(bytes: &[u8]) -> Option<Rev> {
-    if bytes.len() < 5 || bytes[0] != crate::network::PROTOCOL_VERSION {
-        return None;
-    }
-    let body = &bytes[5..];
-    if body.is_empty() {
-        return None;
-    }
-    // SnapshotBegin, SnapshotChunk, PartialUpdate, KeepAlive and
-    // SnapshotCommit all lead with their revision.
-    match body[0] {
-        0x04 | 0x05 | 0x06 | 0x07 | 0x0B if body.len() >= 9 => {
-            Some(u64::from_le_bytes(body[1..9].try_into().ok()?))
+    out.push(
+        Message::SnapshotCommit {
+            rev,
+            pts_us: 0,
+            epoch,
         }
-        _ => None,
-    }
+        .encode()?,
+    );
+    Ok(out)
 }
 
 // ---------------------------------------------------------- capture loop
@@ -884,6 +1001,7 @@ async fn capture_loop(
             let serialize_start = Instant::now();
             let bytes = Message::PartialUpdate {
                 rev,
+                pts_us: 0,
                 epoch,
                 ops: plan.ops,
             }
@@ -1079,25 +1197,29 @@ mod tests {
     fn peek_rev_reads_a_partial_update_revision() {
         let bytes = Message::PartialUpdate {
             rev: 42,
+            pts_us: 0,
             epoch: 1,
             ops: vec![],
         }
         .encode()
         .unwrap();
-        assert_eq!(peek_rev(&bytes), Some(42));
+        assert_eq!(crate::network::peek_rev(&bytes), Some(42));
     }
 
     #[test]
     fn peek_rev_reads_a_keepalive_revision() {
         let bytes = Message::KeepAlive { rev: 7 }.encode().unwrap();
-        assert_eq!(peek_rev(&bytes), Some(7));
+        assert_eq!(crate::network::peek_rev(&bytes), Some(7));
     }
 
     #[test]
     fn peek_rev_ignores_messages_without_a_revision() {
         let bytes = Message::Bye.encode().unwrap();
-        assert_eq!(peek_rev(&bytes), None);
-        assert_eq!(peek_rev(b""), None);
-        assert_eq!(peek_rev(&[PROTOCOL_VERSION, 0, 0, 0, 0]), None);
+        assert_eq!(crate::network::peek_rev(&bytes), None);
+        assert_eq!(crate::network::peek_rev(b""), None);
+        assert_eq!(
+            crate::network::peek_rev(&[PROTOCOL_VERSION, 0, 0, 0, 0]),
+            None
+        );
     }
 }

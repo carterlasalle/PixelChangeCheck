@@ -13,8 +13,11 @@
 
 pub mod capture;
 pub mod codec;
+pub mod output;
 pub mod playout;
 pub mod sync;
+pub mod syncmeasure;
+pub mod transport;
 
 pub use capture::{AudioFrame, MicrophoneSource, NullSource, SystemAudio};
 pub use codec::{
@@ -22,3 +25,9 @@ pub use codec::{
 };
 pub use playout::{Playout, ScheduledRevision};
 pub use sync::{Estimator, OffsetSample};
+
+/// Twenty milliseconds, the frame size the codec is configured for.
+pub const FRAME_MS: u64 = 20;
+
+pub use output::{AudioOutput, PlayedFrame};
+pub use transport::{AudioReceiver, AudioSender, DecodedAudio};

@@ -10,7 +10,7 @@ pub use config::{
     SessionToken,
 };
 pub use protocol::{
-    read_len_prefix, Epoch, Message, Rev, MAX_MESSAGE_SIZE, MAX_OPS_PER_UPDATE,
+    peek_rev, read_len_prefix, Epoch, Message, Rev, MAX_MESSAGE_SIZE, MAX_OPS_PER_UPDATE,
     MAX_SNAPSHOT_CHUNKS, MAX_TOKEN_LEN, PROTOCOL_VERSION, SNAPSHOT_CHUNK_BYTES,
 };
 pub use resilience::{NetworkResilience, ResilienceConfig};

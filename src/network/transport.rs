@@ -177,6 +177,14 @@ pub struct QuicTransport {
 }
 
 impl QuicTransport {
+    /// The underlying connection, for opening a separate audio stream.
+    ///
+    /// A connection handle is cheap to clone and is the only way to reach
+    /// a stream that is not the message path.
+    pub fn connection(&self) -> Connection {
+        self.connection.clone()
+    }
+
     pub fn new(send: SendStream, recv: RecvStream, connection: Connection) -> Self {
         Self {
             send,

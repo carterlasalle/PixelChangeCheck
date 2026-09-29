@@ -320,10 +320,11 @@ fn absurd_geometry_is_refused_before_any_allocation() {
 
 #[test]
 fn an_absurd_op_count_is_refused() {
-    let mut payload = vec![0x06u8];
-    payload.extend_from_slice(&1u64.to_le_bytes());
-    payload.extend_from_slice(&0u32.to_le_bytes());
-    payload.extend_from_slice(&u32::MAX.to_le_bytes());
+    let mut payload = vec![0x06u8]; // PartialUpdate
+    payload.extend_from_slice(&1u64.to_le_bytes()); // rev
+    payload.extend_from_slice(&0u64.to_le_bytes()); // pts
+    payload.extend_from_slice(&0u32.to_le_bytes()); // epoch
+    payload.extend_from_slice(&u32::MAX.to_le_bytes()); // absurd op count
     let mut bytes = vec![pixel_change_check_client::network::PROTOCOL_VERSION];
     bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&payload);
@@ -537,6 +538,7 @@ fn a_serialised_update_survives_the_wire_byte_for_byte() -> Result<()> {
     // does, and apply through the real compositor.
     let bytes = Message::PartialUpdate {
         rev: 1,
+        pts_us: 0,
         epoch: 0,
         ops: plan.ops,
     }
@@ -546,7 +548,12 @@ fn a_serialised_update_survives_the_wire_byte_for_byte() -> Result<()> {
     install(&mut viewer, &base, 0, 0);
 
     match Message::decode(&bytes)? {
-        Message::PartialUpdate { rev, epoch, ops } => viewer.apply_ops(rev, epoch, &ops)?,
+        Message::PartialUpdate {
+            rev,
+            pts_us: 0,
+            epoch,
+            ops,
+        } => viewer.apply_ops(rev, epoch, &ops)?,
         other => panic!("expected a partial update, got {other:?}"),
     }
     assert_eq!(viewer.buffer(), &current.data, "real pixels must survive");
@@ -565,6 +572,7 @@ fn a_serialised_snapshot_survives_the_wire_byte_for_byte() -> Result<()> {
     let rev = 9u64;
     let begin = Message::SnapshotBegin {
         rev,
+        pts_us: 0,
         epoch: 4,
         width: W,
         height: H,
@@ -579,13 +587,19 @@ fn a_serialised_snapshot_survives_the_wire_byte_for_byte() -> Result<()> {
         data: data.clone(),
     }
     .encode()?;
-    let commit = Message::SnapshotCommit { rev: 9, epoch: 4 }.encode()?;
+    let commit = Message::SnapshotCommit {
+        rev: 9,
+        pts_us: 0,
+        epoch: 4,
+    }
+    .encode()?;
 
     let mut viewer = Compositor::new();
     for bytes in [begin, chunk, commit] {
         match Message::decode(&bytes)? {
             Message::SnapshotBegin {
                 rev: _,
+                pts_us: _,
                 epoch,
                 width,
                 height,
@@ -598,7 +612,11 @@ fn a_serialised_snapshot_survives_the_wire_byte_for_byte() -> Result<()> {
                 index,
                 data,
             } => viewer.push_snapshot_chunk(index, &data)?,
-            Message::SnapshotCommit { rev, epoch } => viewer.commit_snapshot(rev, epoch)?,
+            Message::SnapshotCommit {
+                rev,
+                pts_us: 0,
+                epoch,
+            } => viewer.commit_snapshot(rev, epoch)?,
             other => panic!("unexpected {other:?}"),
         }
     }

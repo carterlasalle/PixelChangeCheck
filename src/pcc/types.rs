@@ -15,6 +15,10 @@ pub const MAX_FRAME_BYTES: usize = 100_000_000;
 pub struct Frame {
     pub id: u64,
     pub timestamp: SystemTime,
+    /// Microseconds from the session's capture origin to *this* frame's
+    /// capture, on a monotonic clock. Zero when nothing is synchronised
+    /// against it.
+    pub pts_us: u64,
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
@@ -24,6 +28,12 @@ impl Frame {
     /// Build a frame, rejecting any buffer whose length disagrees with its
     /// dimensions and any surface above `MAX_FRAME_BYTES`.
     pub fn new(id: u64, width: u32, height: u32, data: Vec<u8>) -> Result<Self> {
+        Self::with_pts(id, width, height, data, 0)
+    }
+
+    /// A frame with an explicit presentation time, for a session that
+    /// synchronises against audio.
+    pub fn with_pts(id: u64, width: u32, height: u32, data: Vec<u8>, pts_us: u64) -> Result<Self> {
         let expected = rgb_len(width, height)?;
         if data.len() != expected {
             anyhow::bail!(
@@ -34,6 +44,7 @@ impl Frame {
         Ok(Self {
             id,
             timestamp: SystemTime::now(),
+            pts_us,
             width,
             height,
             data,

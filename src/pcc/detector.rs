@@ -516,6 +516,7 @@ mod tests {
     fn frame(w: u32, h: u32, data: Vec<u8>) -> Frame {
         Frame {
             id: 0,
+            pts_us: 0,
             timestamp: SystemTime::now(),
             width: w,
             height: h,

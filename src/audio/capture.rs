@@ -9,6 +9,20 @@ use std::time::{Duration, Instant};
 
 use super::codec::{SAMPLES_PER_FRAME, SAMPLE_RATE};
 
+/// The best available capture device, falling back to silence.
+///
+/// Silence rather than nothing: a share with no microphone should still
+/// send a stream, so the video timeline stays on a real audio clock and
+/// the viewer does not have to special-case "no audio".
+pub fn default_source() -> Result<Box<dyn SystemAudio>> {
+    match cpal::default_host().default_input_device() {
+        Some(device) => Ok(Box::new(MicrophoneSource::from_device(device)?)),
+        // No device, or the host refused to say. Silence is a valid
+        // answer; failing the whole share is not.
+        None => Ok(Box::new(NullSource::new())),
+    }
+}
+
 /// The default capture device's name, or `None` when the machine has none.
 ///
 /// Exists so `pcc doctor` can answer "will audio work here?" without

@@ -208,6 +208,7 @@ fn main() {
             let (_, data) = encode_snapshot(W, H, &current.data).unwrap();
             let begin = Message::SnapshotBegin {
                 rev,
+                pts_us: 0,
                 epoch: 0,
                 width: W,
                 height: H,
@@ -224,7 +225,13 @@ fn main() {
             }
             .encode()
             .unwrap();
-            let commit = Message::SnapshotCommit { rev, epoch: 0 }.encode().unwrap();
+            let commit = Message::SnapshotCommit {
+                rev,
+                pts_us: 0,
+                epoch: 0,
+            }
+            .encode()
+            .unwrap();
             wire += begin.len() + chunk.len() + commit.len();
             // The decoder consumes them in order.
             for part in [begin, chunk, commit] {
@@ -245,7 +252,11 @@ fn main() {
                     Message::SnapshotChunk { index, data, .. } => {
                         viewer.push_snapshot_chunk(index, &data).unwrap();
                     }
-                    Message::SnapshotCommit { rev, epoch } => {
+                    Message::SnapshotCommit {
+                        rev,
+                        pts_us: 0,
+                        epoch,
+                    } => {
                         viewer.commit_snapshot(rev, epoch).unwrap();
                     }
                     other => panic!("unexpected {other:?}"),
@@ -255,6 +266,7 @@ fn main() {
         } else {
             Message::PartialUpdate {
                 rev,
+                pts_us: 0,
                 epoch: 0,
                 ops: plan.ops,
             }
@@ -265,7 +277,12 @@ fn main() {
         // Round-trip through the real decoder and the real compositor, so
         // the number below is about what a viewer would actually show.
         match Message::decode(&bytes).unwrap() {
-            Message::PartialUpdate { rev, epoch, ops } => {
+            Message::PartialUpdate {
+                rev,
+                pts_us: 0,
+                epoch,
+                ops,
+            } => {
                 if viewer.apply_ops(rev, epoch, &ops).is_err() {
                     exact = false;
                 }
@@ -286,7 +303,11 @@ fn main() {
             Message::SnapshotChunk { index, data, .. } => {
                 viewer.push_snapshot_chunk(index, &data).unwrap();
             }
-            Message::SnapshotCommit { rev, epoch } => {
+            Message::SnapshotCommit {
+                rev,
+                pts_us: 0,
+                epoch,
+            } => {
                 exact &= viewer.commit_snapshot(rev, epoch).is_ok();
             }
             _ => {}

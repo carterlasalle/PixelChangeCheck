@@ -42,6 +42,14 @@ pub struct ViewArgs {
     pub reconnect: bool,
 }
 
+/// How many video frames the playout clock may hold while waiting for
+/// audio time to reach them.
+///
+/// Receipt: at 30 fps this is a second of video, far more than any
+/// healthy session needs, and still bounded -- past it the oldest frame is
+/// dropped, because a stale frame is worth less than a fresh one.
+const PLAYOUT_DEPTH: usize = 30;
+
 /// What the presentation layer needs to know, shared with the receive
 /// task.
 /// Why a session stopped, so a failed connection exits non-zero rather
@@ -83,6 +91,8 @@ pub fn run_view(args: ViewArgs, metrics: crate::telemetry::SharedMetrics) -> Res
                 s.frame = None;
                 s.terminal = None;
             }
+            // The connection is rebuilt per attempt, so it is captured
+            // here rather than hoisted out of the reconnect loop.
             let outcome = receive_once(&view_args, &bg_surface, &metrics_bg).await;
             *bg_attempts.lock() += 1;
             // Every exit path must release the presentation loop, or a
@@ -192,6 +202,9 @@ async fn receive_once(
         "specify either --connect or --relay, not both"
     );
 
+    // Kept only so the audio stream can be accepted; the transport owns
+    // its own handle.
+    let quic: Option<quinn::Connection> = None;
     let transport: Box<dyn MessageTransport> = if let Some(target) = &args.connect {
         let addr = crate::network::resolve(target)
             .await
@@ -287,16 +300,114 @@ async fn receive_once(
         )),
     });
 
+    // Audio arrives on its own unidirectional stream, so a multi-megabyte
+    // snapshot can never delay a 20 ms frame. It is accepted only when the
+    // sharer opened one; the magic header is what identifies it, because
+    // quinn 0.10 has no typed streams.
+    let mut audio_stream: Option<quinn::RecvStream> = None;
+    // The two clocks, and the bridge between them. Until the estimator
+    // converges, video plays as soon as it arrives rather than being
+    // scheduled against a plausible-but-wrong offset.
+    let mut sync = crate::audio::sync::Estimator::new();
+    let mut sharer_origin: Option<std::time::Instant> = None;
+    // The output device lives on its own thread, so nothing here holds a
+    // `!Send` stream across an await.
+    let mut audio_out: Option<crate::audio::AudioOutput> = None;
+    let mut audio_played: Option<crate::audio::output::PlayedReceiver<u64>> = None;
+    let mut audio: Option<crate::audio::AudioReceiver> = None;
+    if let Some(connection) = &quic {
+        if let Ok(stream) = connection.accept_uni().await {
+            // quinn 0.10 has no typed streams, so the header written by
+            // `open_stream` is what marks this one as audio. It is read
+            // from the stream itself: a unidirectional stream is
+            // read-only and cannot be split.
+            let mut probe = stream;
+            match crate::audio::AudioReceiver::read_header(&mut probe).await {
+                Ok(true) => {
+                    match crate::audio::AudioReceiver::new() {
+                        Ok(receiver) => {
+                            // Video is released against the audio clock,
+                            // never the other way round: the audio device
+                            // has a buffer and a latency nobody controls,
+                            // so its time defines "now".
+                            match crate::audio::AudioOutput::start::<u64>(PLAYOUT_DEPTH) {
+                                Ok((out, played)) => {
+                                    info!("Audio playout started");
+                                    audio_out = Some(out);
+                                    audio_played = Some(played);
+                                }
+                                Err(e) => warn!("Audio output unavailable: {e}"),
+                            }
+                            audio = Some(receiver);
+                            audio_stream = Some(probe);
+                        }
+                        Err(e) => warn!("Audio decoder unavailable: {e}"),
+                    }
+                }
+                Ok(false) => info!("Unidirectional stream was not audio; ignoring it"),
+                Err(e) => warn!("Audio stream header unreadable: {e}"),
+            }
+        }
+    }
+
     info!("Connected. Waiting for frames...");
     let joined_at = std::time::Instant::now();
     let mut compositor = Compositor::new();
     let mut last_ack: Rev = 0;
+    // With audio, a frame waits for the audio clock rather than being
+    // shown the instant it decodes. Without audio there is no clock, and
+    // the frame is shown immediately.
+    let mut pending: Option<Frame> = None;
 
     loop {
+        // Drain whatever audio has arrived, then take one visual message.
+        // A blocked visual stream must not stop audio, and vice versa.
+        if let (Some(receiver), Some(stream), Some(out)) =
+            (audio.as_mut(), audio_stream.as_mut(), audio_out.as_ref())
+        {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(1),
+                receiver.read_frame(stream),
+            )
+            .await
+            {
+                Ok(Ok(Some(frame))) => {
+                    // The first audio frame pins the sharer's clock to
+                    // this process's clock; every later one refines it.
+                    let origin = *sharer_origin.get_or_insert_with(std::time::Instant::now);
+                    sync.observe(crate::audio::sync::OffsetSample::new(
+                        (origin + frame.pts()).elapsed(),
+                        // No RTT measurement of our own here; the
+                        // estimator's clamp keeps a bad sample from
+                        // poisoning the playout.
+                        std::time::Duration::from_millis(0),
+                    ));
+                    out.push(&frame.pcm);
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => warn!("Audio frame refused: {e}"),
+                Err(_) => {}
+            }
+        }
+        // Release whatever the audio clock says is due.
+        if let Some(rx) = audio_played.as_ref() {
+            while let Ok(played) = rx.try_recv() {
+                if played
+                    .revisions
+                    .contains(&pending.as_ref().map(|f| f.id).unwrap_or(u64::MAX))
+                    && !played.revisions.is_empty()
+                {
+                    if let Some(frame) = pending.take() {
+                        surface.lock().frame = Some(Arc::new(frame));
+                    }
+                }
+            }
+        }
         let msg = transport.recv().await?;
         match msg {
             Message::SnapshotBegin {
                 rev: _,
+                pts_us: _,
                 epoch,
                 width,
                 height,
@@ -313,13 +424,18 @@ async fn receive_once(
             } => {
                 compositor.push_snapshot_chunk(index, &data)?;
             }
-            Message::SnapshotCommit { rev, epoch } => {
+            Message::SnapshotCommit { rev, pts_us, epoch } => {
                 let apply_start = std::time::Instant::now();
                 compositor.commit_snapshot(rev, epoch)?;
                 metrics.apply.record_duration(apply_start.elapsed());
                 if let Some((w, h)) = compositor.dimensions() {
-                    let frame = Frame::new(rev, w, h, compositor.buffer().to_vec())?;
-                    surface.lock().frame = Some(Arc::new(frame));
+                    let frame = Frame::with_pts(rev, w, h, compositor.buffer().to_vec(), pts_us)?;
+                    if sync.convergence() && audio_played.is_some() {
+                        // Hold it: the audio clock decides when it is due.
+                        pending = Some(frame);
+                    } else {
+                        surface.lock().frame = Some(Arc::new(frame));
+                    }
                     // The gap between joining and this frame is the single
                     // number a new user cares about most.
                     metrics
@@ -333,14 +449,26 @@ async fn receive_once(
                     transport.send(&Message::Ack { rev }).await?;
                 }
             }
-            Message::PartialUpdate { rev, epoch, ops } => {
+            Message::PartialUpdate {
+                rev,
+                pts_us,
+                epoch,
+                ops,
+            } => {
                 let apply_start = std::time::Instant::now();
                 match compositor.apply_ops(rev, epoch, &ops) {
                     Ok(()) => {
                         metrics.apply.record_duration(apply_start.elapsed());
                         if let Some((w, h)) = compositor.dimensions() {
-                            let frame = Frame::new(rev, w, h, compositor.buffer().to_vec())?;
-                            surface.lock().frame = Some(Arc::new(frame));
+                            let frame =
+                                Frame::with_pts(rev, w, h, compositor.buffer().to_vec(), pts_us)?;
+                            if sync.convergence() && audio_played.is_some() {
+                                // Hold it: the audio clock decides when
+                                // it is due, never the arrival.
+                                pending = Some(frame);
+                            } else {
+                                surface.lock().frame = Some(Arc::new(frame));
+                            }
                         }
                         if rev != last_ack {
                             last_ack = rev;

@@ -70,6 +70,7 @@ fn produce(sink: &mut Vec<Vec<u8>>, frames: u32) -> Result<Frame> {
             sink.push(
                 Message::PartialUpdate {
                     rev,
+                    pts_us: 0,
                     epoch: 0,
                     ops: plan.ops,
                 }
@@ -92,6 +93,7 @@ fn push_snapshot(
     sink.push(
         Message::SnapshotBegin {
             rev,
+            pts_us: 0,
             epoch: 0,
             width,
             height,
@@ -111,7 +113,14 @@ fn push_snapshot(
             .encode()?,
         );
     }
-    sink.push(Message::SnapshotCommit { rev, epoch: 0 }.encode()?);
+    sink.push(
+        Message::SnapshotCommit {
+            rev,
+            pts_us: 0,
+            epoch: 0,
+        }
+        .encode()?,
+    );
     Ok(())
 }
 
@@ -119,6 +128,7 @@ fn apply(viewer: &mut Compositor, bytes: &[u8]) -> Result<()> {
     match Message::decode(bytes)? {
         Message::SnapshotBegin {
             rev: _,
+            pts_us: _,
             epoch,
             width,
             height,
@@ -131,8 +141,17 @@ fn apply(viewer: &mut Compositor, bytes: &[u8]) -> Result<()> {
             index,
             data,
         } => viewer.push_snapshot_chunk(index, &data)?,
-        Message::SnapshotCommit { rev, epoch } => viewer.commit_snapshot(rev, epoch)?,
-        Message::PartialUpdate { rev, epoch, ops } => viewer.apply_ops(rev, epoch, &ops)?,
+        Message::SnapshotCommit {
+            rev,
+            pts_us: 0,
+            epoch,
+        } => viewer.commit_snapshot(rev, epoch)?,
+        Message::PartialUpdate {
+            rev,
+            pts_us: 0,
+            epoch,
+            ops,
+        } => viewer.apply_ops(rev, epoch, &ops)?,
         _ => {}
     }
     Ok(())
