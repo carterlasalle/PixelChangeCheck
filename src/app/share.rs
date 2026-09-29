@@ -401,11 +401,17 @@ async fn start_web(
                 .with_context(|| format!("Failed to read the certificate at {cert_path}"))?;
             let key = std::fs::read(&key_path)
                 .with_context(|| format!("Failed to read the private key at {key_path}"))?;
-            let parsed = rustls::ServerConfig::builder()
-                .with_safe_defaults()
-                .with_no_client_auth()
-                .with_single_cert(vec![rustls::Certificate(certs)], rustls::PrivateKey(key))
-                .map_err(|e| anyhow::anyhow!("Invalid web certificate/key pair: {e}"))?;
+            let parsed = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(rustls::ALL_VERSIONS)
+            .expect("the ring provider supports these versions")
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(certs)],
+                rustls::pki_types::PrivatePkcs8KeyDer::from(key).into(),
+            )
+            .map_err(|e| anyhow::anyhow!("Invalid web certificate/key pair: {e}"))?;
             Some(Arc::new(parsed))
         }
         None => None,

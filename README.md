@@ -62,7 +62,10 @@ Three things make that claim hold up:
 
 - Rust (see `rust-version` in `Cargo.toml`)
 - System dependencies:
-  - **Linux**: `libxcb1-dev`, `libxrandr-dev`, `libdbus-1-dev`
+  - **Linux**: `pkg-config`, `libasound2-dev`, `libdbus-1-dev`,
+    `libudev-dev`, `libxcb1-dev`, `libxrandr-dev`. The ALSA headers are
+    not optional: `alsa-sys`, which the audio capture path links against,
+    runs `pkg-config` at build time and fails the build without them.
   - **macOS/Windows**: none
 
 ### Install

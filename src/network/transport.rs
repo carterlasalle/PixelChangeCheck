@@ -226,7 +226,12 @@ impl MessageTransport for QuicTransport {
 
 /// Build a QUIC client endpoint that pins one exact server certificate.
 pub fn client_endpoint(config: &NetworkConfig, pin: &[u8]) -> Result<Endpoint> {
-    let mut client_config = ClientConfig::new(Arc::new(NetworkConfig::client_tls_config(pin)?));
+    // quinn takes a rustls config through its own crypto wrapper; passing
+    // the rustls type directly stopped compiling in quinn 0.11.
+    let mut client_config = ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(NetworkConfig::client_tls_config(pin)?)
+            .map_err(|e| anyhow::anyhow!("The pinned TLS config is not usable by QUIC: {e}"))?,
+    ));
     client_config.transport_config(config.transport_config());
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
@@ -239,8 +244,12 @@ pub fn server_endpoint(
     identity: &ServerIdentity,
     bind_addr: SocketAddr,
 ) -> Result<Endpoint> {
-    let mut server_config =
-        ServerConfig::with_crypto(Arc::new(NetworkConfig::server_crypto_config(identity)?));
+    let mut server_config = ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(NetworkConfig::server_crypto_config(
+            identity,
+        )?)
+        .map_err(|e| anyhow::anyhow!("The server TLS config is not usable by QUIC: {e}"))?,
+    ));
     server_config.transport_config(config.transport_config());
     let endpoint = Endpoint::server(server_config, bind_addr)?;
     Ok(endpoint)

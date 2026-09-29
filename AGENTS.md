@@ -2808,6 +2808,22 @@ must be changed together.
   already exists. A crates.io version can never be reused, not even
   after a yank. See `CONTRIBUTING.md` for the one-time trusted-publisher
   setup and `LICENSE` for the licence choice.
+- CI installs its Linux system dependencies in four separate jobs via the
+  `LINUX_DEPS` env var. `alsa-sys` (via cpal) runs `pkg-config` at build
+  time and *panics* without the ALSA headers, so a missing package is a
+  build error, not a degraded feature. This only ever surfaced once CI
+  actually ran, which it did not for a long time because it watched for a
+  `main` branch that does not exist.
+- Never run two `scripts/smoke.sh` at once. The script begins with
+  `pkill -f "$BIN"`, so the second run kills the first run's binaries and
+  the first reports a spurious relay failure. It looks exactly like a
+  product bug.
+- The crypto provider must be named with
+  `builder_with_provider(rustls::crypto::ring::default_provider())`.
+  With both `ring` and `aws-lc-rs` reachable in the tree, rustls refuses
+  to pick one and panics at the first handshake.
+- `cargo audit` reads `.cargo/audit.toml`, not `audit.toml` at the repo
+  root. A root-level file is silently ignored and the gate still fails.
 - `Cargo.toml`'s `exclude` list is load-bearing, not tidiness. Anything
   committed to the repository is packaged unless it is named there, and
   `.bughunt/`, `.omp/` and `.scc/` are megabytes of local tooling. Check

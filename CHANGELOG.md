@@ -8,8 +8,33 @@ mis-parsed. Version 4 added the end-to-end encryption handshake; version
 5 adds `pts_us` to every visual message, so a viewer can schedule a frame
 against the audio clock.
 
+### Dependencies
+
+- **quinn 0.10.2 -> 0.11**, with the TLS stack moved to match:
+  **rustls 0.21 -> 0.23**, `tokio-rustls` 0.26, `rcgen` 0.13. This is
+  what clears RUSTSEC-2026-0037 (8.7, DoS in Quinn endpoints) and
+  RUSTSEC-2026-0185 (7.5, remote memory exhaustion from unbounded
+  out-of-order stream reassembly). Both are reachable: this product
+  listens on a UDP socket that anyone on the internet can send to.
+- The rustls crypto provider is now named explicitly
+  (`builder_with_provider` + the `ring` provider) rather than inferred.
+  With `ring` and `aws-lc-rs` both reachable in the tree, rustls refuses
+  to guess and panics at the first handshake.
+- Also updated past advisories: `bytes` 1.9 -> 1.12, `crossbeam-epoch`
+  0.9.18 -> 0.9.21, `ring` 0.17.8 -> 0.17.14, `time` 0.3.37 -> 0.3.55,
+  `tracing-subscriber` 0.3.19 -> 0.3.23.
+- `.cargo/audit.toml` ignores two quick-xml advisories, and only those
+  two. Both are memory-exhaustion and quadratic-time bugs in an XML
+  parser, reached here only at build time by `wayland-scanner` and
+  `xcb`, parsing the protocol definitions that ship with the system. The
+  fix needs `screenshots` above 0.8.10, which does not exist. The file
+  says what to re-check when it does.
+
 ### Fixed
 
+- CI installed no system dependencies at all. `alsa-sys` runs
+  `pkg-config` at build time and panics without the ALSA headers, so
+  every Linux job was a build failure. All four now install them.
 - CI watched `push: branches: [main]` but the default branch is `master`,
   so it never ran on a push. It failed silently, which is the worst way
   for CI to fail: the badge stays green because no run was ever

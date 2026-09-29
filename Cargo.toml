@@ -30,6 +30,8 @@ exclude = [
     "/AGENTS.md",
     "/StatusToDoComplete.md",
     "/scripts",
+    "/.cargo",
+    "/audit.toml",
     "/.dockerignore",
 ]
 
@@ -59,11 +61,12 @@ tokio = { version = "1.35", features = ["full"] }
 async-trait = "0.1"
 
 # Network
-quinn = "0.10"
+quinn = "0.11"
 bytes = "1.5"
-rustls = { version = "0.21", features = ["dangerous_configuration"] }
-rustls-native-certs = "0.6"
-rcgen = "0.12"
+# The dangerous custom-verifier API is no longer feature-gated in 0.23.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+rcgen = "0.13"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -93,7 +96,7 @@ sha2 = "0.10"
 parking_lot = "0.12"
 base64 = "0.22"
 sha1 = "0.10"
-tokio-rustls = "0.24"
+tokio-rustls = "0.26"
 x25519-dalek = "2.0"
 chacha20poly1305 = "0.10"
 tracing-appender = "0.2"
