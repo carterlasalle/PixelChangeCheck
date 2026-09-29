@@ -78,8 +78,8 @@ enum Commands {
         /// Disable the browser viewer entirely.
         #[arg(long)]
         no_web: bool,
-        /// PEM certificate for HTTPS/WSS on the browser port. Without it
-        /// the browser path is plaintext (the token still authenticates).
+        /// PEM certificate for HTTPS/WSS on the browser port. Required for
+        /// a non-loopback --web address; loopback stays plaintext for dev.
         #[arg(long, requires = "web_key")]
         web_cert: Option<String>,
         /// PEM private key matching --web-cert.

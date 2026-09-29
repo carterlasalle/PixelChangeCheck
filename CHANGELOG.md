@@ -19,6 +19,12 @@
 - **Opus loss concealment and in-band FEC.** The encoder emits FEC, and
   the viewer fills each pts gap in order — FEC for the first missing
   frame, concealment for the rest — instead of leaving a hole.
+- **Remote browser mode requires HTTPS.** Serving the viewer JavaScript
+  over plaintext HTTP lets a network attacker replace it and steal the
+  session secret or the screen after decryption, which application-layer
+  sealing cannot fix. A non-loopback `--web` address without
+  `--web-cert`/`--web-key` now fails fast with the fix; loopback stays
+  plaintext for development.
 
 ## 0.1.2
 

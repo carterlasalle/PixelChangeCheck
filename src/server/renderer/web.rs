@@ -14,8 +14,9 @@
 //!
 //! Access control is the session token, on every path. Supplying a real
 //! certificate with `--web-cert`/`--web-key` turns both paths into
-//! HTTPS/WSS; without one the connection is plaintext, which is why the
-//! token is mandatory rather than optional here.
+//! HTTPS/WSS. Without one only loopback serves (the sharer refuses a
+//! non-loopback --web address), which is why the token is mandatory
+//! rather than optional here.
 
 use crate::network::SessionToken;
 use crate::server::renderer::SharedSurface;

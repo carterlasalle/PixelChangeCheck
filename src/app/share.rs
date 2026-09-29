@@ -647,6 +647,17 @@ async fn start_web(
     let addr = crate::network::resolve(web_addr)
         .await
         .with_context(|| format!("Invalid --web address '{web_addr}'"))?;
+    // Remote browser mode requires HTTPS. Without TLS the viewer
+    // JavaScript itself travels in the clear, so anyone who can modify
+    // network traffic can replace it and steal the session secret or the
+    // screen after decryption — application-layer sealing cannot save a
+    // compromised application. Loopback stays plaintext (dev convenience,
+    // no network attacker); anything else refuses to serve insecurely.
+    if cert.is_none() && !addr.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing to serve the browser viewer on non-loopback {addr} without TLS: pass --web-cert/--web-key, or bind a loopback --web address"
+        );
+    }
     let tls = match cert {
         Some((cert_path, key_path)) => {
             let certs = std::fs::read(&cert_path)
@@ -1831,6 +1842,30 @@ fn rate_limited(
 mod tests {
     use super::*;
     use crate::network::PROTOCOL_VERSION;
+
+    /// The TLS gate in `start_web`, factored for tests: remote browser
+    /// mode requires HTTPS, loopback stays plaintext for dev convenience.
+    /// `true` means serve.
+    fn web_tls_gate(addr: &str, has_cert: bool) -> bool {
+        let addr: SocketAddr = addr.parse().unwrap();
+        has_cert || addr.ip().is_loopback()
+    }
+
+    #[test]
+    fn loopback_without_tls_is_allowed() {
+        assert!(web_tls_gate("127.0.0.1:8080", false));
+    }
+
+    #[test]
+    fn remote_without_tls_is_refused() {
+        assert!(!web_tls_gate("0.0.0.0:8080", false));
+        assert!(!web_tls_gate("192.168.1.20:8080", false));
+    }
+
+    #[test]
+    fn remote_with_tls_is_allowed() {
+        assert!(web_tls_gate("0.0.0.0:8080", true));
+    }
 
     #[test]
     fn peek_rev_reads_a_partial_update_revision() {
