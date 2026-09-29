@@ -320,6 +320,12 @@ async fn receive_once(
     let mut audio_played: Option<crate::audio::output::PlayedReceiver<u64>> = None;
     let mut audio: Option<crate::audio::AudioReceiver> = None;
     let mut audio_connection: Option<quinn::Connection> = None;
+    // Adaptive hold for late frames, plus the arrival/pts history that
+    // feeds it. Gaps are concealed in pts order when the next frame
+    // arrives; the hold bounds how many frames one gap may produce.
+    let mut audio_jitter = crate::audio::Jitter::new();
+    let mut last_arrival: Option<std::time::Instant> = None;
+    let mut last_audio_pts: Option<u64> = None;
     if let Some(connection) = quic {
         // Datagrams exist only on QUIC direct connections. Relay
         // transports do not expose the underlying connection, so viewers
@@ -375,8 +381,22 @@ async fn receive_once(
             )
             .await
             {
-                Ok(Ok(datagram)) => match receiver.decode_datagram(&datagram) {
-                    Ok(frame) => {
+                Ok(Ok(datagram)) => {
+                    let now = std::time::Instant::now();
+                    if let Some(prev) = last_arrival {
+                        audio_jitter.observe_gap_us(
+                            now.duration_since(prev)
+                                .as_micros()
+                                .min(u128::from(u64::MAX)) as u64,
+                        );
+                    }
+                    last_arrival = Some(now);
+                    // Push one decoded frame, filling any pts gap ahead of
+                    // it in order. The arriving packet's FEC repairs the
+                    // first missing frame when the encoder emitted it; the
+                    // rest get concealment. The hold bounds the run so a
+                    // dead link cannot fill the device with synthesis.
+                    let mut push = |frame: &crate::audio::DecodedAudio| {
                         // The first audio frame pins the sharer's clock to
                         // this process's clock; every later one refines it.
                         let origin = *sharer_origin.get_or_insert_with(std::time::Instant::now);
@@ -388,9 +408,44 @@ async fn receive_once(
                             std::time::Duration::from_millis(0),
                         ));
                         out.push(&frame.pcm);
+                    };
+                    match receiver.decode_datagram(&datagram) {
+                        Ok(frame) => {
+                            if let Some(prev) = last_audio_pts {
+                                let missing_us = frame
+                                    .pts_us
+                                    .saturating_sub(prev)
+                                    .saturating_sub(crate::audio::FRAME_MS * 1_000);
+                                let missing = (missing_us / (crate::audio::FRAME_MS * 1_000))
+                                    .min(u64::from(audio_jitter.max_concealed_frames()))
+                                    as usize;
+                                for i in 1..=missing {
+                                    let gap_pts = prev + i as u64 * crate::audio::FRAME_MS * 1_000;
+                                    if gap_pts >= frame.pts_us {
+                                        break;
+                                    }
+                                    let filled = if i == 1 {
+                                        receiver
+                                            .recover_missing_fec(gap_pts, &datagram)
+                                            .or_else(|_| receiver.conceal_missing(gap_pts))
+                                    } else {
+                                        receiver.conceal_missing(gap_pts)
+                                    };
+                                    match filled {
+                                        Ok(gap_frame) => push(&gap_frame),
+                                        Err(e) => {
+                                            warn!("Audio gap fill refused: {e}");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            last_audio_pts = Some(frame.pts_us);
+                            push(&frame);
+                        }
+                        Err(e) => warn!("Audio datagram refused: {e}"),
                     }
-                    Err(e) => warn!("Audio datagram refused: {e}"),
-                },
+                }
                 Ok(Err(e)) => warn!("Audio datagrams unavailable: {e}"),
                 Err(_) => {}
             }

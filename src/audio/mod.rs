@@ -13,6 +13,7 @@
 
 pub mod capture;
 pub mod codec;
+pub mod jitter;
 pub mod output;
 pub mod playout;
 pub mod sync;
@@ -23,6 +24,7 @@ pub use capture::{AudioFrame, MicrophoneSource, NullSource, SystemAudio};
 pub use codec::{
     OpusDecoder, OpusEncoder, CHANNELS, SAMPLES_PER_CHANNEL, SAMPLES_PER_FRAME, SAMPLE_RATE,
 };
+pub use jitter::Jitter;
 pub use playout::{Playout, ScheduledRevision};
 pub use sync::{Estimator, OffsetSample};
 

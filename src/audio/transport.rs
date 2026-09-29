@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::codec::OpusEncoder;
-use super::codec::{CHANNELS, SAMPLES_PER_FRAME};
+use super::codec::{CHANNELS, SAMPLES_PER_CHANNEL, SAMPLES_PER_FRAME};
 
 /// The sharer's side: capture and encode one Opus frame.
 ///
@@ -178,6 +178,41 @@ impl AudioReceiver {
         Ok(DecodedAudio { pts_us, pcm })
     }
 
+    /// Fill one missing 20 ms frame at `pts_us` with Opus concealment
+    /// rather than silence. The caller detects the gap from pts skips and
+    /// calls this once per missing frame, in order, before decoding the
+    /// packet that arrived after the gap.
+    pub fn conceal_missing(&mut self, pts_us: u64) -> Result<DecodedAudio> {
+        let mut pcm = vec![0f32; SAMPLES_PER_FRAME];
+        let per_channel = self.decoder.conceal(&mut pcm)?;
+        if per_channel != SAMPLES_PER_CHANNEL {
+            anyhow::bail!(
+                "Opus concealed {per_channel} samples per channel, expected {SAMPLES_PER_CHANNEL}"
+            );
+        }
+        self.gaps += 1;
+        self.last_pts_us = pts_us;
+        self.seen += 1;
+        Ok(DecodedAudio { pts_us, pcm })
+    }
+
+    /// Fill one missing frame from the next packet's in-band FEC, when the
+    /// encoder emitted it. The caller still decodes `next` normally
+    /// afterwards: this output replaces only the gap, at the gap's pts.
+    pub fn recover_missing_fec(&mut self, pts_us: u64, next: &[u8]) -> Result<DecodedAudio> {
+        let mut pcm = vec![0f32; SAMPLES_PER_FRAME];
+        let per_channel = self.decoder.recover_fec(next, &mut pcm)?;
+        if per_channel != SAMPLES_PER_CHANNEL {
+            anyhow::bail!(
+                "Opus FEC recovered {per_channel} samples per channel, expected {SAMPLES_PER_CHANNEL}"
+            );
+        }
+        self.gaps += 1;
+        self.last_pts_us = pts_us;
+        self.seen += 1;
+        Ok(DecodedAudio { pts_us, pcm })
+    }
+
     pub fn frames_seen(&self) -> u64 {
         self.seen
     }
@@ -279,6 +314,37 @@ mod tests {
         let mut receiver = AudioReceiver::new().unwrap();
         let err = receiver.decode_datagram(&payload).unwrap_err().to_string();
         assert!(err.contains("more than one"), "unhelpful: {err}");
+    }
+
+    #[test]
+    fn a_concealed_frame_is_a_full_frame_of_audio_not_silence() {
+        // A gap the network never delivers still advances the decoder,
+        // so the next real packet decodes against continuous state.
+        let mut receiver = AudioReceiver::new().unwrap();
+        let filled = receiver.conceal_missing(20_000).unwrap();
+        assert_eq!(filled.pts_us, 20_000);
+        assert_eq!(filled.pcm.len(), SAMPLES_PER_FRAME);
+        assert_eq!(receiver.gaps(), 1);
+        assert_eq!(receiver.frames_seen(), 1);
+    }
+
+    #[test]
+    fn fec_recovery_consumes_the_next_packet_without_advancing_past_it() {
+        // The FEC output replaces the gap; the packet itself still decodes
+        // normally afterwards, so one packet yields two frames here.
+        let mut encoder = OpusEncoder::new().unwrap();
+        let pcm = tone(1);
+        let next = encoder.encode(&pcm).unwrap();
+        let mut receiver = AudioReceiver::new().unwrap();
+        let recovered = receiver.recover_missing_fec(20_000, &next).unwrap();
+        assert_eq!(recovered.pts_us, 20_000);
+        assert_eq!(recovered.pcm.len(), SAMPLES_PER_FRAME);
+        let mut out = vec![0f32; SAMPLES_PER_FRAME];
+        let n = receiver
+            .decoder
+            .decode(&next, &mut out)
+            .expect("the packet itself must still decode");
+        assert_eq!(n, SAMPLES_PER_CHANNEL);
     }
 
     #[tokio::test]

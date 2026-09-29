@@ -29,12 +29,18 @@ pub struct OpusEncoder {
 
 impl OpusEncoder {
     pub fn new() -> Result<Self> {
-        let inner = opus::Encoder::new(
+        let mut inner = opus::Encoder::new(
             SAMPLE_RATE,
             opus::Channels::Stereo,
             opus::Application::Audio,
         )
         .context("creating 48 kHz stereo Opus encoder")?;
+        // Emit in-band FEC so the viewer can recover one lost frame from
+        // the next packet instead of concealing blindly. Costs a little
+        // bitrate on every packet; worth it on any lossy link.
+        inner
+            .set_inband_fec(true)
+            .context("enabling Opus in-band FEC")?;
         Ok(Self { inner })
     }
 
@@ -74,6 +80,28 @@ impl OpusDecoder {
         self.inner
             .decode_float(packet, pcm, false)
             .context("decoding Opus packet")
+    }
+
+    /// Conceal one lost 20 ms frame: decode with no input so libopus
+    /// generates packet-loss concealment rather than silence. Call this
+    /// once per missing frame, in pts order, so the decoder state stays
+    /// continuous for the next real packet.
+    pub fn conceal(&mut self, pcm: &mut [f32]) -> Result<usize> {
+        require_frame_len(pcm.len())?;
+        self.inner
+            .decode_float(&[], pcm, false)
+            .context("concealing a lost Opus frame")
+    }
+
+    /// Recover a lost frame from the next packet's in-band FEC, when the
+    /// encoder emitted it. This decodes `next` with the FEC flag rather
+    /// than as its own frame: the output replaces the *missing* frame,
+    /// and `next` must still be decoded normally afterwards.
+    pub fn recover_fec(&mut self, next: &[u8], pcm: &mut [f32]) -> Result<usize> {
+        require_frame_len(pcm.len())?;
+        self.inner
+            .decode_float(next, pcm, true)
+            .context("recovering a lost Opus frame from FEC")
     }
 }
 
