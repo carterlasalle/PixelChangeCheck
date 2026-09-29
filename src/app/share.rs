@@ -15,6 +15,7 @@
 //!   with an explicit begin/commit, so an interrupted transfer cannot
 //!   half-replace a working surface.
 
+use crate::audio::transport::EncodedFrame as EncodedAudio;
 use crate::capture::CaptureSource;
 use crate::encoder::SurfaceSnapshot;
 use crate::network::{
@@ -117,17 +118,8 @@ impl Published {
 type Shared = Arc<RwLock<Published>>;
 type EncodedBroadcast = broadcast::Sender<Arc<Vec<u8>>>;
 
-/// One encoded audio frame, ready for any viewer's stream.
-///
-/// Encoded **once** in the capture loop and shared, for the same reason
-/// visual messages are: N viewers must not mean N Opus encodes.
-#[derive(Clone)]
-struct EncodedAudio {
-    pts_us: u64,
-    pcm_len: u32,
-    opus: Arc<Vec<u8>>,
-}
-
+/// The capture loop and the datagram pump share one frame shape instead
+/// of two parallel structs with a `From` between them.
 type AudioBroadcast = broadcast::Sender<Arc<EncodedAudio>>;
 
 /// How many audio frames may queue per viewer. 256 frames is five
@@ -178,7 +170,13 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
     let target_quality = args.quality.clamp(0.1, 1.0);
     let requested_fps = args.fps.max(1).min(args.max_fps.max(1));
 
-    let surface = Arc::new(SharedSurface::new(width, height, target_quality));
+    // The MJPEG preview lives only for browsers: without --web there is
+    // nobody to read it, and the per-frame compare inside `publish` is a
+    // 6 MB memcmp on every capture for nothing.
+    let surface = args
+        .web
+        .as_ref()
+        .map(|_| Arc::new(SharedSurface::new(width, height, target_quality)));
     let (tx, keepalive) = broadcast::channel::<Arc<Vec<u8>>>(BROADCAST_DEPTH);
     // Audio is encoded once here and shared, exactly as visual messages
     // are, so N viewers do not mean N Opus encodes.
@@ -186,12 +184,6 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
     if args.audio {
         start_audio_capture(audio_tx.clone());
     }
-    // The web viewer is another consumer of the very same stream, so it
-    // gets a receiver of its own rather than a second encode path.
-    let web_updates = tx.subscribe();
-
-    // The web server starts once the published surface exists, so a
-    // joining browser can be caught up from it.
 
     // Capture the first frame *before* any listener exists. A viewer that
     // connected during that window would otherwise receive an empty
@@ -209,7 +201,9 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
         )?),
         encoded: None,
     }));
-    surface.publish(&first_frame, target_quality);
+    if let Some(surface) = &surface {
+        surface.publish(&first_frame, target_quality);
+    }
 
     // The ladder is decided once at startup rather than per session:
     // a STUN round trip on every viewer join is latency nobody asked for,
@@ -243,7 +237,10 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
         anyhow::bail!("--reach direct was given but --relay was also set; pick one");
     }
 
-    if let Some(web_addr) = &args.web {
+    if let (Some(web_addr), Some(surface)) = (&args.web, &surface) {
+        // The web viewer is another consumer of the very same stream, so
+        // it gets a receiver of its own rather than a second encode path.
+        let web_updates = tx.subscribe();
         // Only the sharer owns the authoritative surface, so only it can
         // produce the snapshot a joining browser needs.
         let source = published.clone();
@@ -262,8 +259,8 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
         });
         start_web(
             web_addr,
-            args.web_cert,
-            &surface,
+            args.web_cert.clone(),
+            surface,
             web_updates,
             &token,
             &identity,
@@ -294,6 +291,7 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
             viewers.clone(),
             next_viewer_id.clone(),
             Some((audio_tx.clone(), audio_rx.resubscribe())),
+            metrics.clone(),
         );
     }
 
@@ -317,6 +315,7 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
             viewers.clone(),
             next_viewer_id.clone(),
             Some((audio_tx.clone(), audio_rx.resubscribe())),
+            metrics.clone(),
         );
     }
 
@@ -363,7 +362,7 @@ fn start_audio_capture(audio_tx: AudioBroadcast) {
         Ok(rx) => {
             let start = Instant::now();
             std::thread::spawn(move || {
-                let Ok(mut encoder) = crate::audio::AudioSender::new((), Default::default()) else {
+                let Ok(mut encoder) = crate::audio::AudioSender::new() else {
                     return;
                 };
                 while let Ok(frame) = rx.recv() {
@@ -465,6 +464,7 @@ fn spawn_accept_loop(
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_id: Arc<AtomicU64>,
     audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    metrics: crate::telemetry::SharedMetrics,
 ) {
     tokio::spawn(async move {
         let failures: Arc<Mutex<HashMap<SocketAddr, (u32, Instant)>>> =
@@ -477,13 +477,14 @@ fn spawn_accept_loop(
             }
             match connecting.await {
                 Ok(connection) => {
-                    let (tx, published, token, viewers, next_id, audio) = (
+                    let (tx, published, token, viewers, next_id, audio, metrics) = (
                         tx.clone(),
                         published.clone(),
                         token.clone(),
                         viewers.clone(),
                         next_id.clone(),
                         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
+                        metrics.clone(),
                     );
                     tokio::spawn(async move {
                         match connection.accept_bi().await {
@@ -504,6 +505,7 @@ fn spawn_accept_loop(
                                     next_id,
                                     audio,
                                     Some(connection),
+                                    metrics,
                                 )
                                 .await;
                             }
@@ -528,6 +530,7 @@ fn spawn_relay_loop(
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_id: Arc<AtomicU64>,
     audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    metrics: crate::telemetry::SharedMetrics,
 ) {
     tokio::spawn(async move {
         // Reconnect forever: a sharer is long-lived, and a relay restart is
@@ -560,6 +563,7 @@ fn spawn_relay_loop(
                         next_id.clone(),
                         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
                         None,
+                        metrics.clone(),
                     )
                     .await;
                     warn!("Relay connection lost; reconnecting");
@@ -586,6 +590,7 @@ async fn serve_viewer(
     next_viewer_id: Arc<AtomicU64>,
     audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
     quic: Option<quinn::Connection>,
+    metrics: crate::telemetry::SharedMetrics,
 ) {
     // Subscribe *before* anything else, so no update can slip between the
     // snapshot we are about to take and the stream we are about to start.
@@ -663,50 +668,56 @@ async fn serve_viewer(
         crate::network::SealedSource::new(source, session.viewer_to_host),
     );
 
-    // Audio rides its own unidirectional stream, opened once the viewer
-    // is authorized. It is never a `Message`, so a multi-megabyte
-    // snapshot can never delay a 20 ms audio frame.
-    if let (Some((_, atx)), Some(mut arx), Some(connection)) = (
+    // Audio travels separately from visual messages, and loss must not
+    // turn into a stall. A QUIC uni stream would retransmit a dropped
+    // packet and playback would wait, turning one lost radio frame into
+    // an audible pause. Unreliable QUIC datagrams arrive latest-only: a
+    // lost packet is simply gone and the next frame carries on.
+    // Datagrams do not reach relayed viewers or browsers, because those
+    // paths do not expose the QUIC connection. That is a deliberate
+    // omission, not an accident: the alternative would serialize several
+    // loss-recovery protocols without measuring how anyone uses one.
+    if let (Some((_, _)), Some(mut arx), Some(connection)) = (
         audio.as_ref(),
         audio.as_ref().map(|(_, r)| r.resubscribe()),
         quic.as_ref(),
     ) {
-        // quinn 0.10 has no typed uni streams, so the header written by
-        // `open_stream` is what marks this one as audio.
-        match connection.open_uni().await {
-            Ok(mut stream) => {
-                if let Err(e) = crate::audio::transport::open_stream(&mut stream).await {
-                    warn!("{label} audio header failed: {e}");
-                } else {
-                    let _ = &atx;
-                    let audio_label = label.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            let frame = match arx.recv().await {
-                                Ok(f) => f,
-                                Err(broadcast::error::RecvError::Lagged(n)) => {
-                                    // A viewer that cannot keep up with
-                                    // audio loses a click, not a session.
-                                    warn!("{audio_label} audio fell behind by {n} frames");
-                                    continue;
-                                }
-                                Err(broadcast::error::RecvError::Closed) => break,
-                            };
-                            let mut out = Vec::with_capacity(16 + frame.opus.len());
-                            out.extend_from_slice(&frame.pts_us.to_le_bytes());
-                            out.extend_from_slice(&frame.pcm_len.to_le_bytes());
-                            out.extend_from_slice(&(frame.opus.len() as u32).to_le_bytes());
-                            out.extend_from_slice(&frame.opus);
-                            if stream.write_all(&out).await.is_err() {
-                                break;
-                            }
-                        }
-                    });
-                    info!("{label} audio stream open");
+        let audio_label = label.clone();
+        let send_conn = connection.clone();
+        let audio_metrics = metrics.clone();
+        tokio::spawn(async move {
+            loop {
+                let frame = match arx.recv().await {
+                    Ok(f) => f,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // A viewer that cannot keep up with audio loses a
+                        // click, not a session.
+                        warn!("{audio_label} audio fell behind by {n} frames");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                let payload = match crate::audio::transport::AudioSender::datagram_payload(&frame) {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        warn!("{audio_label} oversize audio frame dropped: {e:#}");
+                        audio_metrics.audio_frames_dropped.incr();
+                        continue;
+                    }
+                };
+                if let Err(e) = send_conn.send_datagram(bytes::Bytes::from(payload)) {
+                    // Local backpressure means the transport has not yet
+                    // handed the frame to UDP; drop it there instead of
+                    // hiding the loss in an unbounded queue. Audio's job
+                    // is current speech, not a replay.
+                    tracing::debug!("{audio_label} audio datagram not queued: {e}");
+                    audio_metrics.audio_frames_dropped.incr();
+                    continue;
                 }
+                audio_metrics.audio_frames_sent.incr();
             }
-            Err(e) => warn!("{label} audio stream refused: {e}"),
-        }
+        });
+        info!("{label} audio over QUIC datagrams enabled");
     }
 
     let mut floor = match send_snapshot(&mut sink, &published).await {
@@ -893,7 +904,7 @@ async fn capture_loop(
     published: Shared,
     tx: EncodedBroadcast,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
-    surface: Arc<SharedSurface>,
+    surface: Option<Arc<SharedSurface>>,
     target_quality: f32,
     requested_fps: u32,
     max_fps: u32,
@@ -1080,7 +1091,9 @@ async fn capture_loop(
                 rgb: reference.clone(),
             });
         }
-        surface.publish(&frame, quality);
+        if let Some(surface) = &surface {
+            surface.publish(&frame, quality);
+        }
 
         // Real feedback-driven adaptation: viewers that fall behind are
         // the signal, not local CPU overrun.

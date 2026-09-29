@@ -8,7 +8,7 @@ mod wire;
 
 pub use config::{
     fingerprint_hex, generate_identity, hex_to_der, relay_credential, verify_token, NetworkConfig,
-    ServerIdentity, SessionToken,
+    ServerIdentity, SessionToken, MAX_AUDIO_DATAGRAM,
 };
 pub use protocol::{
     peek_rev, read_len_prefix, Cursor, Epoch, Message, Rev, MAX_MESSAGE_SIZE, MAX_OPS_PER_UPDATE,

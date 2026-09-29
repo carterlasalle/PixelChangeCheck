@@ -64,6 +64,18 @@ impl SessionToken {
     }
 }
 
+/// The largest audio frame a datagram may carry, header included.
+///
+/// One 20 ms Opus frame at the configured bitrate is far below this, so
+/// the size is a tripwire against a corrupt length field rather than a
+/// real limit.
+pub const MAX_AUDIO_DATAGRAM: usize = 1500;
+
+/// How many audio datagrams may be in flight. Enough for a few hundred
+/// milliseconds of jitter, and bounded so a stalled viewer cannot make
+/// the sharer allocate without limit.
+pub const AUDIO_DATAGRAM_BUFFER: usize = 1024;
+
 /// Constant-time equality. Length is compared first, which is fine: a
 /// length mismatch is not the secret being guessed.
 pub fn verify_token(expected: &SessionToken, presented: &str) -> bool {
@@ -312,6 +324,14 @@ impl NetworkConfig {
             transport.max_idle_timeout(Some(idle_timeout));
         }
         transport.keep_alive_interval(Some(self.keepalive_interval));
+        // Datagrams carry audio. A stream is reliable, so a lost audio
+        // packet would be retransmitted and playback would wait for it;
+        // a datagram is dropped and the next frame carries on. The frame
+        // is sized so the whole packet fits one datagram.
+        // Setting a receive buffer is what turns datagrams on; the
+        // largest sendable frame then follows the path MTU.
+        transport.datagram_receive_buffer_size(Some(AUDIO_DATAGRAM_BUFFER));
+        transport.datagram_send_buffer_size(AUDIO_DATAGRAM_BUFFER);
         Arc::new(transport)
     }
 }

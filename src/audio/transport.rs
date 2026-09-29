@@ -1,4 +1,4 @@
-//! Audio on its own QUIC stream, and the clock the viewer syncs to.
+//! Audio on its own QUIC datagrams, and the clock the viewer syncs to.
 //!
 //! # Why this is not a `Message` variant
 //!
@@ -7,8 +7,8 @@
 //! and must never queue behind a multi-megabyte snapshot. Putting audio on
 //! the message path would give it the wrong semantics in both directions:
 //! a dropped audio packet would stall a frame, and a snapshot would delay
-//! a 20 ms frame. So audio gets a separate unidirectional stream, and the
-//! two are joined only at presentation time.
+//! a 20 ms frame. So audio gets unreliable datagrams beside the reliable
+//! message stream, and the two are joined only at presentation time.
 //!
 //! # The invariant this protects
 //!
@@ -18,59 +18,34 @@
 //! fix it would undo every guarantee in `DESIGN.md`.
 
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::time::Duration;
 
 use super::codec::OpusEncoder;
 use super::codec::{CHANNELS, SAMPLES_PER_FRAME};
 
-const AUDIO_STREAM_ID: u8 = 0x11;
-
-const MAGIC: &[u8; 4] = b"PCAU";
-
-/// The sharer's side: capture, encode, and push onto a unidirectional
-/// stream.
+/// The sharer's side: capture and encode one Opus frame.
 ///
-/// A dropped packet is a click, not a stall: the video stream is a
-/// different stream and is unaffected.
+/// Audio travels in QUIC **datagrams**, not a stream. A stream is
+/// reliable, so a lost audio packet is retransmitted and playback waits
+/// for it -- the stall this type is meant to avoid. A datagram is not
+/// retransmitted: frame 42 is simply gone, concealed, and 43 arrives on
+/// time. The picture stream is unaffected either way.
 pub struct AudioSender {
     encoder: OpusEncoder,
-    origin: Instant,
-    /// Latest video capture time in microseconds, so audio frames are
-    /// stamped on the same timeline rather than their own.
-    video_pts_us: Arc<AtomicU64>,
-    sent: AtomicU64,
-    dropped: AtomicU64,
 }
 
 impl std::fmt::Debug for AudioSender {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AudioSender")
-            .field("sent", &self.sent.load(Ordering::Relaxed))
-            .field("dropped", &self.dropped.load(Ordering::Relaxed))
-            .finish()
+        f.debug_struct("AudioSender").finish_non_exhaustive()
     }
 }
 
 impl AudioSender {
-    /// `video_pts_us` carries the sharer's capture clock; audio frames
-    /// are stamped against it rather than starting a second timeline.
-    pub fn new(_unused: (), video_pts_us: Arc<AtomicU64>) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         Ok(Self {
             encoder: OpusEncoder::new()?,
-            origin: Instant::now(),
-            video_pts_us,
-            sent: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
         })
-    }
-
-    /// Record where video is on the shared timeline, so an audio frame
-    /// captured now is stamped against the same origin.
-    pub fn note_video_capture(&self, pts_us: u64) {
-        self.video_pts_us.store(pts_us, Ordering::Relaxed);
     }
 
     /// Encode a captured frame. Done once in the capture loop so a
@@ -79,78 +54,60 @@ impl AudioSender {
         self.encoder.encode(pcm)
     }
 
-    /// Write an already-encoded frame, so a broadcast to N viewers costs
-    /// one Opus encode rather than N.
-    pub async fn send_encoded<W>(&self, stream: &mut W, frame: &EncodedFrame) -> Result<()>
-    where
-        W: AsyncWrite + Unpin,
-    {
+    /// Encode one already-captured frame as a datagram payload.
+    ///
+    /// The payload also refuses an Opus frame that no single path-MTU-sized
+    /// datagram could legally contain.
+    pub fn datagram_payload(frame: &EncodedFrame) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(16 + frame.opus.len());
         out.extend_from_slice(&frame.pts_us.to_le_bytes());
         out.extend_from_slice(&frame.pcm_len.to_le_bytes());
         out.extend_from_slice(&(frame.opus.len() as u32).to_le_bytes());
         out.extend_from_slice(&frame.opus);
-        stream.write_all(&out).await?;
-        self.sent.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    /// Encode one captured frame and write it to the stream.
-    pub async fn send_frame<W>(
-        &mut self,
-        stream: &mut W,
-        pcm: &[f32],
-        capture: Instant,
-    ) -> Result<()>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        let encoded = self.encoder.encode(pcm)?;
-        // Stamp against the shared video origin when there is one; the
-        // audio origin is the fallback for a session with no video clock.
-        let pts_us = {
-            let v = self.video_pts_us.load(Ordering::Relaxed);
-            if v > 0 {
-                v
-            } else {
-                capture.duration_since(self.origin).as_micros() as u64
-            }
-        };
-        let mut frame = Vec::with_capacity(MAGIC.len() + 20 + encoded.len());
-        frame.extend_from_slice(MAGIC);
-        frame.extend_from_slice(&pts_us.to_le_bytes());
-        frame.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
-        frame.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
-        frame.extend_from_slice(&encoded);
-        stream.write_all(&frame).await?;
-        self.sent.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    pub fn sent(&self) -> u64 {
-        self.sent.load(Ordering::Relaxed)
-    }
-
-    pub fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
-    }
-
-    pub fn note_drop(&self) {
-        self.dropped.fetch_add(1, Ordering::Relaxed);
+        anyhow::ensure!(
+            out.len() <= crate::network::MAX_AUDIO_DATAGRAM,
+            "audio frame is {} bytes, larger than one datagram",
+            out.len()
+        );
+        Ok(out)
     }
 }
 
-/// Open the audio stream and write its header.
-pub async fn open_stream<W>(stream: &mut W) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut header = Vec::with_capacity(MAGIC.len() + 8);
-    header.extend_from_slice(MAGIC);
-    header.extend_from_slice(&(SAMPLES_PER_FRAME as u32).to_le_bytes());
-    header.extend_from_slice(&[2u8]); // channels
-    stream.write_all(&header).await?;
-    Ok(())
+/// Split a datagram payload back into its fields.
+///
+/// A datagram is a single UDP packet's worth of bytes, so it is either
+/// wholly there or wholly gone -- there is no partial frame to resume
+/// from, and no length prefix, because the datagram itself is the
+/// boundary. Anything malformed is rejected rather than guessed at.
+pub fn parse_datagram(payload: &[u8]) -> Result<DatagramFrame<'_>> {
+    if payload.len() < 16 {
+        anyhow::bail!(
+            "audio datagram is {} bytes, too short for a header",
+            payload.len()
+        );
+    }
+    let pts_us = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let pcm_len = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    let opus_len = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+    let body = payload.get(16..16 + opus_len).ok_or_else(|| {
+        anyhow::anyhow!(
+            "audio datagram declares {opus_len} bytes of opus but carries {}",
+            payload.len().saturating_sub(16)
+        )
+    })?;
+    Ok(DatagramFrame {
+        pts_us,
+        pcm_len,
+        opus: body,
+    })
+}
+
+/// One audio frame as it arrives in a datagram.
+#[derive(Debug, Clone, Copy)]
+pub struct DatagramFrame<'a> {
+    pub pts_us: u64,
+    pub pcm_len: u32,
+    pub opus: &'a [u8],
 }
 
 /// The viewer's side: read, decode, and hand frames to the playout clock.
@@ -180,45 +137,26 @@ impl AudioReceiver {
         })
     }
 
-    /// Read the stream header. Returns false when this is not the audio
-    /// stream.
-    pub async fn read_header<R>(reader: &mut R) -> Result<bool>
-    where
-        R: AsyncRead + Unpin,
-    {
-        let mut magic = [0u8; 4];
-        reader.read_exact(&mut magic).await?;
-        if &magic != MAGIC {
-            return Ok(false);
-        }
-        // samples-per-frame (u32) + channels (u8), matching `open_stream`.
-        let mut rest = [0u8; 5];
-        reader.read_exact(&mut rest).await?;
-        Ok(true)
+    /// Decode one datagram. There is no end-of-datagram `None`: a missing
+    /// datagram is simply never delivered, so this succeeds or is a
+    /// malformed frame.
+    pub fn decode_datagram(&mut self, payload: &[u8]) -> Result<DecodedAudio> {
+        let frame = parse_datagram(payload)?;
+        self.decode_frame_fields(frame.pts_us, frame.pcm_len as usize, frame.opus)
     }
 
-    /// Decode the next frame. Returns `None` at end of stream.
-    pub async fn read_frame<R>(&mut self, reader: &mut R) -> Result<Option<DecodedAudio>>
-    where
-        R: AsyncRead + Unpin,
-    {
-        let mut head = [0u8; 16];
-        match reader.read_exact(&mut head).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
-        let pts_us = u64::from_le_bytes(head[0..8].try_into().unwrap());
-        let pcm_len = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
-        let enc_len = u32::from_le_bytes(head[12..16].try_into().unwrap()) as usize;
+    fn decode_frame_fields(
+        &mut self,
+        pts_us: u64,
+        pcm_len: usize,
+        encoded: &[u8],
+    ) -> Result<DecodedAudio> {
         if pcm_len > SAMPLES_PER_FRAME * 2 * 4 {
             anyhow::bail!(
                 "audio frame claims {pcm_len} samples, more than one {}ms frame can hold",
                 super::FRAME_MS
             );
         }
-        let mut encoded = vec![0u8; enc_len];
-        reader.read_exact(&mut encoded).await?;
 
         // A frame that arrives out of order means something was lost. That
         // is a click, not a reason to stop.
@@ -232,12 +170,12 @@ impl AudioReceiver {
         // exactly one interleaved frame, so truncating to that count would
         // silently halve the audio.
         let mut pcm = vec![0f32; pcm_len];
-        let per_channel = self.decoder.decode(&encoded, &mut pcm)?;
+        let per_channel = self.decoder.decode(encoded, &mut pcm)?;
         let expected = pcm_len / CHANNELS;
         if per_channel != expected {
             anyhow::bail!("Opus decoded {per_channel} samples per channel, expected {expected}");
         }
-        Ok(Some(DecodedAudio { pts_us, pcm }))
+        Ok(DecodedAudio { pts_us, pcm })
     }
 
     pub fn frames_seen(&self) -> u64 {
@@ -273,11 +211,6 @@ impl DecodedAudio {
     }
 }
 
-/// quinn 0.10's `open_uni` takes no stream type, so the magic in
-/// [`open_stream`]'s header is what identifies an audio stream. A viewer
-/// that accepts a uni stream and finds no magic drops it.
-pub const AUDIO_UNI_STREAM_TYPE: u8 = AUDIO_STREAM_ID;
-
 /// Encode a 20 ms Opus frame, for the sync harness and for tests.
 pub fn encode_frame_for_test(pcm: &[f32]) -> Result<Vec<u8>> {
     let mut encoder = OpusEncoder::new().context("test encoder")?;
@@ -304,74 +237,32 @@ mod tests {
         assert!(n > 0, "a round trip must produce samples");
     }
 
-    #[tokio::test]
-    async fn a_frame_carries_the_shared_video_timestamp() {
-        let video_pts = Arc::new(AtomicU64::new(0));
-        let mut sender = AudioSender::new((), video_pts.clone()).unwrap();
-        // With no video clock the audio own origin is used.
-        let mut stream: Vec<u8> = Vec::new();
-        sender
-            .send_frame(&mut stream, &tone(1), Instant::now())
-            .await
-            .unwrap();
-        assert_eq!(&stream[0..4], MAGIC);
-        assert_eq!(sender.sent(), 1);
-
-        // Once video reports a timestamp, audio adopts it.
-        video_pts.store(123_456, Ordering::Relaxed);
-        let mut second: Vec<u8> = Vec::new();
-        sender
-            .send_frame(&mut second, &tone(1), Instant::now())
-            .await
-            .unwrap();
-        let pts = u64::from_le_bytes(second[4..12].try_into().unwrap());
-        assert_eq!(pts, 123_456, "audio must ride the video clock");
-    }
-
-    /// Build one frame exactly as `send_frame` does, so a test can
-    /// control the timestamp without fighting the framing.
-    fn frame(pts_us: u64, pcm: &[f32], encoder: &mut OpusEncoder) -> Vec<u8> {
+    /// Build one datagram exactly as `datagram_payload` does, so a test
+    /// can control the timestamp without fighting the framing.
+    fn datagram(pts_us: u64, pcm: &[f32], encoder: &mut OpusEncoder) -> Vec<u8> {
         let encoded = encoder.encode(pcm).unwrap();
-        // No magic here: that marks the stream header, not each frame.
-        let mut out = Vec::new();
-        out.extend_from_slice(&pts_us.to_le_bytes());
-        out.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
-        out.extend_from_slice(&encoded);
-        out
-    }
-
-    #[tokio::test]
-    async fn a_stream_header_is_distinguishable_from_anything_else() {
-        let mut wire: Vec<u8> = Vec::new();
-        open_stream(&mut wire).await.unwrap();
-        let mut cursor = wire.as_slice();
-        assert!(AudioReceiver::read_header(&mut cursor).await.unwrap());
-
-        // A stream that is not audio is refused rather than decoded.
-        let mut other = b"NOTAU".to_vec();
-        other.extend_from_slice(&[0u8; 8]);
-        let mut c2 = other.as_slice();
-        assert!(!AudioReceiver::read_header(&mut c2).await.unwrap());
+        let frame = EncodedFrame {
+            pts_us,
+            pcm_len: pcm.len() as u32,
+            opus: Arc::new(encoded),
+        };
+        AudioSender::datagram_payload(&frame).unwrap()
     }
 
     #[tokio::test]
     async fn the_receiver_reports_gaps_instead_of_stalling() {
         let mut encoder = OpusEncoder::new().unwrap();
         let pcm = tone(1);
-        let mut wire: Vec<u8> = Vec::new();
-        open_stream(&mut wire).await.unwrap();
-        wire.extend(frame(1_000, &pcm, &mut encoder));
+        let mut receiver = AudioReceiver::new().unwrap();
+        let mut seen = 0;
         // A frame that claims an *earlier* time than the one before it is
         // a reorder, i.e. something was lost in transit.
-        wire.extend(frame(0, &pcm, &mut encoder));
-        wire.extend(frame(2_000, &pcm, &mut encoder));
-
-        let mut receiver = AudioReceiver::new().unwrap();
-        let mut cursor = wire.as_slice();
-        assert!(AudioReceiver::read_header(&mut cursor).await.unwrap());
-        let mut seen = 0;
-        while let Some(frame) = receiver.read_frame(&mut cursor).await.unwrap() {
+        for payload in [
+            datagram(1_000, &pcm, &mut encoder),
+            datagram(0, &pcm, &mut encoder),
+            datagram(2_000, &pcm, &mut encoder),
+        ] {
+            let frame = receiver.decode_datagram(&payload).unwrap();
             assert!(!frame.pcm.is_empty(), "a frame must decode to samples");
             seen += 1;
         }
@@ -381,19 +272,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_lying_frame_length_is_refused_before_allocating() {
-        let mut wire: Vec<u8> = Vec::new();
-        open_stream(&mut wire).await.unwrap();
-        wire.extend_from_slice(&1u64.to_le_bytes()); // pts
-        wire.extend_from_slice(&u32::MAX.to_le_bytes()); // absurd sample count
-        wire.extend_from_slice(&0u32.to_le_bytes()); // empty payload
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u64.to_le_bytes()); // pts
+        payload.extend_from_slice(&u32::MAX.to_le_bytes()); // absurd sample count
+        payload.extend_from_slice(&0u32.to_le_bytes()); // empty payload
         let mut receiver = AudioReceiver::new().unwrap();
-        let mut cursor = wire.as_slice();
-        assert!(AudioReceiver::read_header(&mut cursor).await.unwrap());
-        let err = receiver
-            .read_frame(&mut cursor)
-            .await
+        let err = receiver.decode_datagram(&payload).unwrap_err().to_string();
+        assert!(err.contains("more than one"), "unhelpful: {err}");
+    }
+
+    #[tokio::test]
+    async fn an_oversize_opus_frame_never_becomes_a_datagram() {
+        let frame = EncodedFrame {
+            pts_us: 0,
+            pcm_len: 0,
+            opus: Arc::new(vec![0u8; crate::network::MAX_AUDIO_DATAGRAM]),
+        };
+        let err = AudioSender::datagram_payload(&frame)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("more than one"), "unhelpful: {err}");
+        assert!(err.contains("larger than one datagram"), "unhelpful: {err}");
     }
 }

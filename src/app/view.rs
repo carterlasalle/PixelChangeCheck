@@ -202,9 +202,10 @@ async fn receive_once(
         "specify either --connect or --relay, not both"
     );
 
-    // Kept only so the audio stream can be accepted; the transport owns
-    // its own handle.
-    let quic: Option<quinn::Connection> = None;
+    // Datagrams need the QUIC `Connection`, not just one stream. Keep it
+    // alongside the transport; losing it loses audio only on the native
+    // path, because the relay exposes no connection handle at all.
+    let mut quic: Option<quinn::Connection> = None;
     let transport: Box<dyn MessageTransport> = if let Some(target) = &args.connect {
         let addr = crate::network::resolve(target)
             .await
@@ -227,6 +228,9 @@ async fn receive_once(
                 token: args.token.as_str().to_string(),
             })
             .await?;
+        // Retain the handle before boxing the single stream: datagrams are
+        // a connection property and cannot be reached from `MessageSink`.
+        quic = Some(transport.connection());
         Box::new(transport)
     } else if let Some(target) = &args.relay {
         let session = args
@@ -300,11 +304,11 @@ async fn receive_once(
         )),
     });
 
-    // Audio arrives on its own unidirectional stream, so a multi-megabyte
-    // snapshot can never delay a 20 ms frame. It is accepted only when the
-    // sharer opened one; the magic header is what identifies it, because
-    // quinn 0.10 has no typed streams.
-    let mut audio_stream: Option<quinn::RecvStream> = None;
+    // Audio arrives as QUIC datagrams on the same connection, so a
+    // multi-megabyte snapshot can never delay a 20 ms frame. No magic
+    // header is needed: unlike `accept_uni`, a datagram cannot be mistaken
+    // for ordinary picture traffic, and a lost packet is dropped rather
+    // than retransmitted.
     // The two clocks, and the bridge between them. Until the estimator
     // converges, video plays as soon as it arrives rather than being
     // scheduled against a plausible-but-wrong offset.
@@ -315,38 +319,33 @@ async fn receive_once(
     let mut audio_out: Option<crate::audio::AudioOutput> = None;
     let mut audio_played: Option<crate::audio::output::PlayedReceiver<u64>> = None;
     let mut audio: Option<crate::audio::AudioReceiver> = None;
-    if let Some(connection) = &quic {
-        if let Ok(stream) = connection.accept_uni().await {
-            // quinn 0.10 has no typed streams, so the header written by
-            // `open_stream` is what marks this one as audio. It is read
-            // from the stream itself: a unidirectional stream is
-            // read-only and cannot be split.
-            let mut probe = stream;
-            match crate::audio::AudioReceiver::read_header(&mut probe).await {
-                Ok(true) => {
-                    match crate::audio::AudioReceiver::new() {
-                        Ok(receiver) => {
-                            // Video is released against the audio clock,
-                            // never the other way round: the audio device
-                            // has a buffer and a latency nobody controls,
-                            // so its time defines "now".
-                            match crate::audio::AudioOutput::start::<u64>(PLAYOUT_DEPTH) {
-                                Ok((out, played)) => {
-                                    info!("Audio playout started");
-                                    audio_out = Some(out);
-                                    audio_played = Some(played);
-                                }
-                                Err(e) => warn!("Audio output unavailable: {e}"),
-                            }
-                            audio = Some(receiver);
-                            audio_stream = Some(probe);
+    let mut audio_connection: Option<quinn::Connection> = None;
+    if let Some(connection) = quic {
+        // Datagrams exist only on QUIC direct connections. Relay
+        // transports do not expose the underlying connection, so viewers
+        // there intentionally receive no audio until that path is built.
+        if connection.max_datagram_size().is_some() {
+            match crate::audio::AudioReceiver::new() {
+                Ok(receiver) => {
+                    // Video is released against the audio clock,
+                    // never the other way round: the audio device
+                    // has a buffer and a latency nobody controls,
+                    // so its time defines "now".
+                    match crate::audio::AudioOutput::start::<u64>(PLAYOUT_DEPTH) {
+                        Ok((out, played)) => {
+                            info!("Audio playout started");
+                            audio_out = Some(out);
+                            audio_played = Some(played);
                         }
-                        Err(e) => warn!("Audio decoder unavailable: {e}"),
+                        Err(e) => warn!("Audio output unavailable: {e}"),
                     }
+                    audio = Some(receiver);
+                    audio_connection = Some(connection);
                 }
-                Ok(false) => info!("Unidirectional stream was not audio; ignoring it"),
-                Err(e) => warn!("Audio stream header unreadable: {e}"),
+                Err(e) => warn!("Audio decoder unavailable: {e}"),
             }
+        } else {
+            warn!("Audio datagrams unavailable: QUIC peer did not negotiate datagram support");
         }
     }
 
@@ -362,30 +361,37 @@ async fn receive_once(
     loop {
         // Drain whatever audio has arrived, then take one visual message.
         // A blocked visual stream must not stop audio, and vice versa.
-        if let (Some(receiver), Some(stream), Some(out)) =
-            (audio.as_mut(), audio_stream.as_mut(), audio_out.as_ref())
-        {
+        if let (Some(receiver), Some(connection), Some(out)) = (
+            audio.as_mut(),
+            audio_connection.as_ref(),
+            audio_out.as_ref(),
+        ) {
+            // Datagrams are polled, not streamed: each read is at most one
+            // frame, and a missing datagram is simply never delivered. The
+            // timeout keeps one slow transport from holding up snapshots.
             match tokio::time::timeout(
                 std::time::Duration::from_millis(1),
-                receiver.read_frame(stream),
+                connection.read_datagram(),
             )
             .await
             {
-                Ok(Ok(Some(frame))) => {
-                    // The first audio frame pins the sharer's clock to
-                    // this process's clock; every later one refines it.
-                    let origin = *sharer_origin.get_or_insert_with(std::time::Instant::now);
-                    sync.observe(crate::audio::sync::OffsetSample::new(
-                        (origin + frame.pts()).elapsed(),
-                        // No RTT measurement of our own here; the
-                        // estimator's clamp keeps a bad sample from
-                        // poisoning the playout.
-                        std::time::Duration::from_millis(0),
-                    ));
-                    out.push(&frame.pcm);
-                }
-                Ok(Ok(None)) => {}
-                Ok(Err(e)) => warn!("Audio frame refused: {e}"),
+                Ok(Ok(datagram)) => match receiver.decode_datagram(&datagram) {
+                    Ok(frame) => {
+                        // The first audio frame pins the sharer's clock to
+                        // this process's clock; every later one refines it.
+                        let origin = *sharer_origin.get_or_insert_with(std::time::Instant::now);
+                        sync.observe(crate::audio::sync::OffsetSample::new(
+                            (origin + frame.pts()).elapsed(),
+                            // No RTT measurement of our own here; the
+                            // estimator's clamp keeps a bad sample from
+                            // poisoning the playout.
+                            std::time::Duration::from_millis(0),
+                        ));
+                        out.push(&frame.pcm);
+                    }
+                    Err(e) => warn!("Audio datagram refused: {e}"),
+                },
+                Ok(Err(e)) => warn!("Audio datagrams unavailable: {e}"),
                 Err(_) => {}
             }
         }

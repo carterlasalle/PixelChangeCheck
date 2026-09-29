@@ -64,6 +64,10 @@ pub struct Metrics {
     pub viewers_rejected: Counter,
     pub lag_events: Counter,
     pub repairs: Counter,
+    /// Audio datagrams sent, across all direct viewers.
+    pub audio_frames_sent: Counter,
+    /// Audio frames dropped before or during transmission.
+    pub audio_frames_dropped: Counter,
     pub viewer_queue_depth: Gauge,
     pub viewer_rtt_ms: Gauge,
     pub oldest_pending_ms: Gauge,
@@ -241,6 +245,18 @@ impl Metrics {
             "pcc_repairs_total",
             "Snapshots sent to bring a viewer up to date.",
             self.repairs.get(),
+        );
+        counter(
+            &mut out,
+            "pcc_audio_frames_sent_total",
+            "Audio frames transmitted as QUIC datagrams.",
+            self.audio_frames_sent.get(),
+        );
+        counter(
+            &mut out,
+            "pcc_audio_frames_dropped_total",
+            "Audio frames dropped before transmission.",
+            self.audio_frames_dropped.get(),
         );
         counter(
             &mut out,
