@@ -63,6 +63,17 @@ reimplements the protocol:
 - A real browser was driven end to end: `1280x720 rev 200`, 921,600
   pixels painted, all fully opaque.
 
+### Known: the relay serves one viewer
+
+The host calls `serve_viewer` once for the whole relay connection, so
+whichever viewer completes the handshake first establishes the keys and
+every other viewer receives ciphertext it cannot open. The host also
+cannot tell the viewers' traffic apart, because the relay forwards with
+no peer identity. The relay path is correct for one viewer and wrong for
+two. It is left as it is rather than half-fixed, and the reasoning is
+recorded in `AGENTS.md` so the next attempt starts from the mechanism
+rather than the symptom.
+
 ### Packaging and CI
 
 - Every GitHub Action is pinned to a commit SHA rather than a moving tag,

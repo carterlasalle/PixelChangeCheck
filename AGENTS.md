@@ -2825,6 +2825,24 @@ must be changed together.
   independent Python implementation. A divergence here fails every
   handshake in production with no useful error, so never "fix" it by
   changing one side alone.
+- **The relay's framing is length-preserving, and the prefix is
+  re-attached on read.** `read_frame` returns `u32 len || payload`, not
+  the bare payload, so what the relay queues and writes back is
+  byte-identical to what it received. Any envelope must therefore go
+  *inside* the length, with the prefix adjusted -- prepending bytes to
+  the queued frame without fixing the prefix makes every peer's
+  `read_framed` read a stale length and corrupt the stream. This was
+  found the hard way: an attempt to give each relayed frame a peer id
+  regressed two passing relay tests, and the reason is one line of
+  `read_frame`.
+- **The relay only ever works for one viewer, and that is a real bug.**
+  `serve_viewer` is called once for the whole relay connection, so the
+  first viewer to complete a handshake sets the keys and every other
+  viewer receives ciphertext it cannot open. The host does not even see
+  who sent what. Fixing it means one logical session per viewer over
+  that connection; the seam is `MessageTransport`, and
+  `RelayTransport::into_fan` is the place to hand the connection over.
+  Read `read_frame` before touching the wire.
 - `p256` is pinned to 0.13. Version 0.14 moved `diffie_hellman` and
   `to_encoded_point` off the types this code calls them on.
 - Publishing is `git tag v<version> && git push --tags`. The tag drives
