@@ -8,6 +8,13 @@ mis-parsed. Version 4 added the end-to-end encryption handshake; version
 5 adds `pts_us` to every visual message, so a viewer can schedule a frame
 against the audio clock.
 
+### Fixed
+
+- CI watched `push: branches: [main]` but the default branch is `master`,
+  so it never ran on a push. It failed silently, which is the worst way
+  for CI to fail: the badge stays green because no run was ever
+  requested.
+
 ### Packaging
 
 - The crate now carries the metadata crates.io requires: a licence, a
