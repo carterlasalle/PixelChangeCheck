@@ -7,6 +7,9 @@ Supply-chain and CI hardening. No change to what the program does.
 - Every GitHub Action is pinned to a commit SHA rather than a moving tag,
   so whoever controls a tag cannot change what runs with the repository's
   credentials. Dependabot still updates the pins.
+- `rand` moves 0.8.5 -> 0.8.6, clearing RUSTSEC-2026-0097 (unsound with
+  a custom logger using `rand::rng()`). A semver-compatible patch, so it
+  is fixed rather than ignored.
 - `ci.yml` declares `permissions: contents: read`. It had no permissions
   block at all, so every job inherited the repository default, which is
   broader than any of them need. The crates.io publish job keeps

@@ -41,6 +41,9 @@ ignore = [
 #   upgraded, if the format ever changes.
 # - `instant`, `fxhash` (unmaintained). Transitive, no patch available, no
 #   security impact.
+# `rand` is NOT in this list. RUSTSEC-2026-0097 (unsound with a custom
+# logger using `rand::rng()`) is fixed in 0.8.6, which is a semver
+# compatible patch, so it was taken rather than ignored.
 # - `tokio` broadcast unsoundness (RUSTSEC-2025-0023). The shared surface
 #   broadcast carries `Arc<Vec<u8>>`; the advisory is about `clone` being
 #   called in parallel for a type that is not `Sync`, and nothing here
