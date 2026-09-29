@@ -59,6 +59,7 @@ fn messages_for(
     if !plan.ops.is_empty() {
         return Ok(vec![Message::PartialUpdate {
             rev,
+            pts_us: 0,
             epoch: 0,
             ops: plan.ops.clone(),
         }
@@ -75,6 +76,7 @@ fn messages_for(
     out.push(
         Message::SnapshotBegin {
             rev,
+            pts_us: 0,
             epoch: 0,
             width,
             height,
@@ -94,7 +96,14 @@ fn messages_for(
             .encode()?,
         );
     }
-    out.push(Message::SnapshotCommit { rev, epoch: 0 }.encode()?);
+    out.push(
+        Message::SnapshotCommit {
+            rev,
+            pts_us: 0,
+            epoch: 0,
+        }
+        .encode()?,
+    );
     Ok(out)
 }
 
@@ -184,6 +193,7 @@ fn apply_encoded(viewer: &mut Compositor, bytes: &[u8]) -> Result<()> {
     match pixel_change_check_client::network::Message::decode(bytes)? {
         Message::SnapshotBegin {
             rev: _,
+            pts_us: _,
             epoch,
             width,
             height,
@@ -196,8 +206,17 @@ fn apply_encoded(viewer: &mut Compositor, bytes: &[u8]) -> Result<()> {
             index,
             data,
         } => viewer.push_snapshot_chunk(index, &data)?,
-        Message::SnapshotCommit { rev, epoch } => viewer.commit_snapshot(rev, epoch)?,
-        Message::PartialUpdate { rev, epoch, ops } => viewer.apply_ops(rev, epoch, &ops)?,
+        Message::SnapshotCommit {
+            rev,
+            pts_us: _,
+            epoch,
+        } => viewer.commit_snapshot(rev, epoch)?,
+        Message::PartialUpdate {
+            rev,
+            pts_us: _,
+            epoch,
+            ops,
+        } => viewer.apply_ops(rev, epoch, &ops)?,
         Message::KeepAlive { .. } | Message::Ack { .. } | Message::Bye | Message::Error(_) => {}
         Message::QualityConfig(_)
         | Message::Hello { .. }
@@ -240,6 +259,7 @@ async fn over_the_wire(width: u32, height: u32) -> Result<(usize, usize)> {
         let chunks: Vec<&[u8]> = snapshot.chunks(SNAPSHOT_CHUNK_BYTES).collect();
         for msg in [Message::SnapshotBegin {
             rev,
+            pts_us: 0,
             epoch: 0,
             width,
             height,
@@ -262,7 +282,13 @@ async fn over_the_wire(width: u32, height: u32) -> Result<(usize, usize)> {
             sent += bytes.len();
             transport.send_encoded(&bytes).await.unwrap();
         }
-        let bytes = Message::SnapshotCommit { rev, epoch: 0 }.encode().unwrap();
+        let bytes = Message::SnapshotCommit {
+            rev,
+            pts_us: 0,
+            epoch: 0,
+        }
+        .encode()
+        .unwrap();
         sent += bytes.len();
         transport.send_encoded(&bytes).await.unwrap();
         rev += 1;
@@ -322,6 +348,7 @@ async fn over_the_wire(width: u32, height: u32) -> Result<(usize, usize)> {
         match viewer.recv().await? {
             Message::SnapshotBegin {
                 rev: _,
+                pts_us: _,
                 epoch,
                 width,
                 height,
@@ -334,11 +361,20 @@ async fn over_the_wire(width: u32, height: u32) -> Result<(usize, usize)> {
                 index,
                 data,
             } => compositor.push_snapshot_chunk(index, &data)?,
-            Message::SnapshotCommit { rev, epoch } => {
+            Message::SnapshotCommit {
+                rev,
+                pts_us: 0,
+                epoch,
+            } => {
                 compositor.commit_snapshot(rev, epoch)?;
                 applied += 1;
             }
-            Message::PartialUpdate { rev, epoch, ops } => {
+            Message::PartialUpdate {
+                rev,
+                pts_us: _,
+                epoch,
+                ops,
+            } => {
                 compositor.apply_ops(rev, epoch, &ops)?;
                 viewer.send(&Message::Ack { rev }).await?;
                 applied += 1;

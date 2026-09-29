@@ -61,6 +61,10 @@ impl FrameCapture for ScreenCapture {
         Ok(Frame {
             id,
             timestamp: SystemTime::now(),
+            // The origin is set by the session, not by the capture
+            // source, so a frame captured before that has no meaningful
+            // presentation time.
+            pts_us: 0,
             width,
             height,
             data: rgb_data,
@@ -154,6 +158,7 @@ impl FrameCapture for SyntheticCapture {
         Ok(Frame {
             id,
             timestamp: SystemTime::now(),
+            pts_us: 0,
             width,
             height,
             data,

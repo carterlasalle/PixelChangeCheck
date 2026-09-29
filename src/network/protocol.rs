@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Bumped for the revision/epoch/handshake protocol. Old viewers are
 /// rejected with a version error rather than silently mis-parsed.
-pub const PROTOCOL_VERSION: u8 = 4;
+pub const PROTOCOL_VERSION: u8 = 5;
 
 /// Largest encoded message body we will produce or accept.
 ///
@@ -104,6 +104,10 @@ pub enum Message {
     /// snapshot plus every later update.
     SnapshotBegin {
         rev: Rev,
+        /// Microseconds on the sharer's capture clock. Zero when the
+        /// sharer is not sending audio, because then nothing is
+        /// synchronised against it.
+        pts_us: u64,
         epoch: Epoch,
         width: u32,
         height: u32,
@@ -122,11 +126,14 @@ pub enum Message {
     /// The snapshot is complete at this revision.
     SnapshotCommit {
         rev: Rev,
+        /// As on the snapshot that produced it.
+        pts_us: u64,
         epoch: Epoch,
     },
     /// Exact replacements against the receiver's current buffer.
     PartialUpdate {
         rev: Rev,
+        pts_us: u64,
         epoch: Epoch,
         ops: Vec<WireOp>,
     },
@@ -207,6 +214,7 @@ impl Message {
             }
             Message::SnapshotBegin {
                 rev,
+                pts_us,
                 epoch,
                 width,
                 height,
@@ -216,6 +224,7 @@ impl Message {
             } => {
                 out.push(K_SNAPSHOT_BEGIN);
                 out.extend_from_slice(&rev.to_le_bytes());
+                out.extend_from_slice(&pts_us.to_le_bytes());
                 out.extend_from_slice(&epoch.to_le_bytes());
                 out.extend_from_slice(&width.to_le_bytes());
                 out.extend_from_slice(&height.to_le_bytes());
@@ -230,14 +239,21 @@ impl Message {
                 out.extend_from_slice(&(data.len() as u32).to_le_bytes());
                 out.extend_from_slice(data);
             }
-            Message::SnapshotCommit { rev, epoch } => {
+            Message::SnapshotCommit { rev, pts_us, epoch } => {
                 out.push(K_SNAPSHOT_COMMIT);
                 out.extend_from_slice(&rev.to_le_bytes());
+                out.extend_from_slice(&pts_us.to_le_bytes());
                 out.extend_from_slice(&epoch.to_le_bytes());
             }
-            Message::PartialUpdate { rev, epoch, ops } => {
+            Message::PartialUpdate {
+                rev,
+                pts_us,
+                epoch,
+                ops,
+            } => {
                 out.push(K_PARTIAL_UPDATE);
                 out.extend_from_slice(&rev.to_le_bytes());
+                out.extend_from_slice(&pts_us.to_le_bytes());
                 out.extend_from_slice(&epoch.to_le_bytes());
                 out.extend_from_slice(&(ops.len() as u32).to_le_bytes());
                 for op in ops {
@@ -339,6 +355,28 @@ impl Message {
 
 /// Validate a 4-byte length prefix against the envelope budget and return it
 /// as a `usize`. Shared by the relay and every other framing entry point.
+/// The revision a message carries, without decoding the rest.
+///
+/// Every kind that has one leads with it, so this is a fixed read.
+pub fn peek_rev(envelope: &[u8]) -> Option<Rev> {
+    if envelope.len() < 5 || envelope[0] != PROTOCOL_VERSION {
+        return None;
+    }
+    let body = &envelope[5..];
+    match *body.first()? {
+        // SnapshotBegin, SnapshotChunk, PartialUpdate, KeepAlive,
+        // SnapshotCommit all start with a u64 revision.
+        K_SNAPSHOT_BEGIN | K_SNAPSHOT_CHUNK | K_PARTIAL_UPDATE | K_KEEP_ALIVE
+        | K_SNAPSHOT_COMMIT => {
+            if body.len() < 9 {
+                return None;
+            }
+            Some(u64::from_le_bytes(body[1..9].try_into().ok()?))
+        }
+        _ => None,
+    }
+}
+
 pub fn read_len_prefix(len_buf: &[u8; 4]) -> Result<usize> {
     let len = u32::from_le_bytes(*len_buf);
     if len > MAX_MESSAGE_SIZE + 5 {
@@ -441,6 +479,7 @@ impl<'a> Cursor<'a> {
             K_ACK => Message::Ack { rev: self.u64()? },
             K_SNAPSHOT_BEGIN => {
                 let rev = self.u64()?;
+                let pts_us = self.u64()?;
                 let epoch = self.u32()?;
                 let width = self.u32()?;
                 let height = self.u32()?;
@@ -459,6 +498,7 @@ impl<'a> Cursor<'a> {
                 }
                 Message::SnapshotBegin {
                     rev,
+                    pts_us,
                     epoch,
                     width,
                     height,
@@ -479,6 +519,7 @@ impl<'a> Cursor<'a> {
             }
             K_PARTIAL_UPDATE => {
                 let rev = self.u64()?;
+                let pts_us = self.u64()?;
                 let epoch = self.u32()?;
                 let count = self.u32()?;
                 if count > MAX_OPS_PER_UPDATE {
@@ -490,7 +531,12 @@ impl<'a> Cursor<'a> {
                 for _ in 0..count {
                     ops.push(self.op()?);
                 }
-                Message::PartialUpdate { rev, epoch, ops }
+                Message::PartialUpdate {
+                    rev,
+                    pts_us,
+                    epoch,
+                    ops,
+                }
             }
             K_KEEP_ALIVE => Message::KeepAlive { rev: self.u64()? },
             K_QUALITY => Message::QualityConfig(QualityConfig {
@@ -511,6 +557,7 @@ impl<'a> Cursor<'a> {
             }
             K_SNAPSHOT_COMMIT => Message::SnapshotCommit {
                 rev: self.u64()?,
+                pts_us: self.u64()?,
                 epoch: self.u32()?,
             },
             K_BYE => Message::Bye,
@@ -601,6 +648,7 @@ mod tests {
             Message::Ack { rev: 42 },
             Message::SnapshotBegin {
                 rev: 7,
+                pts_us: 0,
                 epoch: 1,
                 width: 2,
                 height: 2,
@@ -613,9 +661,14 @@ mod tests {
                 index: 0,
                 data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             },
-            Message::SnapshotCommit { rev: 7, epoch: 1 },
+            Message::SnapshotCommit {
+                rev: 7,
+                pts_us: 0,
+                epoch: 1,
+            },
             Message::PartialUpdate {
                 rev: 8,
+                pts_us: 0,
                 epoch: 1,
                 ops: vec![
                     WireOp::Rect {
@@ -692,6 +745,7 @@ mod tests {
     fn snapshot_begin_with_impossible_geometry_is_rejected() {
         let msg = Message::SnapshotBegin {
             rev: 1,
+            pts_us: 0,
             epoch: 0,
             width: 60_000,
             height: 60_000,
@@ -708,6 +762,7 @@ mod tests {
     fn snapshot_begin_with_zero_chunks_is_rejected() {
         let msg = Message::SnapshotBegin {
             rev: 1,
+            pts_us: 0,
             epoch: 0,
             width: 2,
             height: 2,
@@ -735,8 +790,9 @@ mod tests {
     #[test]
     fn oversized_op_count_is_rejected() {
         let mut payload = vec![K_PARTIAL_UPDATE];
-        payload.extend_from_slice(&1u64.to_le_bytes());
-        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&1u64.to_le_bytes()); // rev
+        payload.extend_from_slice(&0u64.to_le_bytes()); // pts
+        payload.extend_from_slice(&0u32.to_le_bytes()); // epoch
         payload.extend_from_slice(&(MAX_OPS_PER_UPDATE + 1).to_le_bytes());
         let mut bytes = vec![PROTOCOL_VERSION];
         bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
