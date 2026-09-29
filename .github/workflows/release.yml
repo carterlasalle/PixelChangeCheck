@@ -50,8 +50,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y $LINUX_DEPS
+      # `shell: bash` on purpose: the default shell on Windows is
+      # PowerShell, where "$MSRV" is a PowerShell variable and expands to
+      # the empty string rather than the environment variable.
       - run: rustup toolchain install "$MSRV" --profile minimal
+        shell: bash
       - run: rustup default "$MSRV"
+        shell: bash
       - uses: actions/cache@v4
         with:
           path: |
