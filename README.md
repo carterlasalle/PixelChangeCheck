@@ -60,7 +60,7 @@ Three things make that claim hold up:
 
 ### Prerequisites
 
-- Rust (see `rust-version` in `Cargo.toml`)
+- Rust 1.88 or newer (see `rust-version` in `Cargo.toml`)
 - System dependencies:
   - **Linux**: `pkg-config`, `libasound2-dev`, `libdbus-1-dev`,
     `libudev-dev`, `libxcb1-dev`, `libxrandr-dev`. The ALSA headers are

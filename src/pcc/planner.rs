@@ -354,8 +354,10 @@ fn uniform_color(change: &PixelChange) -> Option<[u8; 3]> {
     let color = [first[0], first[1], first[2]];
     change
         .data
-        .chunks_exact(BYTES_PER_PIXEL)
-        .all(|px| px == color)
+        .as_chunks::<BYTES_PER_PIXEL>()
+        .0
+        .iter()
+        .all(|px| *px == color)
         .then_some(color)
 }
 

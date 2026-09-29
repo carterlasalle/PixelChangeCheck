@@ -3,7 +3,11 @@ name = "pixel-change-check-client"
 version = "0.1.0"
 edition = "2021"
 # The floor CI tests. Raise this and the MSRV job together.
-rust-version = "1.85"
+# 1.88 is not a preference: every `time` release carrying the
+# RUSTSEC-2026-0009 fix requires it, and `time` arrives through rcgen
+# (certificate validity dates) and tracing-appender (log rotation). Both
+# are used, so the floor moves rather than the fix.
+rust-version = "1.88"
 authors = ["Carter LaSalle"]
 # AGPL-3.0 only, not "or later": the choice is deliberate, so say it
 # precisely rather than leaving a consumer to infer it.

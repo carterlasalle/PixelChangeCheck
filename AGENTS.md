@@ -2824,6 +2824,12 @@ must be changed together.
   to pick one and panics at the first handshake.
 - `cargo audit` reads `.cargo/audit.toml`, not `audit.toml` at the repo
   root. A root-level file is silently ignored and the gate still fails.
+- Verifying the MSRV locally with a warm target directory lies. Cargo
+  serves a cached result for a toolchain it has already checked, so
+  `rustup run 1.85.0 cargo check` can exit 0 while CI reports that a
+  dependency needs a newer rustc. Trust CI, or `cargo clean` first.
+- The MSRV is 1.88 because every patched `time` requires it, not because
+  it was chosen. If `time` ever goes, the floor can drop.
 - `Cargo.toml`'s `exclude` list is load-bearing, not tidiness. Anything
   committed to the repository is packaged unless it is named there, and
   `.bughunt/`, `.omp/` and `.scc/` are megabytes of local tooling. Check

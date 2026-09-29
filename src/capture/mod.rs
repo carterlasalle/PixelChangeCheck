@@ -48,7 +48,7 @@ impl FrameCapture for ScreenCapture {
         // Convert RGBA to RGB
         let rgba_data = image.into_raw();
         let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
-        for pixel in rgba_data.chunks_exact(4) {
+        for pixel in rgba_data.as_chunks::<4>().0 {
             rgb_data.push(pixel[0]); // R
             rgb_data.push(pixel[1]); // G
             rgb_data.push(pixel[2]); // B

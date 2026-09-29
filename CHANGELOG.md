@@ -32,10 +32,12 @@ against the audio clock.
 
 ### Fixed
 
-- `time` is pinned to 0.3.47, the oldest release carrying the
-  RUSTSEC-2026-0009 fix. Anything from 0.3.53 on needs rustc 1.88, and
-  this crate claims 1.85; 0.3.47 is patched and still builds on the
-  floor.
+- **The minimum supported Rust version moves from 1.85 to 1.88.** Every
+  `time` release carrying the RUSTSEC-2026-0009 fix requires rustc 1.88,
+  and `time` arrives through rcgen (certificate validity dates) and
+  tracing-appender (log rotation). Both are genuinely used, so the floor
+  moves rather than the fix. `time` is now on 0.3.47, the oldest patched
+  release.
 - Two STUN peer tests failed on Windows and passed everywhere else. The
   responder binds the wildcard address, which is right in production and
   wrong to send *to*: Linux and macOS route a packet addressed to
