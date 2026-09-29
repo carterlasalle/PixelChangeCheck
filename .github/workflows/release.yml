@@ -107,3 +107,48 @@ jobs:
           gh release create "$VERSION" release-assets/* \
             --title "$VERSION" \
             --generate-notes
+
+  publish:
+    name: Publish to crates.io
+    # Only an actual tag push publishes. A manual re-run of an old tag
+    # must not try to claim a version that is already taken.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    # OIDC only. A crates.io API token in a repository secret is a
+    # long-lived credential that anyone who can push a tag can use.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@v2
+      # A tag that disagrees with the manifest would publish a version
+      # nobody can find by release, and the next one would be blocked.
+      - name: The tag must match the manifest version
+        run: |
+          set -euo pipefail
+          tagged="${RELEASE_TAG#v}"
+          manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$tagged" != "$manifest" ]; then
+            echo "::error::tag $RELEASE_TAG does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+      # A version cannot be reused, so publish only when this one is free.
+      - name: The version must not already exist
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: pixelchangecheck-release-check' \
+            "https://crates.io/api/v1/crates/pixel-change-check-client/$version")
+          if [ "$code" = "200" ]; then
+            echo "::error::version $version is already on crates.io"
+            exit 1
+          fi
+          echo "version $version is free"
+      - uses: rust-lang/crates-io-auth-action@v1
+      - run: cargo publish --locked

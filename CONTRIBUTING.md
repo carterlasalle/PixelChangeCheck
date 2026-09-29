@@ -55,3 +55,32 @@ cargo test
 - `app/share.rs` is the only writer of the authoritative surface.
 - `server/renderer/client.js` is a port of `pcc/compositor.rs`. The two
   must agree; if you change one, change the other in the same commit.
+
+## Releasing
+
+One tag does everything: GitHub Release binaries and a crates.io
+publish. The tag must match the `version` in `Cargo.toml`, and the
+workflow refuses to run if it does not, because a version that disagrees
+with its tag is one nobody can find by release and blocks the next one.
+
+```sh
+cargo test && cargo clippy --all-targets && cargo fmt --all
+cargo build --release && bash scripts/smoke.sh   # against the real binaries
+
+# bump version in Cargo.toml, update CHANGELOG.md, commit
+git tag v0.1.0 && git push origin main --tags
+```
+
+Publishing uses OIDC, so there is no crates.io API token in this
+repository. **One-time setup**, on crates.io under your account, for
+`pixel-change-check-client`:
+
+    Trusted Publisher -> GitHub -> owner `carterlasalle`,
+    repo `pixelchangecheck`, workflow `release.yml`
+
+Without that the publish job fails at the auth step. Nothing else in the
+release depends on it.
+
+A crates.io version, once claimed, can never be reused -- not after a
+yank, not after a deletion. If a release is broken, publish `0.1.1` and
+yank `0.1.0`; do not try to reclaim `0.1.0`.
