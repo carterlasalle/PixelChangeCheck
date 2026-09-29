@@ -82,36 +82,42 @@ pub fn run_view(args: ViewArgs, metrics: crate::telemetry::SharedMetrics) -> Res
 
     let view_args = args.clone();
     rt.spawn(async move {
-        // Reconnect as a new synchronisation epoch: every attempt starts
-        // from a clean compositor, so a half-received surface from the
-        // previous attempt can never be mistaken for a valid one.
+        // Reconnect keeps the last applied (epoch, rev) and offers it in
+        // the next Hello, so the sharer can replay the ring instead of
+        // snapshotting. The presented frame stays on screen across the
+        // gap: the compositor restarts clean each attempt and the replay
+        // re-applies onto it, or a snapshot replaces it when the ring no
+        // longer covers the floor. Crypto is fresh per attempt (new
+        // KeyPair inside receive_once), so no counter or nonce crosses
+        // the reconnect.
+        let mut resume: Option<(crate::network::Epoch, crate::network::Rev)> = None;
         loop {
-            {
-                let mut s = bg_surface.lock();
-                s.frame = None;
-                s.terminal = None;
-            }
             // The connection is rebuilt per attempt, so it is captured
             // here rather than hoisted out of the reconnect loop.
-            let outcome = receive_once(&view_args, &bg_surface, &metrics_bg).await;
+            // `receive_once` returns what it last applied: a transport
+            // failure keeps it for the next Hello, a clean end clears it.
+            let outcome = receive_once(&view_args, &bg_surface, &metrics_bg, resume).await;
             *bg_attempts.lock() += 1;
             // Every exit path must release the presentation loop, or a
             // cleanly-ended session leaves it spinning forever.
-            let (message, stop) = match outcome {
-                Ok(()) => {
+            let (message, stop, next_resume) = match outcome {
+                Ok(_applied) => {
                     let n = bg_attempts.lock();
                     let m = format!("the sharer ended the session after {n} attempt(s)");
                     info!("Viewer session ended: {m}");
-                    (m, Stop::Clean)
+                    (m, Stop::Clean, None)
                 }
                 Err(e) => {
                     // The whole chain: a bare "handshake failed" is not
                     // something anyone can act on.
                     let message = format!("{e:#}");
                     warn!("Viewer session ended: {message}");
-                    (message, Stop::Failed)
+                    (message, Stop::Failed, resume_point_from_error(&e))
                 }
             };
+            // A failed attempt resumes only when the compositor actually
+            // holds pixels; otherwise the next attempt snapshots scratch.
+            resume = next_resume;
             bg_surface.lock().terminal = Some((message, stop));
             if !view_args.reconnect {
                 break;
@@ -196,7 +202,8 @@ async fn receive_once(
     args: &ViewArgs,
     surface: &Arc<Mutex<Surface>>,
     metrics: &crate::telemetry::SharedMetrics,
-) -> Result<()> {
+    resume: Option<(crate::network::Epoch, crate::network::Rev)>,
+) -> Result<Option<(crate::network::Epoch, crate::network::Rev)>> {
     anyhow::ensure!(
         !(args.connect.is_some() && args.relay.is_some()),
         "specify either --connect or --relay, not both"
@@ -226,6 +233,7 @@ async fn receive_once(
         transport
             .send(&Message::Hello {
                 token: args.token.as_str().to_string(),
+                resume,
             })
             .await?;
         // Retain the handle before boxing the single stream: datagrams are
@@ -254,6 +262,7 @@ async fn receive_once(
         transport
             .send(&Message::Hello {
                 token: args.token.as_str().to_string(),
+                resume,
             })
             .await?;
         Box::new(transport)
@@ -464,7 +473,18 @@ async fn receive_once(
                 }
             }
         }
-        let msg = transport.recv().await?;
+        let msg = match transport.recv().await {
+            Ok(msg) => msg,
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "transport failed at applied {}:{}",
+                        compositor.epoch(),
+                        compositor.rev()
+                    )
+                })
+            }
+        };
         match msg {
             Message::SnapshotBegin {
                 rev: _,
@@ -561,7 +581,7 @@ async fn receive_once(
             Message::Error(e) => return Err(anyhow::anyhow!("{e}")),
             Message::Bye => {
                 info!("Sharer ended the session");
-                return Ok(());
+                return Ok(applied_point(&compositor));
             }
             Message::Hello { .. }
             | Message::Ack { .. }
@@ -574,6 +594,32 @@ async fn receive_once(
             }
         }
     }
+}
+
+/// Extract the (epoch, rev) the viewer last applied from a transport
+/// failure's context. `receive_once` attaches it as
+/// "transport failed at applied {epoch}:{rev}"; anything else (handshake
+/// refusal, corrupt frame) carries no resume point and snapshots fresh.
+fn resume_point_from_error(
+    e: &anyhow::Error,
+) -> Option<(crate::network::Epoch, crate::network::Rev)> {
+    let chain = format!("{e:#}");
+    let marker = "transport failed at applied ";
+    let at = chain.find(marker)? + marker.len();
+    let rest = chain[at..].split_whitespace().next()?;
+    let (epoch, rev) = rest.split_once(':')?;
+    let epoch: crate::network::Epoch = epoch.parse().ok()?;
+    let rev: crate::network::Rev = rev.parse().ok()?;
+    if rev == 0 {
+        return None;
+    }
+    Some((epoch, rev))
+}
+
+/// What the compositor holds now, for the next Hello. `None` before the
+/// first snapshot commits: there is nothing to resume from.
+fn applied_point(c: &Compositor) -> Option<(crate::network::Epoch, crate::network::Rev)> {
+    c.is_fresh().then(|| (c.epoch(), c.rev()))
 }
 
 fn server_name_of(target: &str) -> &str {

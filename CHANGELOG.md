@@ -126,11 +126,17 @@ endpoint this product exposes to the internet. Upgrade to `0.1.1`.
 
 ## Unreleased
 
-The wire protocol is version 5. Viewers and sharers must be the same
+The wire protocol is version 6. Viewers and sharers must be the same
 build; a version mismatch is refused with a clear message rather than
 mis-parsed. Version 4 added the end-to-end encryption handshake; version
 5 adds `pts_us` to every visual message, so a viewer can schedule a frame
-against the audio clock.
+against the audio clock; version 6 carries the viewer's last applied
+(epoch, rev) in `Hello`, so a reconnect can replay the revision ring
+instead of snapshotting. A reconnecting viewer keeps its last frame on
+screen across the gap and catches up from the ring when it still covers
+its floor; anything older, evicted, or cross-epoch snapshots as before.
+Fresh session keys are derived on every attempt, so no counter or nonce
+crosses the reconnect.
 
 ### Dependencies
 

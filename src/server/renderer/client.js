@@ -9,7 +9,7 @@
 // The wire format is the same explicit little-endian one the native
 // viewer parses. Nothing about the stream is re-encoded for the browser.
 
-const PROTOCOL_VERSION = 5;
+const PROTOCOL_VERSION = 6;
 const MAX_FRAME_BYTES = 100_000_000;
 
 const OP_RECT = 0x01;
@@ -533,16 +533,25 @@ function parseMessage(bytes) {
   }
 }
 
-function encodeHello(token) {
+function encodeHello(token, resume) {
   const raw = new TextEncoder().encode(token);
-  const out = new Uint8Array(5 + 1 + 2 + raw.length);
+  const tail = resume ? 1 + 4 + 8 : 1;
+  const out = new Uint8Array(5 + 1 + 2 + raw.length + tail);
   const view = new DataView(out.buffer);
   const bodyAt = 5;
   out[0] = PROTOCOL_VERSION;
-  view.setUint32(1, 1 + 2 + raw.length, true);
+  view.setUint32(1, 1 + 2 + raw.length + tail, true);
   out[bodyAt] = K_HELLO;
   view.setUint16(bodyAt + 1, raw.length, true);
   out.set(raw, bodyAt + 3);
+  let at = bodyAt + 3 + raw.length;
+  if (resume) {
+    out[at++] = 1;
+    view.setUint32(at, resume.epoch, true); at += 4;
+    view.setBigUint64(at, BigInt(resume.rev), true);
+  } else {
+    out[at] = 0;
+  }
   return out;
 }
 

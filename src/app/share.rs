@@ -96,19 +96,22 @@ pub struct ShareArgs {
 }
 
 /// The authoritative surface, exactly as an up-to-date viewer sees it.
+///
+/// Public so integration tests can build the exact share-side state the
+/// capture loop builds (ring pushes included) and drive the resume path.
 #[derive(Clone)]
-struct Published {
-    rev: Rev,
-    epoch: Epoch,
-    snapshot: Arc<SurfaceSnapshot>,
+pub struct Published {
+    pub rev: Rev,
+    pub epoch: Epoch,
+    pub snapshot: Arc<SurfaceSnapshot>,
     /// Encoded snapshot, tagged with the revision it represents, produced
     /// on demand and then shared by every joiner and every repair.
-    encoded: Option<(Rev, Arc<Vec<u8>>)>,
+    pub encoded: Option<(Rev, Arc<Vec<u8>>)>,
     /// Bounded replay of recent broadcast payloads. The capture loop pushes
     /// every message it broadcasts; `serve_viewer` reads it when a viewer
     /// lags or asks for a refresh. Same bytes as the broadcast, second
     /// copy, bounded — never a second source of truth.
-    ring: RevisionRing,
+    pub ring: RevisionRing,
 }
 
 impl Published {
@@ -120,7 +123,7 @@ impl Published {
     }
 }
 
-type Shared = Arc<RwLock<Published>>;
+pub type Shared = Arc<RwLock<Published>>;
 type EncodedBroadcast = broadcast::Sender<Arc<Vec<u8>>>;
 
 /// Bounded replay of recent revisions, so a viewer that only missed a few
@@ -137,7 +140,7 @@ type EncodedBroadcast = broadcast::Sender<Arc<Vec<u8>>>;
 /// An epoch change clears it: rectangles from an older geometry are
 /// meaningless, and replaying them would corrupt rather than repair.
 #[derive(Debug, Default, Clone)]
-struct RevisionRing {
+pub struct RevisionRing {
     entries: std::collections::VecDeque<RingEntry>,
     bytes: usize,
 }
@@ -165,7 +168,7 @@ const RING_MAX_BYTES: usize = 16 * 1024 * 1024;
 impl RevisionRing {
     /// Record one broadcast payload. Snapshots arrive as several messages
     /// at one revision; each is stored, so replay is byte-identical.
-    fn push(&mut self, rev: Rev, epoch: Epoch, bytes: Arc<Vec<u8>>) {
+    pub fn push(&mut self, rev: Rev, epoch: Epoch, bytes: Arc<Vec<u8>>) {
         // An epoch change invalidates every rectangle sent so far.
         if let Some(back) = self.entries.back() {
             if back.epoch != epoch {
@@ -188,7 +191,7 @@ impl RevisionRing {
     /// Idle frames all carry the current rev and add no information, so
     /// storing each one would churn real history out of the ring within
     /// seconds on an idle screen.
-    fn push_keepalive(&mut self, rev: Rev, epoch: Epoch, bytes: Arc<Vec<u8>>) {
+    pub fn push_keepalive(&mut self, rev: Rev, epoch: Epoch, bytes: Arc<Vec<u8>>) {
         if let Some(back) = self.entries.back() {
             if back.rev == rev && back.epoch == epoch {
                 return;
@@ -202,7 +205,7 @@ impl RevisionRing {
     /// the floor predates the ring, the epoch moved on, or a revision in
     /// between is missing (a snapshot sequence that was truncated by the
     /// bounds, never a partial hole — pushes are in order).
-    fn replay_from(&self, floor: Rev, epoch: Epoch) -> Option<Vec<Arc<Vec<u8>>>> {
+    pub fn replay_from(&self, floor: Rev, epoch: Epoch) -> Option<Vec<Arc<Vec<u8>>>> {
         if self.entries.is_empty() {
             return None;
         }
@@ -1073,7 +1076,7 @@ async fn serve_viewer(
 
     let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         match source.recv().await {
-            Ok(Message::Hello { token }) => Some(token),
+            Ok(Message::Hello { token, resume }) => Some((token, resume)),
             Ok(other) => {
                 let _ = sink
                     .send(&Message::Error(format!(
@@ -1091,8 +1094,8 @@ async fn serve_viewer(
     })
     .await;
 
-    let presented = match handshake {
-        Ok(Some(presented)) if verify_token(&token, &presented) => presented,
+    let (presented, resume) = match handshake {
+        Ok(Some((presented, resume))) if verify_token(&token, &presented) => (presented, resume),
         _ => {
             let _ = sink
                 .send(&Message::Error(
@@ -1193,14 +1196,58 @@ async fn serve_viewer(
         info!("{label} audio over QUIC datagrams enabled");
     }
 
-    let mut floor = match send_snapshot(&mut sink, &published).await {
-        Ok(rev) => rev,
-        Err(e) => {
-            warn!("{label} could not be caught up: {e}");
-            return;
+    // A reconnecting viewer names what it last applied. When the ring
+    // still covers it at the same epoch, replay catches it up with no
+    // snapshot; anything else snapshots exactly as a fresh join does.
+    // Fresh crypto either way: the E2E handshake above already derived new
+    // session keys, so no counter or nonce crosses the reconnect.
+    let mut floor = match resume {
+        Some((epoch, rev)) => {
+            let replay = {
+                let p = published.read().await;
+                if epoch == p.epoch {
+                    p.ring.replay_from(rev, epoch)
+                } else {
+                    None
+                }
+            };
+            match replay {
+                Some(msgs) => {
+                    let mut caught = rev;
+                    for bytes in &msgs {
+                        if let Err(e) = sink.send_encoded(bytes).await {
+                            warn!("{label} resume replay failed: {e}");
+                            return;
+                        }
+                        if let Some(r) = crate::network::peek_rev(bytes) {
+                            caught = caught.max(r);
+                        }
+                    }
+                    info!(
+                        "{label} resumed from rev {rev} with {} replayed messages",
+                        msgs.len()
+                    );
+                    caught
+                }
+                None => match send_snapshot(&mut sink, &published).await {
+                    Ok(rev) => rev,
+                    Err(e) => {
+                        warn!("{label} could not be caught up: {e}");
+                        return;
+                    }
+                },
+            }
         }
+        None => match send_snapshot(&mut sink, &published).await {
+            Ok(rev) => rev,
+            Err(e) => {
+                warn!("{label} could not be caught up: {e}");
+                return;
+            }
+        },
     };
-    // The snapshot floor is applied by definition: the viewer holds it.
+    // The floor is applied by definition: the viewer holds it, whether it
+    // came from a snapshot or a replay of contiguous history.
     if let Some(v) = viewers.lock().get_mut(&id) {
         v.acked_rev = floor;
     }
@@ -1294,7 +1341,7 @@ async fn serve_viewer(
 /// replayed; one that is far behind, predates the ring, or crossed an
 /// epoch gets a snapshot. A `RequestKeyframe` still means snapshot — the
 /// viewer declared its state unusable, so replaying against it would be wrong.
-async fn repair_viewer(
+pub async fn repair_viewer(
     sink: &mut Box<dyn MessageSink>,
     published: &Shared,
     floor: Rev,

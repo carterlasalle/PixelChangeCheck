@@ -338,6 +338,7 @@ async fn over_the_wire(width: u32, height: u32) -> Result<(usize, usize)> {
     viewer
         .send(&Message::Hello {
             token: token.as_str().to_string(),
+            resume: None,
         })
         .await?;
 

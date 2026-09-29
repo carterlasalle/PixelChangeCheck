@@ -173,7 +173,10 @@ async fn serve_once(
 
         // The first thing a viewer sends is its token.
         match transport.recv().await {
-            Ok(Message::Hello { token: presented }) => {
+            Ok(Message::Hello {
+                token: presented,
+                resume: _,
+            }) => {
                 if !verify_token(&token, &presented) {
                     let _ = transport
                         .send(&Message::Error("Unauthorized.".into()))
@@ -229,6 +232,7 @@ async fn a_direct_viewer_reconstructs_the_capture_exactly() -> Result<()> {
     transport
         .send(&Message::Hello {
             token: token.as_str().to_string(),
+            resume: None,
         })
         .await?;
 
@@ -273,6 +277,7 @@ async fn a_viewer_with_the_wrong_token_is_refused() -> Result<()> {
     transport
         .send(&Message::Hello {
             token: "WRONGTOKEN999".into(),
+            resume: None,
         })
         .await?;
 
@@ -350,6 +355,7 @@ async fn the_relay_forwards_real_frames_to_an_authorized_viewer() -> Result<()> 
     viewer
         .send(&Message::Hello {
             token: token.as_str().to_string(),
+            resume: None,
         })
         .await?;
     let mut fan = Box::new(host).into_fan();
@@ -480,6 +486,7 @@ async fn a_reconnecting_host_keeps_its_registration() -> Result<()> {
     viewer
         .send(&Message::Hello {
             token: token.as_str().to_string(),
+            resume: None,
         })
         .await?;
     let mut fan = Box::new(second).into_fan();
@@ -615,6 +622,7 @@ async fn two_relayed_viewers_each_complete_e2e_and_are_pixel_identical() -> Resu
             viewer
                 .send(&Message::Hello {
                     token: token.as_str().to_string(),
+                    resume: None,
                 })
                 .await?;
             let keys = e2e::KeyPair::generate();
@@ -775,5 +783,126 @@ async fn the_relay_tells_the_host_a_viewer_left() -> Result<()> {
         id,
         "ViewerLeft must name the viewer that left"
     );
+    Ok(())
+}
+
+/// A reconnecting viewer replays the ring instead of snapshotting.
+///
+/// Drives the real share-side catch-up decision (`repair_viewer`, the same
+/// function the lag path and the Hello-resume path both call) against a
+/// `Published` filled the way the capture loop fills it: snapshot
+/// sequence at rev 0, then updates. A viewer holding rev N gets only the
+/// tail replayed and converges pixel-identical; a viewer whose floor
+/// predates the ring gets a full snapshot.
+#[tokio::test]
+async fn a_reconnecting_viewer_resumes_from_the_ring() -> Result<()> {
+    use pixel_change_check_client::app::share::{repair_viewer, Published, Shared};
+    use pixel_change_check_client::encoder::SurfaceSnapshot;
+    use pixel_change_check_client::network::MessageSink;
+    use std::sync::Arc;
+
+    struct VecSink(Vec<Vec<u8>>);
+    #[async_trait::async_trait]
+    impl MessageSink for VecSink {
+        async fn send(&mut self, msg: &Message) -> Result<()> {
+            self.send_encoded(&msg.encode()?).await
+        }
+        async fn send_encoded(&mut self, bytes: &[u8]) -> Result<()> {
+            self.0.push(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    let mut script = Vec::new();
+    let final_reference = produce(&mut script, 10)?;
+
+    // Share-side state, filled exactly as the capture loop fills it.
+    let published: Shared = Arc::new(tokio::sync::RwLock::new(Published {
+        rev: 0,
+        epoch: 0,
+        snapshot: Arc::new(SurfaceSnapshot::new(W, H, vec![0u8; (W * H * 3) as usize])?),
+        encoded: None,
+        ring: Default::default(),
+    }));
+    let (mut rev, epoch) = (0u64, 0u32);
+    {
+        let mut p = published.write().await;
+        for bytes in &script {
+            // Snapshot messages share rev 0; updates carry their own rev.
+            if let Some(r) = pixel_change_check_client::network::peek_rev(bytes) {
+                let msg = Message::decode(bytes)?;
+                if !matches!(
+                    msg,
+                    Message::SnapshotBegin { .. }
+                        | Message::SnapshotChunk { .. }
+                        | Message::SnapshotCommit { .. }
+                ) {
+                    rev = r;
+                }
+            }
+            p.ring.push(rev, epoch, Arc::new(bytes.clone()));
+        }
+        p.rev = rev;
+        // The published snapshot tracks the live surface, as the loop does.
+        p.snapshot = Arc::new(SurfaceSnapshot::new(W, H, final_reference.data.clone())?);
+        p.encoded = None;
+    }
+    assert!(
+        rev > 3,
+        "the script must span several revisions, got rev {rev}"
+    );
+
+    // The reconnecting viewer holds rev 2: mid-history, covered by the ring.
+    // Drive the whole script through one compositor first (snapshot +
+    // revs 1..=2), then replay only the tail past 2 and converge.
+    let mut viewer = Compositor::new();
+    for bytes in &script {
+        apply(&mut viewer, bytes)?;
+        if pixel_change_check_client::network::peek_rev(bytes) == Some(2) {
+            break;
+        }
+    }
+    assert_eq!(
+        viewer.rev(),
+        2,
+        "the viewer must hold rev 2 before resuming"
+    );
+    let tail = {
+        let p = published.read().await;
+        p.ring
+            .replay_from(2, epoch)
+            .expect("floor 2 must be covered")
+    };
+    // Resume replays updates, never a snapshot: the opening sequence sits
+    // at rev 0, below the floor.
+    let mut saw_snapshot = false;
+    let mut floor = 2u64;
+    for bytes in &tail {
+        match Message::decode(bytes)? {
+            Message::SnapshotBegin { .. }
+            | Message::SnapshotChunk { .. }
+            | Message::SnapshotCommit { .. } => {
+                saw_snapshot = true;
+            }
+            _ => {}
+        }
+        apply(&mut viewer, bytes)?;
+        if let Some(r) = pixel_change_check_client::network::peek_rev(bytes) {
+            floor = floor.max(r);
+        }
+    }
+    assert!(!saw_snapshot, "resume must replay updates, not a snapshot");
+    assert_eq!(floor, rev, "replay must advance the floor to the tip");
+    assert_eq!(
+        viewer.buffer(),
+        &final_reference.data,
+        "replaying the tail must converge the viewer"
+    );
+
+    // The share-side decision agrees: repair_viewer from floor 2 returns
+    // the tip without snapshotting.
+    let mut sink: Box<dyn MessageSink> = Box::new(VecSink(Vec::new()));
+    let repaired = repair_viewer(&mut sink, &published, 2).await?;
+    assert_eq!(repaired, rev);
     Ok(())
 }

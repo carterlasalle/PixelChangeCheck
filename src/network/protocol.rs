@@ -12,9 +12,11 @@ use crate::pcc::QualityConfig;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Bumped for the revision/epoch/handshake protocol. Old viewers are
-/// rejected with a version error rather than silently mis-parsed.
-pub const PROTOCOL_VERSION: u8 = 5;
+/// Bumped for the revision/epoch/handshake protocol (v5) and for resume
+/// (v6: `Hello` carries the viewer's last applied revision and epoch, so
+/// a reconnect can replay the ring instead of snapshotting). Old viewers
+/// are rejected with a version error rather than silently mis-parsed.
+pub const PROTOCOL_VERSION: u8 = 6;
 
 /// Largest encoded message body we will produce or accept.
 ///
@@ -76,8 +78,15 @@ pub enum Message {
     /// Viewer -> sharer, first message on every stream. The token is both
     /// the authorization credential and (see `network::config`) the
     /// certificate fingerprint the viewer pinned.
+    ///
+    /// `resume` is what the viewer last applied before a reconnect: the
+    /// sharer replays the ring from there when it still covers it, else
+    /// snapshots. `None` (a fresh join) always snapshots. Kept inside
+    /// `Hello` so no new handshake round trip is needed and old builds
+    /// fail at the version gate instead of mis-parsing.
     Hello {
         token: String,
+        resume: Option<(Epoch, Rev)>,
     },
     /// Viewer -> sharer: "I hold nothing usable, send me a fresh snapshot."
     RequestKeyframe,
@@ -191,11 +200,21 @@ impl Message {
 
     fn encode_body(&self, out: &mut Vec<u8>) {
         match self {
-            Message::Hello { token } => {
+            Message::Hello { token, resume } => {
                 out.push(K_HELLO);
                 let bytes = token.as_bytes();
                 out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
                 out.extend_from_slice(bytes);
+                // One flag byte, then the pair only when resuming. Old
+                // builds never emit this and fail the version gate first.
+                match resume {
+                    Some((epoch, rev)) => {
+                        out.push(1);
+                        out.extend_from_slice(&epoch.to_le_bytes());
+                        out.extend_from_slice(&rev.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
             }
             Message::RequestKeyframe => out.push(K_REQUEST_KEYFRAME),
             Message::E2eOffer { public, proof } => {
@@ -470,7 +489,13 @@ impl<'a> Cursor<'a> {
                 let token = std::str::from_utf8(self.take(n)?)
                     .context("token is not valid UTF-8")?
                     .to_string();
-                Message::Hello { token }
+                // Matches the encoder: one flag byte, then the pair.
+                let resume = match self.u8()? {
+                    0 => None,
+                    1 => Some((self.u32()?, self.u64()?)),
+                    f => anyhow::bail!("hello resume flag {f} is not 0 or 1"),
+                };
+                Message::Hello { token, resume }
             }
             K_REQUEST_KEYFRAME => Message::RequestKeyframe,
             K_E2E_OFFER => {
@@ -654,6 +679,11 @@ mod tests {
         let msgs = vec![
             Message::Hello {
                 token: "ABC123".into(),
+                resume: None,
+            },
+            Message::Hello {
+                token: "ABC123".into(),
+                resume: Some((2, 9301)),
             },
             Message::RequestKeyframe,
             Message::Ack { rev: 42 },
