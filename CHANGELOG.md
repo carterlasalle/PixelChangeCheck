@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2
+
+Supply-chain and CI hardening. No change to what the program does.
+
+- Every GitHub Action is pinned to a commit SHA rather than a moving tag,
+  so whoever controls a tag cannot change what runs with the repository's
+  credentials. Dependabot still updates the pins.
+- `ci.yml` declares `permissions: contents: read`. It had no permissions
+  block at all, so every job inherited the repository default, which is
+  broader than any of them need. The crates.io publish job keeps
+  `id-token: write`; nothing else needs it.
+
 ## 0.1.1
 
 A security release. `0.1.0` shipped quinn 0.10.2 and rustls 0.21, and
