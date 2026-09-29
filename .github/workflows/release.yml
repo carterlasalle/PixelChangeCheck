@@ -40,7 +40,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+        # No macos-13. It is GitHub's last Intel macOS image and is in
+        # retirement: it sat queued for over an hour with no runner, and
+        # `release` needs every matrix entry, so one unavailable label
+        # blocks every release. macos-latest is Apple Silicon, and this
+        # project has no x86-specific code. Intel Mac users install with
+        # `cargo install` or run the arm64 build under Rosetta 2.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:
