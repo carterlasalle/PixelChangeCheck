@@ -1,62 +1,66 @@
-# PixelChangeCheck (PCC)
+<div align="center">
 
-An efficient screen-sharing tool: it replicates your screen **exactly** and
-sends only the pixels that changed.
+# PixelChangeCheck
 
-Rust. Shares to:
+**Lossless desktop replication: send only the pixels that changed.**
 
-- **Direct QUIC viewers** on your LAN or over the internet (with port
-  forwarding)
-- **A relay server** for viewers behind NAT, with no port forwarding
-  required
-- **Any web browser**, including an iPhone's Safari, over a WebSocket that
-  speaks the *same* change protocol the native client does
+[![CI](https://github.com/carterlasalle/PixelChangeCheck/actions/workflows/ci.yml/badge.svg)](https://github.com/carterlasalle/PixelChangeCheck/actions/workflows/ci.yml)
+[![Release](https://github.com/carterlasalle/PixelChangeCheck/actions/workflows/release.yml/badge.svg)](https://github.com/carterlasalle/PixelChangeCheck/actions/workflows/release.yml)
+![Rust](https://img.shields.io/badge/Rust-1.88%2B-dea584?logo=rust&logoColor=white)
+![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
+![crates.io](https://img.shields.io/crates/v/pixel-change-check-client?label=crates.io)
 
-## What makes it different
+[Install](#quick-start) · [How it works](#how-pcc-works) · [Architecture](#architecture) · [Relay](#do-i-need-a-relay) · [Limitations](#known-limitations) · [Design records](docs/adr/)
 
-A conventional screen stream re-encodes the whole picture every frame.
-PixelChangeCheck keeps a **lossless authoritative surface**: the sharer
-diffs each captured frame against the framebuffer viewers actually hold,
-and sends only what changed. For a terminal, an IDE, or a document, that
-is usually a few kilobytes per frame. When nothing changes, it sends
-nothing but a keep-alive.
+</div>
 
-Three things make that claim hold up:
+A conventional screen stream re-encodes the whole picture every frame. PixelChangeCheck keeps a **lossless authoritative surface**: the sharer diffs each captured frame against the framebuffer viewers actually hold, and sends only what changed. For a terminal, an IDE, or a document, that is usually a few kilobytes per frame. When nothing changes, it sends nothing but a keep-alive.
 
-- **Exactness is measured, not asserted.** The authoritative stream is
-  lossless end to end. After a snapshot plus its updates, a viewer's
-  pixels are byte-identical to the sender's reference; the test suite
-  asserts exactly that, including over a real socket and through the
-  browser's JavaScript compositor.
-- **Sub-threshold changes accumulate.** The sharer diffs against what
-  viewers hold, not against the previous capture, so a slow fade crosses
-  the threshold and gets sent instead of being silently discarded forever.
-- **Scrolling is a copy, not a repaint.** A verified displacement becomes
-  a `Copy` operation -- a few dozen bytes instead of a whole screen.
+It shares to a **native viewer** over QUIC, to **any web browser** including a phone over a WebSocket that speaks the same change protocol, or to **a relay** when both ends are behind NAT.
 
-## Features
+## How it works
 
-- **Screen capture** via the `screenshots` crate, with an automatic
-  synthetic test-pattern fallback on headless machines
-- **Pixel Change Check**: allocation-free block comparison, tile-hash region
-  merging, and a bounded verified-displacement search for scroll reuse
-- **A three-way representation choice per region**: solid fill, verified
-  copy, or an exact LZ4 patch -- whichever is genuinely cheaper
-- **Cost-based fallback**: when the patches for a frame would cost more
-  than a fresh lossless snapshot, the sharer sends the snapshot
-- **Chunked, atomic snapshots**: bounded transfer with begin/chunk/commit,
-  so an interrupted snapshot can never half-replace a working surface
-- **Revisions and epochs**: one sequencer, so a late joiner, a recovered
-  viewer, and a viewer that fell behind all converge to the same pixels
-- **Authentication**: a viewer token authorizes access; a certificate pin
-  proves who you are talking to
-- **TLS on every path**, including the relay
-- **Browser viewer**: a WebSocket patch compositor (lossless), plus an
-  explicitly lossy MJPEG fallback for anything that cannot run one
-- **A relay** with per-viewer byte budgets, generational ownership, and a
-  defined slow-viewer policy
+```mermaid
+flowchart LR
+    A[Captured frame] --> B[Detect changed blocks]
+    B --> C{Diff against the<br/>authoritative surface}
+    C --> D[Plan: fill / copy / rect]
+    D --> E{Is the patch set<br/>cheaper than a snapshot?}
+    E -->|no| F[Lossless snapshot]
+    E -->|yes| G[Partial update]
+    C -->|nothing changed| H[Keep-alive]
+    F --> I[Sequence: revision + epoch]
+    G --> I
+    I --> J[Encode once]
+    J --> K[QUIC viewer]
+    J --> L[Relay, TCP + TLS]
+    J --> M[Browser over WebSocket]
+    K --> N[Compositor]
+    L --> N
+    M --> O[Browser compositor]
+    N --> P[Bytes identical to<br/>the sharer's surface]
+    O --> P
+```
 
-## Getting Started
+The diff is against the **reference** — the framebuffer an up-to-date viewer holds — not against the previous capture. That is what makes sub-threshold changes accumulate instead of being discarded forever. The reference advances only over rectangles that actually shipped, so anything too small to send this frame is still there to send later.
+
+## Capabilities
+
+| Area | What PixelChangeCheck provides |
+|---|---|
+| Detection | Allocation-free block comparison, tile-hash region merging, and a bounded verified-displacement search for scroll reuse |
+| Representation | A three-way choice per region: solid fill, verified copy, or an exact LZ4 patch — whichever is genuinely cheaper |
+| Cost control | When the patches for a frame would cost more than a fresh lossless snapshot, the sharer sends the snapshot instead |
+| Snapshots | Chunked and atomic (begin/chunk/commit), so an interrupted snapshot can never half-replace a working surface |
+| Sequencing | One authority for revisions and epochs, so a late joiner, a recovered viewer, and a viewer that fell behind all converge to the same pixels |
+| Authentication | A viewer token authorizes access; a certificate pin proves who you are talking to |
+| Encryption | Every frame sealed end to end, per viewer, on the native path and in the browser |
+| Relay | Per-viewer byte budgets, generational ownership, a defined slow-viewer policy, and no inspection of frame contents |
+| Reachability | An explicit ladder — global IPv6, STUN, NAT-PMP, an ICE-lite peer check — with the relay as the deliberate last rung |
+| Observability | A stats table, Prometheus metrics on loopback, and JSON logs for bug reports |
+| Viewers | A native window, and a WebSocket compositor for any browser, with an explicitly lossy MJPEG fallback |
+
+## Quick start
 
 ### Prerequisites
 
@@ -80,22 +84,16 @@ That installs one binary, `pcc`. If you would rather not build it, the
 release page carries prebuilt archives for macOS, Linux and Windows:
 
 ```text
-https://github.com/carterlasalle/pixelchangecheck/releases
+https://github.com/carterlasalle/PixelChangeCheck/releases
 ```
 
 Either route still needs the system dependencies above on Linux,
 because the capture path links against them.
 
-### Build from source
-
-```sh
-cargo build --release
-```
-
 ### Share your screen
 
 ```sh
-cargo run --release -- share
+pcc share
 ```
 
 That prints the certificate fingerprint and a complete, copy-pasteable
@@ -103,9 +101,13 @@ viewer command:
 
 ```text
 Certificate fingerprint (sha256): 9f2c...
+Browser viewer: http://192.168.1.20:8080/?token=ABC...
 Direct viewers on 0.0.0.0:5800
   pcc view --connect 192.168.1.20:5800 --token ABC... --pin 9f2c...
 ```
+
+`pcc pair` prints a single line a viewer can open or paste, carrying both
+the token and the pin, so nobody retypes a 64-character hex string.
 
 ### View it
 
@@ -136,46 +138,10 @@ It prints its own token and fingerprint. On the sharer:
 pcc share --relay <relay-ip>:5900 --relay-pin <relay-fingerprint> --token <token>
 ```
 
-On the viewer:
+and on each viewer:
 
 ```sh
-pcc view --relay <relay-ip>:5900 --pin <relay-fingerprint> \
-         --session <code> --token <token>
-```
-
-Both sides make only *outbound* connections, so neither needs a port
-forward.
-
-**No display available?** Use the synthetic test pattern:
-
-```sh
-pcc share --synthetic
-pcc view --connect 127.0.0.1:5800 --token <token> --pin <fingerprint> --no-window
-```
-
-Or run the whole pipeline -- sharer and viewer in one process, over a
-real loopback QUIC connection, checking the result is pixel-exact:
-
-```sh
-cargo run --release --example simple_screen_share
-```
-
-### Browser over TLS
-
-The web port is plaintext unless you give it a real certificate, because a
-self-signed one would only produce a browser warning:
-
-```sh
-pcc share --web-cert cert.pem --web-key key.pem
-```
-
-### Commands
-
-```sh
-cargo run --release -- share --help
-cargo run --release -- view --help
-cargo run --release -- relay --help
-cargo run --release -- diagnose
+pcc view --relay <relay-ip>:5900 --pin <relay-pin> --session <session> --token <token>
 ```
 
 ### Do I need a relay?
@@ -206,14 +172,26 @@ Running one is cheap here specifically: at roughly 570 bytes/frame, a
 session is about 160 MB per viewer per hour. See `deploy/relay/` for a
 free-tier setup.
 
-### Pairing without retyping a fingerprint
+### Browser over TLS
+
+The web port is plaintext unless you give it a real certificate, because a
+self-signed one would only produce a browser warning:
 
 ```sh
-pcc pair --listen 192.168.1.20:5800 --pin <fingerprint>
+pcc share --web-cert cert.pem --web-key key.pem
 ```
 
-prints one URL carrying both the token and the pin, so a viewer never
-retypes or mistypes a 64-character hex string.
+The surface content is encrypted either way. A certificate stops the key
+exchange itself from being readable on the wire.
+
+### Commands
+
+```sh
+pcc share --help
+pcc view --help
+pcc relay --help
+pcc diagnose
+```
 
 ### Watching it work
 
@@ -226,23 +204,24 @@ curl -s 127.0.0.1:9100/metrics
 text on loopback. `RUST_LOG=pcc=debug` narrows the log, and
 `--log-format json` is what you want in a bug report.
 
-### Testing
+## How PCC works
 
-```sh
-cargo test                 # unit, replication, and real-socket end-to-end
-cargo clippy --all-targets # lint
-```
+1. Capture a frame.
+2. Diff it against the **reference** -- the framebuffer an up-to-date
+   viewer holds. The reference advances only over rectangles that actually
+   shipped, so a change too small to send this frame is still there to be
+   sent later.
+3. If much of the screen moved as one displacement, verify it byte for
+   byte and emit a `Copy`; hash agreement alone is never trusted.
+4. Represent each remaining rectangle as a solid `Fill` or an exact,
+   LZ4-compressed patch, whichever is smaller.
+5. If the patches would cost more than a fresh lossless snapshot, send the
+   snapshot instead.
+6. Send nothing but a keep-alive if nothing changed.
 
-### Benchmarks
-
-```sh
-cargo run --release --example benchmarks
-```
-
-`--release` is required: a debug build reports numbers that mean nothing
-for a codec. The benchmark drives the real pipeline end to end
-(detect -> plan -> compress -> serialise -> deserialise -> apply), counts
-allocations during the scan, and compares against a full-frame baseline.
+The viewer applies each transaction atomically against a single
+sequencing authority, and a `Copy` reads the surface as it was *before*
+the transaction -- which is what lets two regions swap in one update.
 
 ## Architecture
 
@@ -279,36 +258,32 @@ Compositor  <--------------- forwards ------------> browser compositor
   forwards framed bytes. It never inspects frame contents, so
   end-to-end encryption can be added without changing it.
 
-## How PCC works
+## Safety model
 
-1. Capture a frame.
-2. Diff it against the **reference** -- the framebuffer an up-to-date
-   viewer holds. The reference advances only over rectangles that actually
-   shipped, so a change too small to send this frame is still there to be
-   sent later.
-3. If much of the screen moved as one displacement, verify it byte for
-   byte and emit a `Copy`; hash agreement alone is never trusted.
-4. Represent each remaining rectangle as a solid `Fill` or an exact,
-   LZ4-compressed patch, whichever is smaller.
-5. If the patches would cost more than a fresh lossless snapshot, send the
-   snapshot instead.
-6. Send nothing but a keep-alive if nothing changed.
+The properties below are asserted by the test suite, not promised in
+prose:
 
-The viewer applies each transaction atomically against a single
-sequencing authority, and a `Copy` reads the surface as it was *before*
-the transaction -- which is what lets two regions swap in one update.
+- **Exactness is measured.** After a snapshot plus its updates, a viewer's
+  pixels are byte-identical to the sender's reference. The suite asserts
+  exactly that, including over a real socket and through the browser's
+  JavaScript compositor.
+- **Malformed input is refused atomically.** A hostile frame length, an
+  impossible geometry, or a truncated payload leaves the framebuffer
+  unchanged and the revision unadvanced.
+- **Revisions and epochs make out-of-order delivery harmless**, and a
+  geometry change starts a new epoch instead of ending the share.
+- **A wrong token is refused before any key agreement**, and a pinned
+  certificate is what the client trusts -- not the CA chain.
+- **A viewer that falls behind gets a fresh snapshot**, never silently
+  dropped patches that later ones depended on.
+- **Each viewer has its own keys.** The sharer's plaintext broadcast
+  exists nowhere; it is sealed per viewer, which is what makes a
+  per-viewer revocation meaningful on a broadcast path.
+- **Budgets are tripwires, not silent truncation.** Every limit failure
+  names the budget, the configured limit, and the observed value.
 
-## Roadmap
-
-`docs/spec/roadmap.md` specifies six workstreams — telemetry, NAT
-traversal, end-to-end encryption, delivery, audio, and one-command setup
-— each with its interface, its definition of done, and what it
-deliberately does not cover. Telemetry, reachability, end-to-end
-encryption and delivery are built; the audio *transport* is not wired
-into the pixel path yet, because audio must never share the compositor's
-atomic-exactness guarantees.
-
-Decisions already taken live in `docs/adr/`.
+The reasoning behind these choices is in `docs/adr/`. The normative
+roadmap is in `docs/spec/roadmap.md`.
 
 ## Known limitations
 
@@ -324,8 +299,34 @@ Decisions already taken live in `docs/adr/`.
 - Motion video is not implemented. The exact-replication path is the
   product; see `docs/adr/0001-lossless-authoritative-surface.md` for why a
   lossy base is not an option, and `docs/adr/` for the rest.
-- There is no input injection, audio, or clipboard sync.
+- There is no input injection or clipboard sync.
+
+## Documentation
+
+| Document | Purpose |
+|---|---|
+| [Architecture decisions](docs/adr/) | Why the surface is lossless, how tokens and pins work, and how sequencing is enforced |
+| [Roadmap](docs/spec/roadmap.md) | The specified workstreams and their definition of done |
+| [Design](DESIGN.md) | Product and design guidance, including what was deliberately not built |
+| [Contributing](CONTRIBUTING.md) | Development workflow, the release process, and the trusted-publisher setup |
+| [Agent guidance](AGENTS.md) | Repository-specific instructions for coding agents |
+| [Changelog](CHANGELOG.md) | What changed in each release |
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes. The short
+version:
+
+```sh
+cargo test                 # unit, replication, and real-socket end-to-end
+cargo clippy --all-targets # lint, must be warning-free
+cargo fmt --all -- --check
+bash scripts/smoke.sh      # end-to-end against the real binaries
+```
+
+`scripts/smoke.sh` is the only check that exercises the CLI end to end.
+`cargo test` passes while the printed pin does not work.
 
 ## License
 
-MIT
+AGPL-3.0-only. See [LICENSE](LICENSE).
