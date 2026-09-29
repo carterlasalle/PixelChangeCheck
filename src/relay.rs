@@ -21,8 +21,8 @@
 //!   tears the whole connection down.
 
 use crate::network::{
-    read_len_prefix, relay_credential, write_encoded, Message, MessageSink, MessageSource,
-    MessageTransport, NetworkConfig, ServerIdentity, SessionToken,
+    read_len_prefix, read_len_prefix_with_slack, relay_credential, write_encoded, Message,
+    MessageSink, MessageSource, MessageTransport, NetworkConfig, ServerIdentity, SessionToken,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -110,12 +110,19 @@ struct Peer {
     /// Monotonic per connection. Cleanup only removes the registration it
     /// created, so a reconnecting host's predecessor cannot delete it.
     gen: u64,
+    /// Relay-assigned viewer id, session-scoped and never reused. 0 is the
+    /// host; viewers start at 1. The host leg carries this inside the
+    /// outer length so every frame routes to exactly one viewer.
+    id: u32,
     tx: mpsc::Sender<Vec<u8>>,
 }
 
 struct Session {
     host: Option<Peer>,
     viewers: Vec<Peer>,
+    /// Next viewer id for this session. Starts at 1, never reused, so a
+    /// replacement host sees the same ids its predecessor saw.
+    next_viewer_id: u32,
     last_seen: Instant,
 }
 
@@ -182,6 +189,68 @@ impl RelayTransport {
     }
 }
 
+/// Bytes of peer id carried inside the outer length on the host leg.
+pub const RELAY_ID_BYTES: usize = 4;
+/// Peer id the relay uses for its own control frames. A host never emits
+/// it; a viewer never sees it.
+pub const RELAY_CONTROL_ID: u32 = 0xFFFF_FFFF;
+/// Relay -> host: a viewer with this id is registered for the session.
+const K_CONTROL_VIEWER_HERE: u8 = 0xEF;
+/// Relay -> host: the viewer with this id disconnected.
+const K_CONTROL_VIEWER_LEFT: u8 = 0xEE;
+
+/// One host relay connection, multiplexed into per-viewer sessions.
+///
+/// `into_fan` splits the TLS stream and spawns a reader task (host-leg
+/// framing -> `(peer_id, envelope)` on `rx`) and a writer task
+/// (`(peer_id, envelope)` on `tx` -> host-leg framing). Both tasks end
+/// when the relay connection dies; `rx` closing is the signal the caller
+/// uses to tear its sessions down.
+pub struct RelayFan {
+    /// `(peer_id, envelope)`. `peer_id == RELAY_CONTROL_ID` means a relay
+    /// control frame: `[kind u8][viewer_id u32 LE]`.
+    pub rx: mpsc::Receiver<(u32, Vec<u8>)>,
+    /// `(peer_id, envelope)`; the writer tags and length-fixes each one.
+    pub tx: mpsc::Sender<(u32, Vec<u8>)>,
+}
+
+/// Read one host-leg frame: `[len][id][env]` or a relay control frame.
+/// Returns `(id, envelope)`; control frames arrive as
+/// `(RELAY_CONTROL_ID, [kind][viewer_id])`. `None` at EOF.
+pub async fn read_host_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<(u32, Vec<u8>)>> {
+    let mut len_buf = [0u8; 4];
+    match reader.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    // The id rides inside the outer length, so the cap needs its 4 bytes.
+    let len = read_len_prefix_with_slack(&len_buf, RELAY_ID_BYTES)?;
+    if len < RELAY_ID_BYTES {
+        anyhow::bail!("host-leg frame too short for a peer id: {len} bytes");
+    }
+    let mut rest = vec![0u8; len];
+    reader.read_exact(&mut rest).await?;
+    let id = u32::from_le_bytes(rest[0..4].try_into().unwrap());
+    Ok(Some((id, rest[4..].to_vec())))
+}
+
+/// Per-viewer queue on the host side of the fan.
+const FAN_SESSION_QUEUE: usize = 64;
+
+/// Tag an envelope for one viewer: `[len+4][id][env]`, fixing the outer
+/// length in the same step. The relay is length-preserving, so the id
+/// must live *inside* the length it forwards.
+fn tag_host_frame(id: u32, envelope: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + envelope.len());
+    out.extend_from_slice(&((envelope.len() + 4) as u32).to_le_bytes());
+    out.extend_from_slice(&id.to_le_bytes());
+    out.extend_from_slice(envelope);
+    out
+}
+
 struct RelaySink {
     stream: tokio::io::WriteHalf<TlsStream<TcpStream>>,
 }
@@ -211,6 +280,53 @@ impl MessageSource for RelaySource {
     /// session needs: the ciphertext is not a `Message` yet.
     async fn recv_raw(&mut self) -> Result<Vec<u8>> {
         Message::read_envelope(&mut self.stream).await
+    }
+}
+
+/// One host relay connection, multiplexed into per-viewer sessions.
+///
+/// The host learns each viewer's relay-assigned id from the tagged frames
+/// (or `ViewerHere` replay) and runs one `serve_viewer` per id, each with
+/// its own E2E keys. That is the whole fix: viewer A's ciphertext is
+/// sealed under A's keys, never fanned to B.
+impl RelayTransport {
+    /// Split the host connection into per-viewer sessions. Host role only:
+    /// the framing differs by role and only the host speaks host-leg.
+    pub fn into_fan(self: Box<Self>) -> RelayFan {
+        let (fan_tx_in, fan_rx_in) = mpsc::channel::<(u32, Vec<u8>)>(FAN_SESSION_QUEUE);
+        let (fan_tx_out, mut fan_rx_out) = mpsc::channel::<(u32, Vec<u8>)>(FAN_SESSION_QUEUE);
+        let (mut read_half, mut write_half) = tokio::io::split(self.stream);
+        // Reader: host-leg framing -> (peer_id, envelope).
+        tokio::spawn(async move {
+            loop {
+                match read_host_frame(&mut read_half).await {
+                    Ok(Some((id, env))) => {
+                        if fan_tx_in.send((id, env)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+        });
+        // Writer: (peer_id, envelope) -> host-leg framing, fixing the
+        // outer length in the same step that inserts the id.
+        tokio::spawn(async move {
+            while let Some((id, env)) = fan_rx_out.recv().await {
+                if write_half
+                    .write_all(&tag_host_frame(id, &env))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        RelayFan {
+            rx: fan_rx_in,
+            tx: fan_tx_out,
+        }
     }
 }
 
@@ -350,31 +466,45 @@ async fn handle_client(
         reg.role, reg.session
     );
 
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(MAX_PEER_QUEUE_MESSAGES);
+    // The host speaks host-leg framing (peer id inside the outer length);
+    // viewers speak the unchanged viewer leg. The role decides the parse.
+    let host_channel = reg.role == RelayRole::Host;
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(if host_channel {
+        MAX_PEER_QUEUE_MESSAGES + MAX_VIEWERS_PER_SESSION
+    } else {
+        MAX_PEER_QUEUE_MESSAGES
+    });
     let gen = next_gen.fetch_add(1, Ordering::Relaxed);
-    let peer_entry = Peer {
-        gen,
-        tx: tx.clone(),
-    };
-
-    {
-        // Look up and register under the lock, then let it go. Nothing
-        // below this point ever holds it across an await.
+    // Viewers learn their id at registration; the host learns it from the
+    // tagged frames (or ViewerHere replay) that follow.
+    let mut my_id: u32 = 0;
+    let mut here_replay: Vec<u32> = Vec::new();
+    let peer_entry = {
         let mut map = sessions.lock().await;
         let session = map.entry(reg.session.clone()).or_insert_with(|| Session {
             host: None,
             viewers: Vec::new(),
+            next_viewer_id: 1,
             last_seen: Instant::now(),
         });
         session.last_seen = Instant::now();
-        match reg.role {
+        let entry = match reg.role {
             RelayRole::Host => {
                 // A new host generation replaces the old one. The previous
                 // host's writer sees its channel close and exits; its
                 // cleanup can no longer clear this registration.
-                if let Some(previous) = session.host.replace(peer_entry.clone()) {
+                let entry = Peer {
+                    gen,
+                    id: 0,
+                    tx: tx.clone(),
+                };
+                if let Some(previous) = session.host.replace(entry.clone()) {
                     drop(previous);
                 }
+                // An idle viewer never speaks, so a host that arrives after
+                // its viewers would never learn their ids without this.
+                here_replay = session.viewers.iter().map(|v| v.id).collect();
+                entry
             }
             RelayRole::Viewer => {
                 if session.viewers.len() >= MAX_VIEWERS_PER_SESSION {
@@ -384,16 +514,31 @@ async fn handle_client(
                         session.viewers.len()
                     );
                 }
-                session.viewers.push(peer_entry.clone());
+                // Ids are a session property, never reused, so a replacement
+                // host sees the same ids its predecessor saw.
+                let id = session.next_viewer_id;
+                session.next_viewer_id = session.next_viewer_id.saturating_add(1).max(1);
+                if id == RELAY_CONTROL_ID {
+                    anyhow::bail!("session '{}' exhausted its viewer ids", reg.session);
+                }
+                my_id = id;
+                let entry = Peer {
+                    gen,
+                    id,
+                    tx: tx.clone(),
+                };
+                session.viewers.push(entry.clone());
+                entry
             }
-        }
+        };
         if map.len() > MAX_SESSIONS {
             anyhow::bail!(
                 "relay is hosting {} sessions (max {MAX_SESSIONS})",
                 map.len()
             );
         }
-    }
+        entry
+    };
     // Everything above this point may still be holding `tx`; from here on,
     // closing the session entry is what ends this peer's writer.
     drop(tx);
@@ -403,46 +548,107 @@ async fn handle_client(
     let mut peer_entry = Some(peer_entry);
     let mut queued_bytes = 0usize;
 
+    // A host that arrives after its viewers learns their ids here: an
+    // idle viewer never speaks, so without the replay the host would never
+    // spawn a session for it.
+    for id in here_replay {
+        let mut frame = Vec::with_capacity(9);
+        frame.extend_from_slice(&9u32.to_le_bytes());
+        frame.extend_from_slice(&RELAY_CONTROL_ID.to_le_bytes());
+        frame.push(K_CONTROL_VIEWER_HERE);
+        frame.extend_from_slice(&id.to_le_bytes());
+        if write_half.write_all(&frame).await.is_err() {
+            break;
+        }
+    }
     loop {
         tokio::select! {
             // Inbound: forward to the counterpart(s).
-            inbound = read_frame(&mut read_half) => {
-                let Some(payload) = inbound? else { break }; // EOF
-                let framed = payload;
+            inbound = async {
+                if host_channel {
+                    // Split `[len][id][env]` into its parts; the unicast
+                    // arm below reattaches the length it forwards.
+                    read_host_frame(&mut read_half).await.map(|o| {
+                        o.map(|(id, env)| {
+                            let mut framed = Vec::with_capacity(8 + env.len());
+                            framed.extend_from_slice(&id.to_le_bytes());
+                            framed.extend_from_slice(&env);
+                            framed
+                        })
+                    })
+                } else {
+                    read_frame(&mut read_half).await
+                }
+            } => {
+                let Some(framed) = inbound? else { break }; // EOF
                 let len = framed.len();
 
-                let mut targets: Vec<mpsc::Sender<Vec<u8>>> = Vec::new();
-                {
-                    let mut map = sessions.lock().await;
-                    if let Some(session) = map.get_mut(&session_id) {
-                        session.last_seen = Instant::now();
-                        match peer_role {
-                            RelayRole::Host => {
-                                targets.extend(session.viewers.iter().map(|v| v.tx.clone()));
-                            }
-                            RelayRole::Viewer => {
-                                if let Some(h) = &session.host {
-                                    targets.push(h.tx.clone());
-                                }
-                            }
-                        }
+                if host_channel {
+                    // `[id][env]` (prefix already consumed): unicast to
+                    // exactly that viewer, reattaching the length in the
+                    // same step. Unknown ids are drop-and-log, never fatal.
+                    let id = u32::from_le_bytes(framed[0..4].try_into().unwrap());
+                    if id == RELAY_CONTROL_ID {
+                        warn!("Relay: host sent a control frame; dropping it");
+                        continue;
                     }
-                }
-                // No lock held. A full queue means that peer is not
-                // draining; dropping the message there would silently
-                // corrupt its view, so it is disconnected instead and
-                // reconnects for a fresh snapshot.
-                let mut congested = false;
-                for tx in targets {
-                    match tx.try_send(framed.clone()) {
+                    let target = {
+                        let map = sessions.lock().await;
+                        map.get(&session_id).and_then(|session| {
+                            session.viewers.iter().find(|v| v.id == id).map(|v| v.tx.clone())
+                        })
+                    };
+                    let Some(target) = target else {
+                        warn!("Relay: frame for unknown viewer id {id}; dropping it");
+                        continue;
+                    };
+                    let env = framed.get(4..).unwrap_or(&[]);
+                    let mut out = Vec::with_capacity(4 + env.len());
+                    out.extend_from_slice(&(env.len() as u32).to_le_bytes());
+                    out.extend_from_slice(env);
+                    match target.try_send(out) {
                         Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => congested = true,
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!("Relay: dropping host: viewer {id} not draining");
+                            break;
+                        }
                         Err(mpsc::error::TrySendError::Closed(_)) => {}
                     }
-                }
-                if congested {
-                    info!("Relay: disconnecting a congested viewer in session '{session_id}'");
-                    break;
+                    // Touch liveness without holding the lock across writes.
+                    if let Some(session) = sessions.lock().await.get_mut(&session_id) {
+                        session.last_seen = Instant::now();
+                    }
+                } else {
+                    // `[len][env]`: tag with this viewer's id and queue to
+                    // the host, fixing the length in the same step. The
+                    // incoming prefix covers the envelope only, so the
+                    // tagged length grows by the 4 id bytes.
+                    let framed = {
+                        let env = framed.get(4..).unwrap_or(&[]);
+                        let mut tagged = Vec::with_capacity(8 + env.len());
+                        tagged.extend_from_slice(
+                            &((env.len() + 4) as u32).to_le_bytes(),
+                        );
+                        tagged.extend_from_slice(&my_id.to_le_bytes());
+                        tagged.extend_from_slice(env);
+                        tagged
+                    };
+                    let target = {
+                        let mut map = sessions.lock().await;
+                        map.get_mut(&session_id).and_then(|session| {
+                            session.last_seen = Instant::now();
+                            session.host.as_ref().map(|h| h.tx.clone())
+                        })
+                    };
+                    let Some(target) = target else { continue };
+                    match target.try_send(framed) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            info!("Relay: disconnecting a congested viewer in session '{session_id}'");
+                            break;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {}
+                    }
                 }
                 queued_bytes += len;
                 if queued_bytes > MAX_PEER_QUEUE_BYTES {
@@ -476,6 +682,29 @@ async fn handle_client(
                         session.viewers.retain(|v| v.gen != entry.gen);
                     }
                 }
+            }
+            // A viewer departure is told to the host so it can drop that
+            // session; without it the host would seal frames into the void.
+            let left_id = if peer_role == RelayRole::Viewer {
+                Some(peer_entry.as_ref().map(|e| e.id).unwrap_or(0))
+            } else {
+                None
+            };
+            if let Some(host) = session.host.as_ref() {
+                if let Some(id) = left_id {
+                    let mut frame = Vec::with_capacity(9);
+                    frame.extend_from_slice(&9u32.to_le_bytes());
+                    frame.extend_from_slice(&RELAY_CONTROL_ID.to_le_bytes());
+                    frame.push(K_CONTROL_VIEWER_LEFT);
+                    frame.extend_from_slice(&id.to_le_bytes());
+                    let _ = host.tx.try_send(frame);
+                }
+            }
+            // A host's keys die with its connection and an established
+            // viewer never re-offers, so viewers left behind would strand.
+            // Bounce them: their connections close and they rejoin fresh.
+            if session.host.is_none() && peer_role == RelayRole::Host {
+                session.viewers.clear();
             }
             if session.host.is_none() && session.viewers.is_empty() {
                 map.remove(&session_id);
@@ -567,6 +796,41 @@ mod tests {
         let mut cursor: &[u8] = &bytes;
         let err = read_frame(&mut cursor).await.unwrap_err().to_string();
         assert!(err.contains("max_message_size"), "unhelpful: {err}");
+    }
+
+    #[tokio::test]
+    async fn host_leg_frames_roundtrip_through_the_relay_transform() {
+        // A viewer-leg frame, tagged for one viewer and stripped back,
+        // must come back byte-identical: the id lives inside the outer
+        // length, and the prefix is fixed in the same step.
+        let envelope = crate::network::Message::KeepAlive { rev: 7 }
+            .encode()
+            .unwrap();
+        let mut viewer_leg = Vec::new();
+        viewer_leg.extend_from_slice(&(envelope.len() as u32).to_le_bytes());
+        viewer_leg.extend_from_slice(&envelope);
+        let tagged = tag_host_frame(3, &envelope);
+        let mut cursor: &[u8] = &tagged;
+        let (id, env) = read_host_frame(&mut cursor)
+            .await
+            .unwrap()
+            .expect("a tagged frame must parse");
+        assert_eq!(id, 3);
+        assert_eq!(env, envelope);
+        // The viewer-bound strip restores the exact viewer-leg bytes.
+        let mut out = Vec::with_capacity(4 + env.len());
+        out.extend_from_slice(&(env.len() as u32).to_le_bytes());
+        out.extend_from_slice(&env);
+        assert_eq!(out, viewer_leg);
+    }
+
+    #[tokio::test]
+    async fn a_host_leg_frame_too_short_for_an_id_is_refused() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let mut cursor: &[u8] = &bytes;
+        let err = read_host_frame(&mut cursor).await.unwrap_err().to_string();
+        assert!(err.contains("peer id"), "unhelpful: {err}");
     }
 
     #[tokio::test]

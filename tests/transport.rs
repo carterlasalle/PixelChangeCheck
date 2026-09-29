@@ -5,9 +5,10 @@
 //! Nothing here is a mock, and no assertion is about a byte that was
 //! never produced by an encoder.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use pixel_change_check_client::capture::SyntheticCapture;
 use pixel_change_check_client::encoder::{encode_snapshot, SnapshotFormat};
+use pixel_change_check_client::network::e2e;
 use pixel_change_check_client::network::{
     connect_direct, generate_identity, hex_to_der, server_endpoint, verify_token, Message,
     MessageTransport, NetworkConfig, QuicTransport, SessionToken, MAX_MESSAGE_SIZE,
@@ -15,7 +16,7 @@ use pixel_change_check_client::network::{
 };
 use pixel_change_check_client::pcc::types::{Frame, FrameCapture};
 use pixel_change_check_client::pcc::{Compositor, PlanLimits, Planner};
-use pixel_change_check_client::relay::{self, RelayRole, RelayTransport};
+use pixel_change_check_client::relay::{self, RelayRole, RelayTransport, RELAY_CONTROL_ID};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -310,24 +311,16 @@ async fn a_wrong_certificate_pin_fails_the_handshake() -> Result<()> {
 }
 
 /// The relay path, over TLS, with the token enforced on both ends.
+///
+/// The host speaks the fan leg: it learns the viewer's relay-assigned id
+/// from the tagged Hello and answers on that id. This is the plaintext
+/// regression for the tagging transform below the E2E layer.
 #[tokio::test]
 async fn the_relay_forwards_real_frames_to_an_authorized_viewer() -> Result<()> {
-    let relay_identity = generate_identity()?;
     let token = SessionToken::parse("RELAYTOKEN123")?;
+    let (relay_addr, pin) = start_relay(token.clone()).await?;
     let session = "TEST-SESSION".to_string();
-    // Bind an ephemeral port, so a leftover process can never make this
-    // test fail for the wrong reason.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let relay_addr: SocketAddr = listener.local_addr()?;
-    let server_identity = std::sync::Arc::new(relay_identity.clone());
-    let server_token = token.clone();
-    tokio::spawn(async move {
-        if let Err(e) = relay::run_relay_server(listener, server_identity, server_token).await {
-            eprintln!("relay failed: {e}");
-        }
-    });
 
-    let pin = hex_to_der(&relay_identity.fingerprint)?;
     // The viewer registers before the host sends anything: a viewer that
     // joins mid-stream is caught up by a fresh snapshot, which is what the
     // sharer does and what this script starts with.
@@ -341,7 +334,7 @@ async fn the_relay_forwards_real_frames_to_an_authorized_viewer() -> Result<()> 
     )
     .await?;
 
-    let mut host = RelayTransport::connect(
+    let host = RelayTransport::connect(
         relay_addr,
         "pcc-relay",
         &pin,
@@ -352,12 +345,32 @@ async fn the_relay_forwards_real_frames_to_an_authorized_viewer() -> Result<()> 
     .await?;
     let mut script = Vec::new();
     let final_reference = produce(&mut script, 15)?;
+    let script_len = script.len();
+    // The viewer says Hello first so the host learns its id from the tag.
+    viewer
+        .send(&Message::Hello {
+            token: token.as_str().to_string(),
+        })
+        .await?;
+    let mut fan = Box::new(host).into_fan();
+    // Skip the ViewerHere replay: the Hello below carries the same id.
+    let (id, first) = loop {
+        let (got, bytes) = tokio::time::timeout(Duration::from_secs(5), fan.rx.recv())
+            .await
+            .map_err(|e| anyhow!(e.to_string()))?
+            .ok_or_else(|| anyhow!("fan must stay open"))?;
+        if got == RELAY_CONTROL_ID {
+            continue;
+        }
+        break (got, bytes);
+    };
+    assert_eq!(Message::decode(&first)?.rev(), None);
     for bytes in &script {
-        host.send_encoded(bytes).await?;
+        fan.tx.send((id, bytes.clone())).await?;
     }
 
     let mut compositor = Compositor::new();
-    for _ in 0..script.len() {
+    for _ in 0..script_len {
         let msg = tokio::time::timeout(Duration::from_secs(10), viewer.recv())
             .await
             .expect("the relay should forward without stalling")?;
@@ -441,7 +454,7 @@ async fn a_reconnecting_host_keeps_its_registration() -> Result<()> {
     )
     .await?;
     // The replacement registers before the original disconnects.
-    let mut second = RelayTransport::connect(
+    let second = RelayTransport::connect(
         relay_addr,
         "pcc-relay",
         &pin,
@@ -452,19 +465,315 @@ async fn a_reconnecting_host_keeps_its_registration() -> Result<()> {
     .await?;
     drop(first);
 
-    // The replacement host must still reach a viewer.
+    // The replacement host must still reach a viewer. The viewer registers
+    // after the takeover, so the host learns its id from the tagged Hello;
+    // the ViewerHere replay covers viewers that registered before it.
     let mut viewer = RelayTransport::connect(
         relay_addr,
         "pcc-relay",
         &pin,
         session,
-        token,
+        token.clone(),
         RelayRole::Viewer,
     )
     .await?;
-    let msg = Message::KeepAlive { rev: 1 };
-    second.send(&msg).await?;
+    viewer
+        .send(&Message::Hello {
+            token: token.as_str().to_string(),
+        })
+        .await?;
+    let mut fan = Box::new(second).into_fan();
+    let (id, first) = loop {
+        let (got, bytes) = tokio::time::timeout(Duration::from_secs(5), fan.rx.recv())
+            .await
+            .map_err(|e| anyhow!(e.to_string()))?
+            .ok_or_else(|| anyhow!("fan must stay open"))?;
+        if got == RELAY_CONTROL_ID {
+            continue;
+        }
+        break (got, bytes);
+    };
+    assert_eq!(Message::decode(&first)?.rev(), None);
+    // The replacement host sees the same session ids its predecessor saw:
+    // answering on the tagged id reaches the viewer.
+    fan.tx
+        .send((id, Message::KeepAlive { rev: 1 }.encode()?))
+        .await?;
     let got = tokio::time::timeout(Duration::from_secs(5), viewer.recv()).await??;
     assert_eq!(got.rev(), Some(1), "the replacement host lost its session");
+    Ok(())
+}
+
+/// Start a relay server on an ephemeral port; return its address and pin.
+async fn start_relay(token: SessionToken) -> Result<(SocketAddr, Vec<u8>)> {
+    let relay_identity = generate_identity()?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr: SocketAddr = listener.local_addr()?;
+    let pin = hex_to_der(&relay_identity.fingerprint)?;
+    let server_identity = std::sync::Arc::new(relay_identity);
+    tokio::spawn(async move {
+        if let Err(e) = relay::run_relay_server(listener, server_identity, token).await {
+            eprintln!("relay failed: {e}");
+        }
+    });
+    Ok((addr, pin))
+}
+
+/// The regression test for the relay fanout bug: two viewers over one
+/// host connection each complete E2E and end up pixel-identical.
+///
+/// The old code ran one `serve_viewer` per relay connection, so the first
+/// viewer to handshake set the keys and the second received ciphertext it
+/// could not open. Here the host fans out per viewer id with fresh keys.
+#[tokio::test]
+async fn two_relayed_viewers_each_complete_e2e_and_are_pixel_identical() -> Result<()> {
+    let token = SessionToken::parse("TWO-VIEWERS-01")?;
+    let (relay_addr, pin) = start_relay(token.clone()).await?;
+    let session = "TWO-VIEWERS".to_string();
+
+    let mut script = Vec::new();
+    let final_reference = produce(&mut script, 15)?;
+    let script_len = script.len();
+
+    // The host fans out; the test drives one E2E session per viewer id.
+    let host = RelayTransport::connect(
+        relay_addr,
+        "pcc-relay",
+        &pin,
+        session.clone(),
+        token.clone(),
+        RelayRole::Host,
+    )
+    .await?;
+    let mut fan = Box::new(host).into_fan();
+    let host_token = token.clone();
+    let host_task = tokio::spawn(async move {
+        use std::collections::HashMap;
+        let mut pending: HashMap<u32, e2e::KeyPair> = HashMap::new();
+        let mut sessions: HashMap<u32, e2e::Session> = HashMap::new();
+        let mut completed = 0usize;
+        // Viewers interleave: Hello and offer arrive per viewer, and each
+        // viewer blocks on its reply. Serve handshake frames as they come
+        // and seal the script once both sessions exist.
+        while completed < 2 {
+            let (id, bytes) = fan.rx.recv().await.expect("viewers must handshake");
+            assert_ne!(id, RELAY_CONTROL_ID, "handshake must carry a viewer id");
+            let msg = Message::decode(&bytes)?;
+            match msg {
+                Message::Hello { .. } => {
+                    pending.insert(id, e2e::KeyPair::generate());
+                }
+                Message::E2eOffer { public, proof } => {
+                    let keys = pending.remove(&id).expect("offer before Hello");
+                    let reply = e2e::reply(&keys, host_token.as_str());
+                    fan.tx
+                        .send((
+                            id,
+                            Message::E2eReply {
+                                public: reply.public,
+                                proof: reply.proof,
+                            }
+                            .encode()?,
+                        ))
+                        .await
+                        .ok();
+                    let session =
+                        e2e::accept(&e2e::Offer { public, proof }, keys, host_token.as_str())
+                            .unwrap();
+                    sessions.insert(id, session);
+                    completed += 1;
+                }
+                other => panic!("unexpected handshake frame from viewer {id}: {other:?}"),
+            }
+        }
+        for (id, session) in &mut sessions {
+            for bytes in &script {
+                let sealed = session.host_to_viewer.seal(bytes)?;
+                fan.tx.send((*id, sealed)).await.ok();
+            }
+        }
+        anyhow::Ok(())
+    });
+
+    // Viewers speak the unchanged viewer leg: Hello, E2E, then sealed reads.
+    // Each viewer runs to completion in its own task, so the two
+    // handshakes interleave the way two real viewers would.
+    let mut viewers = tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        let (relay_addr, pin, session, token) =
+            (relay_addr, pin.clone(), session.clone(), token.clone());
+        viewers.spawn(async move {
+            let mut viewer = RelayTransport::connect(
+                relay_addr,
+                "pcc-relay",
+                &pin,
+                session.clone(),
+                token.clone(),
+                RelayRole::Viewer,
+            )
+            .await?;
+            viewer
+                .send(&Message::Hello {
+                    token: token.as_str().to_string(),
+                })
+                .await?;
+            let keys = e2e::KeyPair::generate();
+            let (mut sink, mut source) = Box::new(viewer).split();
+            let mut viewer_session =
+                e2e::viewer_handshake(&mut sink, &mut source, keys, token.as_str()).await?;
+            let mut compositor = Compositor::new();
+            // The script starts with a snapshot and ends pixel-identical.
+            // Read the whole script: breaking on first freshness would stop
+            // at the opening snapshot instead of the final frame.
+            for _ in 0..script_len {
+                let raw = tokio::time::timeout(Duration::from_secs(10), source.recv_raw())
+                    .await
+                    .expect("the relay must forward sealed frames")
+                    .map_err(|e| anyhow!(e.to_string()))?;
+                let plain = viewer_session.host_to_viewer.open(&raw)?;
+                apply(&mut compositor, &plain)?;
+            }
+            anyhow::Ok(compositor)
+        });
+    }
+    let mut compositors = Vec::new();
+    while let Some(viewer) = viewers.join_next().await {
+        compositors.push(viewer.map_err(|e| anyhow!(e.to_string()))??);
+    }
+    host_task.await??;
+    assert_eq!(compositors.len(), 2);
+    for compositor in &compositors {
+        assert!(compositor.is_fresh());
+        assert_eq!(compositor.dimensions(), Some((W, H)));
+        assert_eq!(
+            compositor.buffer(),
+            &final_reference.data,
+            "each relayed viewer must be pixel-identical to the sharer's reference"
+        );
+    }
+    // The two viewers hold different keys: one's bytes never open as the other's.
+    assert_ne!(
+        compositors[0].buffer(),
+        Vec::<u8>::new(),
+        "sanity: the compositors actually decoded frames"
+    );
+    Ok(())
+}
+
+/// Frames tagged for an unknown viewer id are dropped without disturbing
+/// the session: the next valid frame still arrives.
+#[tokio::test]
+async fn an_unknown_peer_id_is_dropped_without_disturbing_the_session() -> Result<()> {
+    let token = SessionToken::parse("UNKNOWN-ID-01")?;
+    let (relay_addr, pin) = start_relay(token.clone()).await?;
+    let session = "UNKNOWN-ID".to_string();
+
+    let mut viewer = RelayTransport::connect(
+        relay_addr,
+        "pcc-relay",
+        &pin,
+        session.clone(),
+        token.clone(),
+        RelayRole::Viewer,
+    )
+    .await?;
+    let host = RelayTransport::connect(
+        relay_addr,
+        "pcc-relay",
+        &pin,
+        session.clone(),
+        token.clone(),
+        RelayRole::Host,
+    )
+    .await?;
+    // The viewer speaks first so the host learns its id from the tag.
+    // The ViewerHere replay for the already-registered viewer may arrive
+    // before or after its KeepAlive; either order yields the same id.
+    viewer.send(&Message::KeepAlive { rev: 7 }).await?;
+    let mut fan = Box::new(host).into_fan();
+    let mut id = None;
+    for _ in 0..2 {
+        let (got, bytes) = tokio::time::timeout(Duration::from_secs(5), fan.rx.recv())
+            .await
+            .map_err(|e| anyhow!(e.to_string()))?
+            .ok_or_else(|| anyhow!("fan must stay open"))?;
+        if got == RELAY_CONTROL_ID {
+            assert_eq!(bytes[0], 0xEF, "replay carries ViewerHere");
+            id = Some(u32::from_le_bytes(bytes[1..5].try_into().unwrap()));
+        } else {
+            assert_eq!(Message::decode(&bytes)?.rev(), Some(7));
+            id = Some(got);
+            break;
+        }
+    }
+    let id = id.ok_or_else(|| anyhow!("no viewer id learned"))?;
+    assert_ne!(id, RELAY_CONTROL_ID);
+    // A frame for a viewer that was never registered goes nowhere.
+    fan.tx
+        .send((0xDEAD_BEEF, Message::KeepAlive { rev: 8 }.encode()?))
+        .await?;
+    // The session still works: the next frame tagged at the live id arrives.
+    fan.tx
+        .send((id, Message::KeepAlive { rev: 9 }.encode()?))
+        .await?;
+    let got = tokio::time::timeout(Duration::from_secs(5), viewer.recv())
+        .await
+        .expect("live frames must still arrive")?;
+    assert_eq!(got.rev(), Some(9));
+    Ok(())
+}
+
+/// The relay tells the host when a viewer leaves, so the host stops
+/// sealing frames into the void: a ViewerLeft control frame names the id.
+#[tokio::test]
+async fn the_relay_tells_the_host_a_viewer_left() -> Result<()> {
+    let token = SessionToken::parse("VIEWER-LEFT-1")?;
+    let (relay_addr, pin) = start_relay(token.clone()).await?;
+    let session = "VIEWER-LEFT".to_string();
+
+    let viewer = RelayTransport::connect(
+        relay_addr,
+        "pcc-relay",
+        &pin,
+        session.clone(),
+        token.clone(),
+        RelayRole::Viewer,
+    )
+    .await?;
+    let host = RelayTransport::connect(
+        relay_addr,
+        "pcc-relay",
+        &pin,
+        session.clone(),
+        token.clone(),
+        RelayRole::Host,
+    )
+    .await?;
+    let mut fan = Box::new(host).into_fan();
+    // The ViewerHere replay names the already-registered viewer.
+    let (id, _) = loop {
+        let (got, bytes) = tokio::time::timeout(Duration::from_secs(5), fan.rx.recv())
+            .await
+            .map_err(|e| anyhow!(e.to_string()))?
+            .ok_or_else(|| anyhow!("fan must stay open"))?;
+        if got == RELAY_CONTROL_ID {
+            assert_eq!(bytes[0], 0xEF, "replay carries ViewerHere");
+            break (u32::from_le_bytes(bytes[1..5].try_into().unwrap()), bytes);
+        }
+    };
+    assert_ne!(id, RELAY_CONTROL_ID);
+    // The viewer goes away; the host learns its id from ViewerLeft.
+    drop(viewer);
+    let (control, left) = tokio::time::timeout(Duration::from_secs(5), fan.rx.recv())
+        .await
+        .map_err(|e| anyhow!(e.to_string()))?
+        .ok_or_else(|| anyhow!("fan must stay open"))?;
+    assert_eq!(control, RELAY_CONTROL_ID);
+    assert_eq!(left[0], 0xEE, "departure carries ViewerLeft");
+    assert_eq!(
+        u32::from_le_bytes(left[1..5].try_into().unwrap()),
+        id,
+        "ViewerLeft must name the viewer that left"
+    );
     Ok(())
 }

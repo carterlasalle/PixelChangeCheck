@@ -378,8 +378,17 @@ pub fn peek_rev(envelope: &[u8]) -> Option<Rev> {
 }
 
 pub fn read_len_prefix(len_buf: &[u8; 4]) -> Result<usize> {
+    read_len_prefix_with_slack(len_buf, 0)
+}
+
+/// The same cap with room for `slack` extra bytes inside the outer length.
+/// The relay's host leg carries a 4-byte peer id on top of the largest
+/// envelope a viewer may send, so it reads with slack 4. Every other
+/// caller stays at slack 0.
+pub fn read_len_prefix_with_slack(len_buf: &[u8; 4], slack: usize) -> Result<usize> {
     let len = u32::from_le_bytes(*len_buf);
-    if len > MAX_MESSAGE_SIZE + 5 {
+    let cap = MAX_MESSAGE_SIZE + 5 + slack as u32;
+    if len > cap {
         anyhow::bail!(
             "Framed message too large: {len} bytes (max_message_size={MAX_MESSAGE_SIZE})"
         );
@@ -722,6 +731,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("max_message_size"), "unhelpful: {err}");
+    }
+
+    #[test]
+    fn slack_covers_only_the_peer_id_overhead() {
+        // The largest envelope plus the 4-byte peer id parses with slack 4
+        // and is rejected with slack 0; the plain envelope parses either way.
+        let at_cap = (MAX_MESSAGE_SIZE + 5).to_le_bytes();
+        assert!(read_len_prefix(&at_cap).is_ok());
+        let with_id = (MAX_MESSAGE_SIZE + 9).to_le_bytes();
+        assert!(read_len_prefix(&with_id).is_err());
+        assert!(read_len_prefix_with_slack(&with_id, 4).is_ok());
+        assert!(read_len_prefix_with_slack(&at_cap, 4).is_ok());
     }
 
     #[test]

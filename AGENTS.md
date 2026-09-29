@@ -2835,14 +2835,15 @@ must be changed together.
   found the hard way: an attempt to give each relayed frame a peer id
   regressed two passing relay tests, and the reason is one line of
   `read_frame`.
-- **The relay only ever works for one viewer, and that is a real bug.**
-  `serve_viewer` is called once for the whole relay connection, so the
-  first viewer to complete a handshake sets the keys and every other
-  viewer receives ciphertext it cannot open. The host does not even see
-  who sent what. Fixing it means one logical session per viewer over
-  that connection; the seam is `MessageTransport`, and
-  `RelayTransport::into_fan` is the place to hand the connection over.
-  Read `read_frame` before touching the wire.
+- **The relay fans out to one logical session per viewer.**
+  `serve_relay_fan` in `app/share.rs` routes tagged frames by peer id and
+  spawns one `serve_viewer` per viewer, each with its own E2E keys, over
+  one host connection via `RelayTransport::into_fan`. The host leg carries
+  the relay-assigned id *inside* the outer length (`read_host_frame`),
+  with the prefix fixed in the same step -- the earlier attempt failed
+  exactly because it prepended the id without fixing the prefix. Unknown
+  ids are drop-and-log; `ViewerLeft` tears the session down; a dead host
+  bounces its viewers so they rejoin fresh.
 - `p256` is pinned to 0.13. Version 0.14 moved `diffie_hellman` and
   `to_encoded_point` off the types this code calls them on.
 - Publishing is `git tag v<version> && git push --tags`. The tag drives

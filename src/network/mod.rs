@@ -11,8 +11,9 @@ pub use config::{
     ServerIdentity, SessionToken, MAX_AUDIO_DATAGRAM,
 };
 pub use protocol::{
-    peek_rev, read_len_prefix, Cursor, Epoch, Message, Rev, MAX_MESSAGE_SIZE, MAX_OPS_PER_UPDATE,
-    MAX_SNAPSHOT_CHUNKS, MAX_TOKEN_LEN, PROTOCOL_VERSION, SNAPSHOT_CHUNK_BYTES,
+    peek_rev, read_len_prefix, read_len_prefix_with_slack, Cursor, Epoch, Message, Rev,
+    MAX_MESSAGE_SIZE, MAX_OPS_PER_UPDATE, MAX_SNAPSHOT_CHUNKS, MAX_TOKEN_LEN, PROTOCOL_VERSION,
+    SNAPSHOT_CHUNK_BYTES,
 };
 pub use resilience::{NetworkResilience, ResilienceConfig};
 pub use transport::{

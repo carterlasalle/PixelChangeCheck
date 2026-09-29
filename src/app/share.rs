@@ -19,13 +19,13 @@ use crate::audio::transport::EncodedFrame as EncodedAudio;
 use crate::capture::CaptureSource;
 use crate::encoder::SurfaceSnapshot;
 use crate::network::{
-    verify_token, Epoch, Message, MessageSink, MessageTransport, NetworkConfig, Rev, SessionToken,
-    SNAPSHOT_CHUNK_BYTES,
+    verify_token, Epoch, Message, MessageSink, MessageSource, MessageTransport, NetworkConfig, Rev,
+    SessionToken, SNAPSHOT_CHUNK_BYTES,
 };
 use crate::pcc::types::{rgb_len, Frame};
 use crate::pcc::{PlanLimits, Planner};
 use crate::reach::Rung;
-use crate::relay::{generate_session_code, RelayRole, RelayTransport};
+use crate::relay::{generate_session_code, RelayFan, RelayRole, RelayTransport, RELAY_CONTROL_ID};
 use crate::server::renderer::{web, SharedSurface};
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -552,17 +552,15 @@ fn spawn_relay_loop(
             {
                 Ok(transport) => {
                     info!("Relay connected (session '{session}')");
-                    serve_viewer(
-                        Box::new(transport),
+                    serve_relay_fan(
+                        transport,
                         addr,
-                        "relay",
                         tx.clone(),
                         published.clone(),
                         token.clone(),
                         viewers.clone(),
                         next_id.clone(),
                         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
-                        None,
                         metrics.clone(),
                     )
                     .await;
@@ -574,6 +572,231 @@ fn spawn_relay_loop(
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
+}
+
+// ------------------------------------------------- relay fan demux
+//
+// One host relay connection carries one logical session per viewer. The
+// relay tags each viewer frame with its id; the demux below routes by id
+// and spawns one `serve_viewer` per viewer, each with its own E2E keys.
+// Without this the first viewer to handshake would set the keys and every
+// other viewer would receive ciphertext it cannot open.
+
+/// One viewer's logical transport over the shared relay connection.
+struct FanSession {
+    id: u32,
+    tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl FanSession {
+    fn new(
+        id: u32,
+        tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
+        rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> Self {
+        Self { id, tx, rx }
+    }
+}
+
+struct FanSink {
+    id: u32,
+    tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
+}
+
+struct FanSource {
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+#[async_trait::async_trait]
+impl MessageSink for FanSink {
+    async fn send(&mut self, msg: &Message) -> anyhow::Result<()> {
+        self.send_encoded(&msg.encode()?).await
+    }
+
+    async fn send_encoded(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.tx
+            .send((self.id, bytes.to_vec()))
+            .await
+            .map_err(|_| anyhow::anyhow!("relay fan is gone"))?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageSource for FanSource {
+    async fn recv(&mut self) -> anyhow::Result<Message> {
+        let bytes = self
+            .rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("relay fan session closed"))?;
+        Ok(Message::decode(&bytes)?)
+    }
+
+    async fn recv_raw(&mut self) -> anyhow::Result<Vec<u8>> {
+        self.rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("relay fan session closed"))
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageTransport for FanSession {
+    async fn send(&mut self, msg: &Message) -> anyhow::Result<()> {
+        self.send_encoded(&msg.encode()?).await
+    }
+
+    async fn send_encoded(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.tx
+            .send((self.id, bytes.to_vec()))
+            .await
+            .map_err(|_| anyhow::anyhow!("relay fan is gone"))?;
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> anyhow::Result<Message> {
+        let bytes = self
+            .rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("relay fan session closed"))?;
+        Ok(Message::decode(&bytes)?)
+    }
+
+    fn split(self: Box<Self>) -> (Box<dyn MessageSink>, Box<dyn MessageSource>) {
+        let FanSession { id, tx, rx } = *self;
+        (Box::new(FanSink { id, tx }), Box::new(FanSource { rx }))
+    }
+}
+
+/// Per-viewer queue between the demux and one `serve_viewer`.
+const FAN_SESSION_QUEUE: usize = 64;
+
+/// Run one relay connection as a fan: route tagged frames by peer id and
+/// spawn one `serve_viewer` per viewer. Returns when the connection dies,
+/// after tearing every session down.
+#[allow(clippy::too_many_arguments)]
+async fn serve_relay_fan(
+    transport: RelayTransport,
+    peer: SocketAddr,
+    tx: EncodedBroadcast,
+    published: Shared,
+    token: SessionToken,
+    viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
+    next_viewer_id: Arc<AtomicU64>,
+    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    metrics: crate::telemetry::SharedMetrics,
+) {
+    let fan: RelayFan = Box::new(transport).into_fan();
+    let mut fan = fan;
+    // One task owns the session map, so no lock is needed. Session death
+    // is visible through `exit_rx`, so a dead session's queue cannot fill
+    // and stall the demux.
+    let mut sessions: HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>> = HashMap::new();
+    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::channel::<u32>(64);
+    loop {
+        tokio::select! {
+            frame = fan.rx.recv() => {
+                let Some((id, bytes)) = frame else { break }; // relay connection lost
+                if id == RELAY_CONTROL_ID {
+                    // `[kind][viewer_id]`: ViewerLeft tears the session
+                    // down; ViewerHere spawns one for an idle viewer the
+                    // host would otherwise never hear from.
+                    if bytes.len() == 5 {
+                        let viewer = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+                        if bytes[0] == 0xEE {
+                            sessions.remove(&viewer);
+                        } else if bytes[0] == 0xEF && !sessions.contains_key(&viewer) {
+                            sessions.insert(
+                                viewer,
+                                spawn_fan_session(
+                                    viewer, peer, &fan.tx, &tx, &published, &token,
+                                    &viewers, &next_viewer_id, &audio, &metrics,
+                                    &exit_tx,
+                                ),
+                            );
+                        }
+                    }
+                    continue;
+                }
+                // Implicit join: the first frame from an unknown id spawns
+                // the session. A non-Hello first frame is rejected by
+                // `serve_viewer`'s existing handshake path.
+                let send = match sessions.get(&id) {
+                    Some(send) => send.clone(),
+                    None => {
+                        let send = spawn_fan_session(
+                            id, peer, &fan.tx, &tx, &published, &token,
+                            &viewers, &next_viewer_id, &audio, &metrics,
+                            &exit_tx,
+                        );
+                        sessions.insert(id, send.clone());
+                        send
+                    }
+                };
+                // Awaited: backpressure, not a silent drop. A dead session
+                // surfaces its error here and is reaped below.
+                if send.send(bytes).await.is_err() {
+                    sessions.remove(&id);
+                }
+            }
+            exited = exit_rx.recv() => {
+                let Some(id) = exited else { break };
+                sessions.remove(&id);
+            }
+        }
+    }
+    // Connection lost: drop every session sender so each `serve_viewer`
+    // exits through its closed source.
+    sessions.clear();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_fan_session(
+    id: u32,
+    peer: SocketAddr,
+    fan_tx: &tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
+    tx: &EncodedBroadcast,
+    published: &Shared,
+    token: &SessionToken,
+    viewers: &Arc<Mutex<HashMap<u64, ViewerStats>>>,
+    next_viewer_id: &Arc<AtomicU64>,
+    audio: &Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    metrics: &crate::telemetry::SharedMetrics,
+    exit_tx: &tokio::sync::mpsc::Sender<u32>,
+) -> tokio::sync::mpsc::Sender<Vec<u8>> {
+    let (session_tx, session_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(FAN_SESSION_QUEUE);
+    let (fan_tx, tx, published, token, viewers, next_id, audio, metrics, exit_tx) = (
+        fan_tx.clone(),
+        tx.clone(),
+        published.clone(),
+        token.clone(),
+        viewers.clone(),
+        next_viewer_id.clone(),
+        audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
+        metrics.clone(),
+        exit_tx.clone(),
+    );
+    tokio::spawn(async move {
+        serve_viewer(
+            Box::new(FanSession::new(id, fan_tx, session_rx)),
+            peer,
+            &format!("relay id={id}"),
+            tx,
+            published,
+            token,
+            viewers,
+            next_id,
+            audio,
+            None,
+            metrics,
+        )
+        .await;
+        let _ = exit_tx.send(id).await;
+    });
+    session_tx
 }
 
 // ------------------------------------------------------------ one viewer
