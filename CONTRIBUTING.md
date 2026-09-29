@@ -71,15 +71,29 @@ cargo build --release && bash scripts/smoke.sh   # against the real binaries
 git tag v0.1.0 && git push origin master --tags
 ```
 
-Publishing uses OIDC, so there is no crates.io API token in this
-repository. **One-time setup**, on crates.io under your account, for
-`pixel-change-check-client`:
+`0.1.0` was published by hand, because crates.io cannot attach a
+trusted publisher to a crate that does not exist yet. Every release after
+that is tokenless.
 
-    Trusted Publisher -> GitHub -> owner `carterlasalle`,
-    repo `pixelchangecheck`, workflow `release.yml`
+For the tokenless path, **one-time setup** on the crate's own page (not
+account settings -- crates.io binds the mapping per crate):
 
-Without that the publish job fails at the auth step. Nothing else in the
-release depends on it.
+    crates.io -> pixel-change-check-client -> Settings ->
+    Trusted Publishing -> Add:
+      provider            GitHub Actions
+      repository owner    carterlasalle
+      repository name     pixelchangecheck
+      workflow filename   release.yml
+      environment         blank
+
+The filename is `release.yml`, not `.github/workflows/release.yml`:
+crates.io matches it against GitHub's OIDC claims, which carry the bare
+filename.
+
+`rust-lang/crates-io-auth-action` sets the token as a step **output**, it
+does not export `CARGO_REGISTRY_TOKEN` for you, so the publish step
+passes it through explicitly. Its `post` step revokes the temporary token
+when the job ends.
 
 A crates.io version, once claimed, can never be reused -- not after a
 yank, not after a deletion. If a release is broken, publish `0.1.1` and

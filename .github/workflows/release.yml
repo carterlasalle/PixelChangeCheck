@@ -150,5 +150,11 @@ jobs:
             exit 1
           fi
           echo "version $version is free"
+      # The action sets the token as a step *output*; it does not export
+      # CARGO_REGISTRY_TOKEN into the environment. Without this the
+      # publish step fails with "no token found".
       - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
       - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
