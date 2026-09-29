@@ -9,7 +9,7 @@
 // The wire format is the same explicit little-endian one the native
 // viewer parses. Nothing about the stream is re-encoded for the browser.
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 5;
 const MAX_FRAME_BYTES = 100_000_000;
 
 const OP_RECT = 0x01;
@@ -27,6 +27,8 @@ const K_QUALITY = 0x08;
 const K_ERROR = 0x09;
 const K_BYE = 0x0A;
 const K_SNAPSHOT_COMMIT = 0x0B;
+const K_BROWSER_OFFER = 0x22;
+const K_BROWSER_REPLY = 0x23;
 
 const FMT_RAW = 0;
 const FMT_LZ4 = 1;
@@ -37,6 +39,135 @@ class Rejected {
 }
 
 class Reject extends Error {}
+
+// ------------------------------------------------------------ webcrypto
+//
+// The native client uses X25519 and ChaCha20-Poly1305. A browser cannot:
+// `crypto.subtle` has no X25519 in the versions most people run, but
+// ECDH on P-256, HKDF and AES-GCM are everywhere. So the browser gets a
+// construction built only from primitives it actually has. The protocol
+// shape is identical -- ephemeral key exchange, proof of holding the
+// token, then every frame sealed -- and it must agree byte for byte with
+// `src/network/web_e2e.rs`.
+
+const enc = new TextEncoder();
+
+// SHA-256 over the literal prefix, the word "proof", the uncompressed
+// point, then the token. Identical to `proof_of` on the Rust side.
+const PROOF_PREFIX = enc.encode('pcc/web/v1');
+const PROOF_WORD = enc.encode('proof');
+
+async function proofOfKey(publicKey) {
+  return proofOfBytes(new Uint8Array(await crypto.subtle.exportKey('raw', publicKey)));
+}
+
+async function proofOfBytes(raw) {
+  const data = new Uint8Array(PROOF_PREFIX.length + PROOF_WORD.length + raw.length);
+  data.set(PROOF_PREFIX, 0);
+  data.set(PROOF_WORD, PROOF_PREFIX.length);
+  data.set(raw, PROOF_PREFIX.length + PROOF_WORD.length);
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+}
+
+function constantTimeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a[i] ^ b[i];
+  return d === 0;
+}
+
+// HKDF-Extract with a fixed salt, then one Expand per direction, so the
+// two never share a key even though they share a secret.
+async function deriveKeys(sharedSecret) {
+  const material = await crypto.subtle.importKey('raw', sharedSecret, 'HKDF', false, ['deriveBits']);
+  const one = async (label) => {
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'HKDF', hash: 'SHA-256', salt: PROOF_PREFIX, info: enc.encode(label) },
+      material, 256,
+    );
+    return crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  };
+  const o2r = await one('o2r');
+  const r2o = await one('r2o');
+  return { o2r, r2o };
+}
+
+// The counter travels in the clear and is also the AAD, so a proxy
+// rewriting it fails the tag.
+function nonceFor(counter) {
+  const iv = new Uint8Array(12);
+  new DataView(iv.buffer).setBigUint64(4, BigInt(counter), false);
+  const aad = new Uint8Array(8);
+  new DataView(aad.buffer).setBigUint64(0, BigInt(counter), true);
+  return { iv, aad };
+}
+
+class SealedCodec {
+  constructor() {
+    this.keys = null;
+    this.mode = null;
+    this.pair = null;
+    this.sendCounter = 0;
+    this.receiveCounter = 0;
+  }
+
+  get ready() { return this.keys !== null; }
+
+  // --- viewer side: offer, then complete with the sharer's reply.
+  async makeOffer(token) {
+    this.pair = await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'],
+    );
+    this.token = token;
+    return {
+      public: new Uint8Array(await crypto.subtle.exportKey('raw', this.pair.publicKey)),
+      proof: await proofOfKey(this.pair.publicKey),
+    };
+  }
+
+  async finishHandshake(offer, reply) {
+    const theirs = await crypto.subtle.importKey(
+      'raw', reply.public, { name: 'ECDH', namedCurve: 'P-256' }, false, [],
+    );
+    const shared = await crypto.subtle.deriveBits(
+      { name: 'ECDH', public: theirs }, this.pair.privateKey, 256,
+    );
+    this.keys = await deriveKeys(shared);
+    this.mode = 'viewer';
+  }
+
+  // --- sharer side, used by the Rust server to check a browser's proof.
+  async checkProof(offer) {
+    return constantTimeEqual(await proofOfBytes(offer.public), offer.proof);
+  }
+
+  async sealBytes(bytes) {
+    if (!this.keys) throw new Error('not sealed yet');
+    const counter = this.sendCounter++;
+    const { iv, aad } = nonceFor(counter);
+    const key = this.mode === 'sharer' ? this.keys.r2o : this.keys.o2r;
+    const ct = new Uint8Array(await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, bytes,
+    ));
+    const out = new Uint8Array(4 + ct.length);
+    new DataView(out.buffer).setUint32(0, counter, true);
+    out.set(ct, 4);
+    return out;
+  }
+
+  async openBytes(frame) {
+    if (!this.keys) throw new Error('not sealed yet');
+    const counter = new DataView(frame.buffer, frame.byteOffset, 4).getUint32(0, true);
+    if (counter < this.receiveCounter) throw new Reject('sealed frame is a replay');
+    this.receiveCounter = counter + 1;
+    const { iv, aad } = nonceFor(counter);
+    const key = this.mode === 'sharer' ? this.keys.o2r : this.keys.r2o;
+    const plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, frame.slice(4),
+    );
+    return new Uint8Array(plain);
+  }
+}
 
 // ---------------------------------------------------------------- reader
 
@@ -299,6 +430,7 @@ function parseMessage(bytes) {
       return {
         kind,
         rev: r.u64(),
+        ptsUs: r.u64(),
         epoch: r.u32(),
         width: r.u32(),
         height: r.u32(),
@@ -313,9 +445,10 @@ function parseMessage(bytes) {
       return { kind, rev, index, data: r.take(n).slice() };
     }
     case K_SNAPSHOT_COMMIT:
-      return { kind, rev: r.u64(), epoch: r.u32() };
+      return { kind, rev: r.u64(), ptsUs: r.u64(), epoch: r.u32() };
     case K_PARTIAL_UPDATE: {
       const rev = r.u64();
+      const ptsUs = r.u64();
       const epoch = r.u32();
       const count = r.u32();
       if (count > 8192) throw new Reject(`too many ops in one update: ${count}`);
@@ -337,7 +470,7 @@ function parseMessage(bytes) {
           throw new Reject(`unknown op kind: 0x${opKind.toString(16)}`);
         }
       }
-      return { kind, rev, epoch, ops };
+      return { kind, rev, ptsUs, epoch, ops };
     }
     case K_KEEP_ALIVE:
       return { kind, rev: r.u64() };
@@ -413,16 +546,44 @@ class Session {
     if (el) el.textContent = text;
   }
 
-  connect() {
+  async connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(this.token)}`;
     const socket = new WebSocket(url);
     socket.binaryType = 'arraybuffer';
     this.socket = socket;
+    this.codec = new SealedCodec();
 
-    socket.onopen = () => {
-      this.status('connected');
-      socket.send(encodeHello(this.token));
+    socket.onopen = async () => {
+      this.status('handshaking');
+      try {
+        // The offer goes before anything else, and nothing else flows
+        // until the session exists: there is no plaintext fallback,
+        // because serving one quietly would defeat the point.
+        const offer = await this.codec.makeOffer(this.token);
+        const framed = new Uint8Array(1 + offer.public.length + offer.proof.length);
+        framed[0] = K_BROWSER_OFFER;
+        framed.set(offer.public, 1);
+        framed.set(offer.proof, 1 + offer.public.length);
+        socket.send(framed);
+
+        const replyFrame = await this.nextBinary();
+        const cur = new Reader(new DataView(
+          replyFrame.buffer, replyFrame.byteOffset, replyFrame.byteLength), 0);
+        if (cur.u8() !== K_BROWSER_REPLY) throw new Error('expected an encryption reply');
+        const theirPublic = cur.take(65).slice();
+        const theirProof = cur.take(32).slice();
+        await this.codec.finishHandshake(
+          { public: offer.public, proof: offer.proof },
+          { public: theirPublic, proof: theirProof },
+        );
+        this.status('sealed');
+        // The sharer sends its snapshot as soon as the session exists, so
+        // there is nothing to request; wait for the first frame.
+      } catch (e) {
+        this.status(`handshake failed: ${e.message}`);
+        socket.close();
+      }
     };
     // onerror is called with an Event, not a message; the detail lives on
     // the event, so read it from there rather than treating the argument
@@ -434,7 +595,27 @@ class Session {
       this.status(`disconnected (code ${event.code}); retrying in 2s`);
       setTimeout(() => this.connect(), 2000);
     };
-    socket.onmessage = (event) => this.onMessage(new Uint8Array(event.data));
+    socket.onmessage = async (event) => {
+      try {
+        const sealed = new Uint8Array(event.data);
+        await this.onMessage(await this.codec.openBytes(sealed));
+      } catch (e) {
+        this.status(`could not open a frame: ${e.message}`);
+        socket.close();
+      }
+    };
+  }
+
+  // Resolve with the next binary frame the sharer sends.
+  nextBinary() {
+    return new Promise((resolve, reject) => {
+      const onMessage = (event) => {
+        this.socket.removeEventListener('message', onMessage);
+        resolve(new Uint8Array(event.data));
+      };
+      this.socket.addEventListener('message', onMessage);
+      this.socket.addEventListener('close', () => reject(new Error('closed')), { once: true });
+    });
   }
 
   sendAck(rev) {
@@ -462,10 +643,12 @@ class Session {
           break;
         case K_SNAPSHOT_COMMIT:
           await c.commitSnapshot(msg.rev, msg.epoch);
+          this.lastPtsUs = msg.ptsUs;
           this.status(`${c.width}x${c.height} rev ${c.rev}`);
           break;
         case K_PARTIAL_UPDATE:
           c.applyOps(msg.rev, msg.epoch, msg.ops);
+          this.lastPtsUs = msg.ptsUs;
           break;
         case K_KEEP_ALIVE:
         case K_QUALITY:

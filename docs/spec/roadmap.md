@@ -33,7 +33,7 @@ Six workstreams, deliberately ordered by what unblocks the rest:
 
 Two honest gaps. The reachability ladder tests the IPv6 and STUN rungs
 but has no UPnP or ICE implementation. The audio module is built and
-tested but not transported, and the browser path is not sealed.
+tested and now travels on its own QUIC stream.
 
 **Telemetry first is not a preference.** Sync is the one workstream that
 cannot be built by eye: without per-frame age and per-viewer latency
@@ -222,10 +222,14 @@ dimensions and no session code; the round-trip cost is measured and
 acceptable; and a token mismatch fails the handshake with the same error
 as today.
 
-**Remaining: the browser path.** The native viewer and the relay path
-are sealed end to end. A browser has no per-browser key exchange yet; it
-would need WebCrypto in the handshake, which is a separate piece of work
-rather than a gap in this one.
+**The browser path is sealed too.** It is a per-browser key exchange, so
+each viewer has its own keys and the plaintext broadcast exists nowhere.
+`crypto.subtle` has no X25519 in the versions most people run, so the
+browser uses ECDH on P-256 with HKDF and AES-GCM where the native client
+uses X25519 with ChaCha20-Poly1305. Both sides implement the same proof of
+token possession, the same labelled key schedule and the same
+counter-as-nonce-and-AAD rule, and the two implementations are checked
+against a shared fixed vector so they cannot drift apart silently.
 
 ### Risks
 

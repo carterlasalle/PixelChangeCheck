@@ -2,9 +2,58 @@
 
 ## Unreleased
 
-The wire protocol is version 4. Viewers and sharers must be the same
+The wire protocol is version 5. Viewers and sharers must be the same
 build; a version mismatch is refused with a clear message rather than
-mis-parsed. Version 4 adds the end-to-end encryption handshake.
+mis-parsed. Version 4 added the end-to-end encryption handshake; version
+5 adds `pts_us` to every visual message, so a viewer can schedule a frame
+against the audio clock.
+
+### Browser encryption
+
+- The browser viewer is sealed end to end. There is no plaintext
+  fallback: a browser that cannot complete the handshake is disconnected
+  and told why, because quietly serving it in the clear would defeat the
+  point. Every visual message after the handshake is encrypted, and so is
+  every control message the browser sends.
+- A browser has its own keys. The sharer's plaintext broadcast exists
+  nowhere: it is sealed per viewer, which is what makes a per-viewer
+  revocation meaningful on a broadcast path.
+- A wrong token is refused at the handshake rather than producing a
+  session that decrypts to garbage. The proof is a hash over the peer's
+  public key, the token and a domain-separating prefix, computed
+  identically in Rust and in JavaScript.
+- `crypto.subtle` has no X25519 in the browsers most people run, so the
+  browser uses ECDH P-256 with HKDF and AES-GCM where the native client
+  uses X25519 with ChaCha20-Poly1305. The protocol shape is identical.
+  See `docs/adr/0005-browser-key-exchange-p256.md`.
+- The two implementations are checked against a shared fixed vector, so
+  a key schedule that silently diverges fails the build rather than
+  failing every handshake in production with no useful error.
+
+### Reachability
+
+- NAT-PMP port mapping (RFC 6886), with no C dependency: a two-byte
+  request over UDP 5351 to the gateway, and only external-port requests,
+  since requesting a specific internal port is the classic amplifier.
+- A real ICE-lite subset over STUN: the sharer answers binding
+  indications, and a viewer tries to send one and reports success. It
+  proves a direct path exists rather than merely proving reflexive
+  address discovery, which is the actual point of the rung.
+- The reachability ladder now reports which rung it used and how long it
+  took, so a failure names the rung that failed instead of "unreachable".
+
+### Audio
+
+- Audio travels on its own unidirectional QUIC stream, opened by the
+  viewer, so it never queues behind a video frame and never touches the
+  message path. A session carries at most one audio stream.
+- Every visual message carries `pts_us` from the sharer's capture clock,
+  and the viewer holds a video frame until the audio clock releases its
+  revision, so the two are played rather than merely received together.
+- The sync harness measures the offset from a known tone instead of
+  asserting one. Real paths are asymmetric, so the expectation is a
+  bounded window that accounts for the codec's own delay, and the
+  measurement is a real number rather than a guess.
 
 ### Correctness
 
