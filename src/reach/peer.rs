@@ -165,6 +165,18 @@ use anyhow::Context as _;
 mod tests {
     use super::*;
 
+    /// The responder binds the wildcard address, which is right in
+    /// production and wrong to send *to*: Linux and macOS route a packet
+    /// addressed to 0.0.0.0 back over loopback, and Windows does not, so
+    /// the probe silently never arrives there. Ask for loopback instead.
+    fn loopback(addr: SocketAddr) -> SocketAddr {
+        if addr.ip().is_unspecified() {
+            SocketAddr::from(([127, 0, 0, 1], addr.port()))
+        } else {
+            addr
+        }
+    }
+
     #[test]
     fn no_candidate_is_not_attempted_rather_than_unreachable() {
         // The distinction matters: "we did not look" and "we looked and
@@ -175,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn a_responder_answers_a_real_binding_request() {
         let responder = Responder::bind(0).await.unwrap();
-        let addr = responder.local_addr().unwrap();
+        let addr = loopback(responder.local_addr().unwrap());
         let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.connect(addr).await.unwrap();
 
@@ -218,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn a_live_responder_is_reachable_with_a_rtt() {
         let responder = Responder::bind(0).await.unwrap();
-        let addr = responder.local_addr().unwrap();
+        let addr = loopback(responder.local_addr().unwrap());
         let server = tokio::spawn(async move {
             responder.serve_for(Duration::from_secs(3)).await;
         });

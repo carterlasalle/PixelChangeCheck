@@ -32,6 +32,16 @@ against the audio clock.
 
 ### Fixed
 
+- `time` is pinned to 0.3.47, the oldest release carrying the
+  RUSTSEC-2026-0009 fix. Anything from 0.3.53 on needs rustc 1.88, and
+  this crate claims 1.85; 0.3.47 is patched and still builds on the
+  floor.
+- Two STUN peer tests failed on Windows and passed everywhere else. The
+  responder binds the wildcard address, which is right in production and
+  wrong to send *to*: Linux and macOS route a packet addressed to
+  0.0.0.0 back over loopback, and Windows does not, so the probe never
+  arrived and the check reported unreachable. The tests now ask for
+  loopback explicitly.
 - CI installed no system dependencies at all. `alsa-sys` runs
   `pkg-config` at build time and panics without the ALSA headers, so
   every Linux job was a build failure. All four now install them.
