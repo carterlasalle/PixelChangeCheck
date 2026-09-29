@@ -108,7 +108,7 @@ cpal = "0.15"
 opus = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 rand_core = "0.6"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.12"
 p256 = { version = "0.13", features = ["ecdh"] }
 
