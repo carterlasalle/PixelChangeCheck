@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.3
+
+### Changed
+
+- **Installs and builds.** Prebuilt `pcc-<version>-<target>` archives
+  and `cargo binstall` support; the `release` profile builds fast
+  (thin LTO) while CI ships a full-optimization `dist` profile; `audio`
+  and `native-viewer` are opt-out features; tokio is trimmed to the
+  named set; `num_cpus` removed. Protocol version 7 two releases in:
+  sharers and viewers must be the same build.
+
 ## Unreleased
 
 ### Added
