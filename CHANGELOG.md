@@ -19,6 +19,11 @@
 - **Opus loss concealment and in-band FEC.** The encoder emits FEC, and
   the viewer fills each pts gap in order — FEC for the first missing
   frame, concealment for the rest — instead of leaving a hole.
+- **Congestion control feeds the planner.** Each direct viewer samples
+  QUIC RTT, lost packets, and congestion window per send; fps backs off
+  on high RTT or new loss before queues fill, quality degrades on a
+  collapsing window, fps recovers only on a healthy path, and the worst
+  RTT / deepest ack gap / oldest pending age are exported to metrics.
 - **Remote browser mode requires HTTPS.** Serving the viewer JavaScript
   over plaintext HTTP lets a network attacker replace it and steal the
   session secret or the screen after decryption, which application-layer

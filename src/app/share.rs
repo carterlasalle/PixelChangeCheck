@@ -377,13 +377,23 @@ type AudioBroadcast = broadcast::Sender<Arc<EncodedAudio>>;
 const AUDIO_QUEUE: usize = 256;
 
 /// Per-viewer feedback, used for adaptation and for saying who is behind.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 struct ViewerStats {
     lag_events: u32,
     /// Newest revision the viewer confirmed it applied. Starts at the
     /// snapshot floor and only moves forward; the pressure loop reads it
     /// to tell a merely-slow viewer from one that has stalled entirely.
     acked_rev: Rev,
+    /// Latest measured round-trip time on this viewer's path, sampled
+    /// from the QUIC stack. `None` on relay/fan sessions, which expose no
+    /// connection handle and therefore no transport measurements.
+    rtt_ms: Option<u64>,
+    /// Cumulative lost packets on this viewer's path, same source.
+    /// Monotonic: the pressure loop diffs it per frame.
+    lost_packets: u64,
+    /// Current congestion window in bytes, same source. A collapsing
+    /// window means the path — not the viewer — is the bottleneck.
+    cwnd_bytes: u64,
 }
 
 /// Adaptive pressure from real network feedback, 0.0 (healthy) upward.
@@ -1274,7 +1284,15 @@ async fn serve_viewer(
         }
     });
 
+    // Transport measurements, sampled per send on direct QUIC sessions.
+    // Relay/fan sessions pass `None` and keep the last sample: no handle,
+    // no measurement, no guessing.
+    let quic_stats = quic.clone();
+    let mut last_lost: Option<u64> = None;
     let mut consecutive_lags = 0u32;
+    // Sample at most every 250 ms: RTT/loss/cwnd move slowly, and the QUIC
+    // stats lock is not free.
+    let mut last_sample = Instant::now() - Duration::from_secs(1);
     loop {
         tokio::select! {
             update = rx.recv() => match update {
@@ -1291,6 +1309,24 @@ async fn serve_viewer(
                         }
                         warn!("{label} write failed: {e}");
                         break;
+                    }
+                    // Fresh sample with every delivered update, throttled.
+                    if last_sample.elapsed() >= Duration::from_millis(250) {
+                        if let Some(conn) = quic_stats.as_ref() {
+                            let stats = conn.stats();
+                            let lost = stats.path.lost_packets;
+                            let is_new_loss = last_lost.is_some_and(|prev| lost > prev);
+                            last_lost = Some(lost);
+                            if let Some(v) = viewers.lock().get_mut(&id) {
+                                v.rtt_ms = Some(conn.rtt().as_millis().min(u128::from(u64::MAX)) as u64);
+                                v.lost_packets = lost;
+                                v.cwnd_bytes = stats.path.cwnd;
+                                if is_new_loss {
+                                    v.lag_events += 1;
+                                }
+                            }
+                            last_sample = Instant::now();
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
@@ -1491,6 +1527,7 @@ async fn capture_loop(
     // so far.
     let mut pending_snapshot = true;
     let mut effective_fps = requested_fps;
+    let mut last_total_lost: u64 = 0;
     let mut last_repair = Instant::now();
     let mut quality = target_quality;
     let mut pressure = Pressure {
@@ -1688,45 +1725,89 @@ async fn capture_loop(
             surface.publish(&frame, quality);
         }
 
-        // Real feedback-driven adaptation: viewers that fall behind are
-        // the signal, not local CPU overrun. Lag events say a viewer
-        // missed the broadcast; the ack watermark says how far behind it
-        // actually is — a viewer acking every revision is merely slow,
-        // one whose watermark has stalled is stuck.
+        // Real feedback-driven adaptation: the network is the signal,
+        // not local CPU overrun. Lag events say a viewer missed the
+        // broadcast; the ack watermark says how far behind it actually is;
+        // RTT/loss/cwnd say whether the path itself is degraded. A viewer
+        // acking every revision over a clean path is merely slow; one on a
+        // lossy, high-RTT, collapsing-window path is congested.
         pressure.decay(loop_start.elapsed());
         let current = rev;
-        let stats: Vec<(u32, Rev)> = viewers
-            .lock()
-            .values()
-            .map(|v| (v.lag_events, v.acked_rev))
-            .collect();
-        let lagging = stats.iter().filter(|(lags, _)| *lags > 0).count();
+        let stats: Vec<ViewerStats> = viewers.lock().values().cloned().collect();
+        let lagging = stats.iter().filter(|v| v.lag_events > 0).count();
         let stalled = stats
             .iter()
-            .filter(|(lags, acked)| *lags > 0 && current.saturating_sub(*acked) > 30)
+            .filter(|v| v.lag_events > 0 && current.saturating_sub(v.acked_rev) > 30)
             .count();
+        // Worst measured path across direct viewers: relay sessions expose
+        // no handle and do not vote here.
+        let worst_rtt_ms = stats.iter().filter_map(|v| v.rtt_ms).max().unwrap_or(0);
+        let total_lost: u64 = stats.iter().map(|v| v.lost_packets).sum();
+        let min_cwnd = stats.iter().map(|v| v.cwnd_bytes).filter(|c| *c > 0).min();
+        let cwnd_collapsed = min_cwnd.is_some_and(|c| c < 64 * 1024);
+        // The path is degraded even if nobody lagged yet: back off before
+        // the queues fill rather than after. `last_total_lost` diffs the
+        // monotonic counter, so only *new* loss penalises.
+        let new_loss = total_lost > last_total_lost;
+        last_total_lost = total_lost;
         if lagging > 0 {
             // Stalled viewers weigh double: they are not catching up.
             pressure.penalise(lagging as f32 + stalled as f32);
         }
-        if pressure.is_pressured() && effective_fps > 10 {
-            effective_fps = (effective_fps * 3 / 4).max(10);
+        if worst_rtt_ms >= 250 || new_loss {
+            pressure.penalise(1.0);
+        }
+        // The step itself is `decide_congestion_step` below (unit-tested);
+        // the loop only adds the pressure gate and the 5 s recovery delay.
+        let step = decide_congestion_step(
+            effective_fps,
+            requested_fps,
+            worst_rtt_ms,
+            new_loss,
+            cwnd_collapsed,
+            loop_start.elapsed() > frame_interval_at(effective_fps) * 2,
+        );
+        if pressure.is_pressured() && step.fps != effective_fps {
+            effective_fps = step.fps;
             info!("{lagging} viewer(s) falling behind; dropping to {effective_fps} fps");
             pressure.last_change = Instant::now();
         } else if !pressure.is_pressured()
-            && effective_fps < requested_fps
+            && step.fps != effective_fps
             && pressure.last_change.elapsed() > Duration::from_secs(5)
         {
-            effective_fps = (effective_fps * 4 / 3).min(requested_fps);
+            effective_fps = step.fps;
             pressure.last_change = Instant::now();
         }
 
-        // The local loop overrunning its own budget is a real signal too,
-        // but it only affects the *lossy* preview quality, because that is
-        // the only thing quality still controls.
-        let frame_interval = Duration::from_secs(1) / effective_fps.max(1);
-        if loop_start.elapsed() > frame_interval * 2 && quality > 0.3 {
-            quality = (quality - 0.1).max(0.3);
+        // Publish the measured path state: worst RTT across direct
+        // viewers, deepest ack gap as pending depth, oldest unapplied age.
+        // These are the numbers the fps/quality decisions above actually
+        // read, so the dashboard shows the cause, not just the effect.
+        metrics.viewer_rtt_ms.set_raw(worst_rtt_ms);
+        let max_gap = stats
+            .iter()
+            .map(|v| current.saturating_sub(v.acked_rev))
+            .max()
+            .unwrap_or(0);
+        metrics.viewer_queue_depth.set_raw(max_gap);
+        // One rev is roughly one frame interval old, so the gap converts
+        // to an age without tracking per-message timestamps.
+        metrics
+            .oldest_pending_ms
+            .set_raw(max_gap.saturating_mul(1_000 / u64::from(effective_fps.max(1))));
+
+        // Quality follows the same signal one step further down: a
+        // congested path or an overrunning loop both degrade the *lossy*
+        // preview first, because that is the only thing quality controls.
+        // A collapsing window halves it outright — the bottleneck is the
+        // path, not the encoder.
+        let frame_interval = frame_interval_at(effective_fps);
+        if step.degrade_quality && quality > 0.3 {
+            quality = if cwnd_collapsed {
+                (quality - 0.2).max(0.3)
+            } else {
+                (quality - 0.1).max(0.3)
+            };
             let cfg = crate::pcc::QualityConfig {
                 target_fps: effective_fps,
                 max_fps,
@@ -1748,6 +1829,44 @@ async fn capture_loop(
         if elapsed < frame_interval {
             tokio::time::sleep(frame_interval - elapsed).await;
         }
+    }
+}
+
+/// Frame pacing for an fps value. One place, so the loop and the
+/// congestion step cannot disagree about what "one frame" means.
+fn frame_interval_at(fps: u32) -> Duration {
+    Duration::from_secs(1) / fps.max(1)
+}
+
+/// Pure decision core of the network-driven fps step: given one frame's
+/// measured path state, what fps follows and does quality degrade. The
+/// capture loop calls this inline; the unit tests below pin the
+/// thresholds without running a loop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CongestionDecision {
+    fps: u32,
+    degrade_quality: bool,
+}
+
+fn decide_congestion_step(
+    fps: u32,
+    requested_fps: u32,
+    worst_rtt_ms: u64,
+    new_loss: bool,
+    cwnd_collapsed: bool,
+    loop_overran: bool,
+) -> CongestionDecision {
+    let congested_path = worst_rtt_ms >= 250 || new_loss;
+    let mut fps = fps;
+    if congested_path && fps > 10 {
+        fps = (fps * 3 / 4).max(10);
+    } else if !congested_path && fps < requested_fps && worst_rtt_ms < 100 {
+        fps = (fps * 4 / 3).min(requested_fps);
+    }
+    let degrade_quality = loop_overran || congested_path || cwnd_collapsed;
+    CongestionDecision {
+        fps,
+        degrade_quality,
     }
 }
 
@@ -1842,6 +1961,44 @@ fn rate_limited(
 mod tests {
     use super::*;
     use crate::network::PROTOCOL_VERSION;
+
+    #[test]
+    fn high_rtt_backs_off_before_queues_fill() {
+        let d = decide_congestion_step(30, 30, 300, false, false, false);
+        assert_eq!(d.fps, 22, "a 300 ms path must shed fps, got {}", d.fps);
+        assert!(d.degrade_quality);
+    }
+
+    #[test]
+    fn new_loss_backs_off_before_queues_fill() {
+        let d = decide_congestion_step(30, 30, 40, true, false, false);
+        assert_eq!(d.fps, 22);
+        assert!(d.degrade_quality);
+    }
+
+    #[test]
+    fn healthy_path_recovers_and_holds_quality() {
+        let d = decide_congestion_step(22, 30, 20, false, false, false);
+        assert_eq!(d.fps, 29, "recovery multiplies by 4/3, got {}", d.fps);
+        assert!(!d.degrade_quality);
+    }
+
+    #[test]
+    fn recovery_does_not_ramp_into_a_bad_path() {
+        let d = decide_congestion_step(22, 30, 300, false, false, false);
+        assert_eq!(
+            d.fps, 16,
+            "congested step wins over recovery, got {}",
+            d.fps
+        );
+    }
+
+    #[test]
+    fn collapsed_window_degrades_quality_without_touching_fps() {
+        let d = decide_congestion_step(30, 30, 40, false, true, false);
+        assert_eq!(d.fps, 30);
+        assert!(d.degrade_quality);
+    }
 
     /// The TLS gate in `start_web`, factored for tests: remote browser
     /// mode requires HTTPS, loopback stays plaintext for dev convenience.
