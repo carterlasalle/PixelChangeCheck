@@ -59,6 +59,7 @@ The diff is against the **reference** — the framebuffer an up-to-date viewer h
 | Reachability | An explicit ladder — global IPv6, STUN, NAT-PMP, an ICE-lite peer check — with the relay as the deliberate last rung |
 | Observability | A stats table, Prometheus metrics on loopback, and JSON logs for bug reports |
 | Viewers | A native window, and a WebSocket compositor for any browser, with an explicitly lossy MJPEG fallback |
+| Transports | Direct QUIC, multi-relay fan with redirect-based broadcast mode, iroh tickets (ADR 0007), and manual-signalling WebRTC data channels (ADR 0008) |
 
 ## Quick start
 

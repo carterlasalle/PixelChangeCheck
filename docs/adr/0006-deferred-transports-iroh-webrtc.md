@@ -1,6 +1,8 @@
 # ADR 0006: Iroh and WebRTC transports are named but not implemented
 
-- **Status:** accepted
+- **Status:** partially superseded by ADR 0007 (iroh) and ADR 0008
+  (webrtc). The WebRTC half below is historical; the iroh half is
+  replaced.
 - **Supersedes:** nothing.
 
 ## Context

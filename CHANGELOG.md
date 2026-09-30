@@ -71,10 +71,28 @@
   newest direct viewer past the threshold; its serve task sends one
   `Redirect` and ends the direct session. The viewer resumes through the
   relay, so fanout costs one socket instead of N direct streams.
-- **Named future transports.** `--transport quic|iroh|webrtc` exists on
-  share and view; only `quic` runs. `iroh`/`webrtc` fail at startup
-  pointing at ADR 0006, which records what would reopen them — no stub
-  crates, no half-wired paths.
+- **Live platform cursor.** `--synthetic` sweeps a scripted pointer;
+  real shares sample the OS pointer (`device_query`) at the capture
+  origin, hide it outside the shared area, and viewers draw it as a
+  presentation-only overlay the compositor never sees.
+- **Window and application capture.** `pcc share --window <title>` and
+  `--application <name>` match by substring (`xcap`) and re-resolve every
+  frame, so a close is a freeze and a move is followed; a miss fails fast
+  instead of sharing the display. Geometry comes from the captured image
+  (physical pixels on Retina), and the epoch logic absorbs the change.
+- **System-audio taps that exist.** `--audio-source system|both` uses an
+  OS loopback tap when one is named (Pulse monitor, BlackHole, VB-Cable,
+  Background Music, Zoom and friends); otherwise the mic with a warning.
+  `pcc diagnose --audio` flags the taps it found.
+- **Iroh transport (ADR 0007).** `pcc share --transport iroh` prints a
+  ticket; `pcc view --transport iroh --ticket <ticket>` dials it — no
+  ports, no relay to run. Verified two-process: 1280x720 snapshot at
+  revision 219 over the ticket.
+- **WebRTC transport (ADR 0008).** `pcc share --transport webrtc` prints
+  an offer blob; the viewer answers with one blob and both sides trickle
+  ICE as pasted lines. One reliable ordered `pcc` data channel carries
+  the same `Message` envelopes, chunked at 16 KiB. Verified two-process:
+  1280x720 snapshot over offer/answer/trickle.
 
 ## 0.1.2
 

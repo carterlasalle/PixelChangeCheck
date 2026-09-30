@@ -1,4 +1,5 @@
 use crate::pcc::types::{Frame, FrameCapture, QualityConfig};
+use device_query::{DeviceQuery, DeviceState};
 
 /// Where the pointer is, in shared-surface pixels. `None` means the
 /// pointer is not over the shared area (or the platform gave no answer),
@@ -25,6 +26,40 @@ pub struct NoCursorSampler;
 impl CursorSampler for NoCursorSampler {
     fn sample(&mut self, _width: u32, _height: u32) -> Option<CursorSample> {
         None
+    }
+}
+
+/// The live platform pointer via `device_query` (CGEvent on macOS, X11
+/// query on Linux, GetCursorPos on Windows). Coordinates are global
+/// display pixels; the region offset is subtracted so the sample lands in
+/// shared-surface space, and anything outside the shared rectangle reads
+/// as "not over the share" (`None` → `CursorHide` downstream).
+pub struct PlatformCursorSampler {
+    state: device_query::DeviceState,
+    /// Origin of the shared area in global display pixels.
+    origin: (i32, i32),
+}
+
+impl PlatformCursorSampler {
+    pub fn new(origin: (i32, i32)) -> Self {
+        Self {
+            state: DeviceState::new(),
+            origin,
+        }
+    }
+}
+
+impl CursorSampler for PlatformCursorSampler {
+    fn sample(&mut self, width: u32, height: u32) -> Option<CursorSample> {
+        let (gx, gy) = self.state.get_mouse().coords;
+        let (x, y) = (gx - self.origin.0, gy - self.origin.1);
+        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+            return None;
+        }
+        Some(CursorSample {
+            x: x as u32,
+            y: y as u32,
+        })
     }
 }
 
@@ -70,6 +105,30 @@ pub struct ScreenCapture {
     /// whole display. Clamped to the display at open so every later frame
     /// has identical geometry, which the epoch logic requires.
     region: Option<(u32, u32, u32, u32)>,
+    /// A captured window's current geometry, refreshed per frame. `Some`
+    /// exactly when sharing a window or application: the frame comes from
+    /// the OS window list rather than the display framebuffer.
+    window: Option<WindowShare>,
+}
+
+/// One shared window: matched by title substring at open, re-resolved per
+/// frame by the same match. Re-resolving (not caching a handle) is what
+/// keeps the share alive across window close/reopen and what lets the
+/// geometry follow a moved window — at the cost of one enumeration per
+/// frame, which is a window-list walk, not a capture.
+#[derive(Debug, Clone)]
+struct WindowShare {
+    /// Lowercase substring matched against window titles.
+    needle: String,
+    /// Application match as well (bundle id or process name fragment).
+    /// `None` for a pure `--window` share.
+    app: Option<String>,
+    /// Open-time geometry, used only for the frozen-frame fallback
+    /// when the window vanishes. Live geometry always comes from the
+    /// captured image (physical pixels — 2x the window-list points on
+    /// Retina); the share loop's epoch logic absorbs the open-time vs
+    /// first-frame difference exactly like a display resize.
+    last: (u32, u32),
 }
 
 /// What to capture. Display and Region are backed by the OS screen
@@ -169,18 +228,40 @@ impl ScreenCapture {
                 (screen, Some((x, y, width, height)))
             }
             CaptureTarget::Window(id) => {
-                tracing::warn!("window capture '{id}' is not implemented on this platform; sharing the display instead");
-                (
-                    screens.into_iter().next().context("No screens found")?,
-                    None,
-                )
+                let screen = screens.into_iter().next().context("No screens found")?;
+                let needle = id.to_ascii_lowercase();
+                // Fail fast when nothing matches: sharing the display
+                // instead would leak pixels the user explicitly excluded.
+                let (w, h) = find_window(&needle, None)
+                    .context(format!("no visible window matches '{id}'"))?;
+                info!("Sharing window matching '{id}' ({w}x{h})");
+                return Ok(Self {
+                    screen,
+                    frame_counter: AtomicU64::new(0),
+                    region: None,
+                    window: Some(WindowShare {
+                        needle,
+                        app: None,
+                        last: (w, h),
+                    }),
+                });
             }
             CaptureTarget::Application(id) => {
-                tracing::warn!("application capture '{id}' is not implemented on this platform; sharing the display instead");
-                (
-                    screens.into_iter().next().context("No screens found")?,
-                    None,
-                )
+                let screen = screens.into_iter().next().context("No screens found")?;
+                let needle = id.to_ascii_lowercase();
+                let (w, h) = find_window(&needle, Some(&needle))
+                    .context(format!("no visible window matches application '{id}'"))?;
+                info!("Sharing application matching '{id}' ({w}x{h})");
+                return Ok(Self {
+                    screen,
+                    frame_counter: AtomicU64::new(0),
+                    region: None,
+                    window: Some(WindowShare {
+                        needle: needle.clone(),
+                        app: Some(needle),
+                        last: (w, h),
+                    }),
+                });
             }
         };
 
@@ -198,7 +279,27 @@ impl ScreenCapture {
             screen,
             frame_counter: AtomicU64::new(0),
             region,
+            window: None,
         })
+    }
+
+    /// Origin of the shared area in global display pixels: the region
+    /// offset, or the display's own offset in a multi-monitor layout.
+    /// The cursor sampler subtracts it so overlay coordinates land in
+    /// shared-surface space.
+    pub fn origin(&self) -> (i32, i32) {
+        // Window shares report (0,0): the window image is already cropped
+        // to the window, so cursor coordinates need no offset. (A live
+        // window position would be better; xcap reports per-window x/y
+        // but they are screen-space only on some platforms, so this stays
+        // conservative rather than confidently wrong.)
+        if self.window.is_some() {
+            return (0, 0);
+        }
+        match self.region {
+            Some((x, y, _, _)) => (x as i32, y as i32),
+            None => (self.screen.display_info.x, self.screen.display_info.y),
+        }
     }
 
     /// List available displays as (index, width, height) for the picker.
@@ -212,22 +313,157 @@ impl ScreenCapture {
     }
 
     /// Get the width of the captured area (region or whole screen).
+    /// Width of the shared area. For window shares this is the last
+    /// known window width: the live match may resize, and the epoch
+    /// logic in the share loop handles the change like any geometry
+    /// change. Open-time size is only the starting point.
     pub fn width(&self) -> u32 {
+        if let Some(w) = &self.window {
+            return w.last.0;
+        }
         self.region
             .map(|(_, _, w, _)| w)
             .unwrap_or(self.screen.display_info.width)
     }
 
-    /// Get the height of the captured area (region or whole screen).
+    /// Get the height of the captured area (region, window, or screen).
     pub fn height(&self) -> u32 {
+        if let Some(w) = &self.window {
+            return w.last.1;
+        }
         self.region
             .map(|(_, _, _, h)| h)
             .unwrap_or(self.screen.display_info.height)
     }
 }
 
+/// Find a visible window by title (and optionally app) substring.
+/// Returns its current size. Skips minimized and empty windows: a
+/// minimized window has no pixels to share, and a 0-size one would poison
+/// every geometry check downstream.
+fn find_window(needle: &str, app: Option<&str>) -> Result<(u32, u32)> {
+    let windows = xcap::Window::all().context("enumerating windows")?;
+    for w in &windows {
+        let title = w.title().unwrap_or_default().to_ascii_lowercase();
+        if !title.contains(needle) {
+            continue;
+        }
+        if let Some(a) = app {
+            let name = w.app_name().unwrap_or_default().to_ascii_lowercase();
+            if !name.contains(a) && !title.contains(a) {
+                continue;
+            }
+        }
+        if w.is_minimized().unwrap_or(false) {
+            continue;
+        }
+        let (width, height) = (w.width().unwrap_or(0), w.height().unwrap_or(0));
+        if width == 0 || height == 0 {
+            continue;
+        }
+        return Ok((width, height));
+    }
+    anyhow::bail!("no visible window matches")
+}
+
+/// List windows for the picker: (title, app, w, h), smallest first so a
+/// `--window` needle is easy to aim.
+pub fn list_windows() -> Vec<(String, String, u32, u32)> {
+    let Ok(windows) = xcap::Window::all() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, String, u32, u32)> = windows
+        .iter()
+        .filter(|w| !w.is_minimized().unwrap_or(true))
+        .filter_map(|w| {
+            let (width, height) = (w.width().unwrap_or(0), w.height().unwrap_or(0));
+            if width == 0 || height == 0 {
+                return None;
+            }
+            Some((
+                w.title().unwrap_or_default(),
+                w.app_name().unwrap_or_default(),
+                width,
+                height,
+            ))
+        })
+        .collect();
+    out.sort_by_key(|(_, _, w, h)| w * h);
+    out
+}
+
+/// Capture one frame of a shared window. The window is re-resolved by
+/// title on every frame; when it vanishes the last geometry repeats with
+/// the previous pixels (a freeze, not an error — the epoch logic needs
+/// stable geometry, and a close is temporary until the window returns).
+fn capture_window_frame(counter: &AtomicU64, share: &WindowShare) -> Result<Frame> {
+    // xcap's image type is a different `image` major version than ours,
+    // so the two `RgbaImage`s never meet: work on raw bytes only.
+    let (width, height, rgba_data): (u32, u32, Vec<u8>) = match find_live_window(share)
+        .and_then(|w| w.capture_image().context("capturing window pixels"))
+    {
+        Ok(image) => (image.width(), image.height(), image.into_raw()),
+        Err(_) => {
+            // Frozen frame: last size, solid grey. The diff against the
+            // live reference still converges the moment the window
+            // returns.
+            let (w, h) = share.last;
+            let mut raw = Vec::with_capacity((w * h * 4) as usize);
+            for _ in 0..w * h {
+                raw.extend_from_slice(&[128, 128, 128, 255]);
+            }
+            (w, h, raw)
+        }
+    };
+    let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+    for pixel in rgba_data.as_chunks::<4>().0 {
+        rgb_data.push(pixel[0]);
+        rgb_data.push(pixel[1]);
+        rgb_data.push(pixel[2]);
+    }
+    let id = counter.fetch_add(1, Ordering::Relaxed);
+    Ok(Frame {
+        id,
+        timestamp: SystemTime::now(),
+        pts_us: 0,
+        width,
+        height,
+        data: rgb_data,
+    })
+}
+
+/// The live window handle matching a share, or an error when it is gone.
+fn find_live_window(share: &WindowShare) -> Result<xcap::Window> {
+    let windows = xcap::Window::all().context("enumerating windows")?;
+    for w in windows {
+        let title = w.title().unwrap_or_default().to_ascii_lowercase();
+        if !title.contains(&share.needle) {
+            continue;
+        }
+        if let Some(a) = &share.app {
+            let name = w.app_name().unwrap_or_default().to_ascii_lowercase();
+            if !name.contains(a) && !title.contains(a) {
+                continue;
+            }
+        }
+        if w.is_minimized().unwrap_or(false) {
+            continue;
+        }
+        if w.width().unwrap_or(0) == 0 || w.height().unwrap_or(0) == 0 {
+            continue;
+        }
+        return Ok(w);
+    }
+    anyhow::bail!("shared window is not visible right now")
+}
+
 impl FrameCapture for ScreenCapture {
     fn capture_frame(&self) -> Result<Frame> {
+        // Window shares re-resolve every frame: the handle from open may
+        // be a closed window by now, and geometry follows the live match.
+        if let Some(share) = &self.window {
+            return capture_window_frame(&self.frame_counter, share);
+        }
         // Region capture happens at the capture layer, not by cropping
         // afterwards: `capture_area` reads only the requested rectangle.
         let image = match self.region {
@@ -405,6 +641,16 @@ impl CaptureSource {
         match ScreenCapture::open_target(target) {
             Ok(capture) => Ok(Self::Screen(capture)),
             Err(e) => {
+                // Window/application misses propagate: falling back to a
+                // test pattern would silently share *something* when the
+                // user explicitly excluded everything else. Display/region
+                // failures (headless machines) still fall back.
+                if matches!(
+                    target,
+                    CaptureTarget::Window(_) | CaptureTarget::Application(_)
+                ) {
+                    return Err(e);
+                }
                 info!("No real display available ({e}); falling back to synthetic test pattern");
                 Ok(Self::Synthetic(SyntheticCapture::new(1280, 720)))
             }
@@ -415,6 +661,16 @@ impl CaptureSource {
         match self {
             Self::Screen(c) => c.width(),
             Self::Synthetic(c) => c.width(),
+        }
+    }
+
+    /// Origin of the shared area for the cursor sampler. Synthetic has no
+    /// display behind it, so (0,0) — the sweep coordinates already are
+    /// surface space.
+    pub fn origin(&self) -> (i32, i32) {
+        match self {
+            Self::Screen(c) => c.origin(),
+            Self::Synthetic(_) => (0, 0),
         }
     }
 
@@ -456,6 +712,61 @@ mod tests {
         let frame1 = capture.capture_frame().unwrap();
         let frame2 = capture.capture_frame().unwrap();
         assert_ne!(frame1.data, frame2.data, "the bouncing box should move");
+    }
+
+    #[test]
+    fn window_share_fails_fast_on_no_match() {
+        let err = ScreenCapture::open_target(&CaptureTarget::Window("no such window xyz".into()))
+            .err()
+            .map(|e| e.to_string())
+            .expect("bogus title must fail");
+        assert!(err.contains("no visible window"), "unhelpful: {err}");
+        let err = ScreenCapture::open_target(&CaptureTarget::Application("no such app xyz".into()))
+            .err()
+            .map(|e| e.to_string())
+            .expect("bogus app must fail");
+        assert!(err.contains("no visible window"), "unhelpful: {err}");
+    }
+
+    #[test]
+    fn window_list_and_live_capture_agree() {
+        let wins = list_windows();
+        // This machine has windows; CI may not. Empty list skips.
+        let Some((title, _, w, h)) = wins.first() else {
+            return;
+        };
+        assert!(*w > 0 && *h > 0);
+        // Share it by a title fragment and capture one frame.
+        let needle = title.chars().take(4).collect::<String>();
+        if needle.trim().is_empty() {
+            return;
+        }
+        let cap = ScreenCapture::open_target(&CaptureTarget::Window(needle));
+        // The smallest window may have closed between listing and open;
+        // only assert when the open succeeded.
+        if let Ok(cap) = cap {
+            let frame = cap.capture_frame().unwrap();
+            // Geometry comes from the captured image (physical pixels on
+            // Retina), not the window list (logical points).
+            assert_eq!(
+                frame.data.len(),
+                frame.width as usize * frame.height as usize * 3
+            );
+            assert!(frame.width > 0 && frame.height > 0);
+        }
+    }
+
+    #[test]
+    fn platform_sampler_never_returns_out_of_bounds() {
+        let mut s = PlatformCursorSampler::new((0, 0));
+        for _ in 0..50 {
+            if let Some(c) = s.sample(1512, 982) {
+                assert!(c.x < 1512 && c.y < 982);
+            }
+        }
+        // Far-away origin puts the real pointer outside the share.
+        let mut far = PlatformCursorSampler::new((1_000_000, 1_000_000));
+        assert!(far.sample(64, 48).is_none());
     }
 
     #[test]

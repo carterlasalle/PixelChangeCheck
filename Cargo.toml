@@ -123,6 +123,10 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 p256 = { version = "0.13", features = ["ecdh"] }
 hmac = "0.12"
+device_query = "4.0.1"
+xcap = "0.9.8"
+iroh = "1"
+webrtc = { version = "0.21.0", features = ["runtime-tokio"] }
 
 [profile.release]
 opt-level = 3

@@ -297,6 +297,27 @@ else
   fail "a viewer receives frames through the relay" "$(tail -3 "$LOG_DIR/view2.log")"
 fi
 
+# ------------------------------------------------- new planes (fast gates)
+echo "checking the new planes"
+GATE=$($BIN share --transport bogus --synthetic --no-listen --no-web --token "$TOKEN" 2>&1 | \
+  grep -c "must be quic|iroh|webrtc")
+check "an unknown --transport is refused with the choices" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "no gate message"
+GATE=$($BIN view --transport webrtc --offer BLOB --token "$TOKEN" --no-window --pin 00 2>&1 | grep -c "webrtc blob")
+check "a garbage webrtc offer is refused as a blob" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "no blob complaint"
+GATE=$($BIN diagnose --audio 2>&1 | grep -c "loopback\|Microphone\|no capture device\|capture device")
+check "diagnose --audio lists devices or says none" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "no audio listing"
+GATE=$($BIN share --window "no such window xyz DEF" --no-listen --no-web --token "$TOKEN" 2>&1 | \
+  grep -c "no visible window")
+check "a window miss fails fast instead of sharing" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "shared something anyway"
+GATE=$($BIN share --audio-source bogus --synthetic --no-listen --no-web --token "$TOKEN" 2>&1 | \
+  grep -c "must be mic|system|both|none")
+check "an unknown --audio-source is refused with the choices" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "no gate message"
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
   echo "smoke: all checks passed"

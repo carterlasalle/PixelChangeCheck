@@ -100,12 +100,12 @@ enum Commands {
         /// afterwards. Conflicts with --display.
         #[arg(long, conflicts_with = "display")]
         region: Option<String>,
-        /// Window to share (title or handle). Platform pickers land here;
-        /// today it falls back to the display with a warning.
+        /// Window to share, matched by title substring. Fails fast
+        /// when nothing matches rather than sharing the display.
         #[arg(long)]
         window: Option<String>,
-        /// Application to share (name or bundle id). Same fallback as
-        /// --window for now.
+        /// Application to share, matched by app name or title substring.
+        /// Same fail-fast contract as --window.
         #[arg(long)]
         application: Option<String>,
         /// Target frames per second.
@@ -131,8 +131,8 @@ enum Commands {
         /// relay skips discovery entirely.
         #[arg(long, value_enum, default_value_t = ReachPolicyArg::Auto)]
         reach: ReachPolicyArg,
-        /// Transport for the session: quic (implemented), iroh or
-        /// webrtc (named, see docs/adr/0006, not implemented).
+        /// Transport for the session: quic, iroh, or webrtc.
+        /// WebRTC uses manual offer/answer blobs (see --offer).
         #[arg(long, default_value = "quic")]
         transport: String,
         /// Also capture audio and send it alongside the screen.
@@ -166,10 +166,12 @@ enum Commands {
         /// Relay session code (required with --relay).
         #[arg(long)]
         session: Option<String>,
-        /// SHA-256 fingerprint of the sharer's certificate. Required:
-        /// this is what makes the connection authenticated.
-        #[arg(long)]
-        pin: String,
+        /// SHA-256 fingerprint of the sharer's certificate. Required
+        /// for quic paths (it authenticates the connection); unused with
+        /// `--transport iroh` (endpoint id in the ticket is self-certifying)
+        /// or webrtc (DTLS fingerprints ride in the SDP).
+        #[arg(long, required_unless_present_any = ["ticket", "offer"])]
+        pin: Option<String>,
         /// The token the sharer printed. Without it the sharer refuses.
         #[arg(long)]
         token: String,
@@ -179,10 +181,19 @@ enum Commands {
         /// Reconnect after a dropped session instead of exiting.
         #[arg(long)]
         reconnect: bool,
-        /// Transport for the session: quic (implemented), iroh or
-        /// webrtc (named, see docs/adr/0006, not implemented).
+        /// Transport for the session: quic, iroh, or webrtc.
+        /// WebRTC uses manual offer/answer blobs (see --offer).
         #[arg(long, default_value = "quic")]
         transport: String,
+        /// Iroh ticket printed by the sharer. Required with
+        /// `--transport iroh`; replaces --connect/--relay/--pin there.
+        #[arg(long)]
+        ticket: Option<String>,
+        /// WebRTC offer blob printed by the sharer. Required with
+        /// `--transport webrtc`; the viewer prints an answer blob for the
+        /// sharer to paste back.
+        #[arg(long)]
+        offer: Option<String>,
     },
     /// Report what this machine can do, whether audio capture is available,
     /// and which path to the internet it has. Connects to nothing.
@@ -295,9 +306,10 @@ fn main() -> Result<()> {
             broadcast_above,
         } => {
             let token = token_from(token.as_ref(), "viewer token")?;
-            pixel_change_check_client::network::TransportKind::parse(&transport)
-                .with_context(|| format!("Invalid --transport '{transport}'"))?
-                .require_implemented()?;
+            let transport_kind =
+                pixel_change_check_client::network::TransportKind::parse(&transport)
+                    .with_context(|| format!("Invalid --transport '{transport}'"))?;
+            transport_kind.require_implemented()?;
             let args = share::ShareArgs {
                 listen: if no_listen { None } else { Some(listen) },
                 relay: relay_addr,
@@ -350,6 +362,7 @@ fn main() -> Result<()> {
                 },
                 approve,
                 broadcast_above,
+                transport: transport_kind,
                 audio_source: if audio {
                     pixel_change_check_client::audio::AudioSource::Mic
                 } else {
@@ -368,6 +381,8 @@ fn main() -> Result<()> {
             no_window,
             reconnect,
             transport,
+            ticket,
+            offer,
         } => {
             let args = view::ViewArgs {
                 connect,
@@ -379,6 +394,8 @@ fn main() -> Result<()> {
                 reconnect,
                 transport: pixel_change_check_client::network::TransportKind::parse(&transport)
                     .with_context(|| format!("Invalid --transport '{transport}'"))?,
+                ticket,
+                offer,
             };
             view::run_view(args, metrics)
         }

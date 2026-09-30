@@ -33,11 +33,15 @@ pub struct ViewArgs {
     /// Relay session code, required with `relay`.
     pub session: Option<String>,
     /// SHA-256 fingerprint of the sharer's certificate. Required with
-    /// `connect`: this is what makes the connection authenticated.
-    pub pin: String,
+    /// `connect`; unused in iroh mode (self-certifying endpoint ids).
+    pub pin: Option<String>,
     pub token: SessionToken,
     /// Transport for the session. Gated at startup; see share.
     pub transport: crate::network::TransportKind,
+    /// Iroh ticket. Required in iroh mode; unused otherwise.
+    pub ticket: Option<String>,
+    /// WebRTC offer blob. Required in webrtc mode; unused otherwise.
+    pub offer: Option<String>,
     /// Open a native window; otherwise print periodic status.
     pub show_window: bool,
     /// Reconnect after a failure instead of exiting.
@@ -274,7 +278,11 @@ async fn dial_direct(
     let addr = crate::network::resolve(target)
         .await
         .with_context(|| format!("Could not resolve --connect {target}"))?;
-    let pin = crate::network::hex_to_der(&args.pin)?;
+    let pin = crate::network::hex_to_der(
+        args.pin
+            .as_deref()
+            .context("--pin is required with --connect")?,
+    )?;
     info!("Connecting directly to {addr}");
     let mut transport = connect_direct(
         &NetworkConfig::default(),
@@ -324,7 +332,11 @@ async fn dial_relays(
                 continue;
             }
         };
-        let pin = crate::network::hex_to_der(&args.pin)?;
+        let pin = crate::network::hex_to_der(
+            args.pin
+                .as_deref()
+                .context("--pin is required with --relay")?,
+        )?;
         info!("Connecting via relay {addr}, session '{session}'");
         match RelayTransport::connect(
             addr,
@@ -412,6 +424,84 @@ async fn receive_once(
     // alongside the transport; losing it loses audio only on the native
     // path, because the relay exposes no connection handle at all.
     let mut quic: Option<quinn::Connection> = None;
+    // Iroh mode ignores connect/relay/pin: the ticket carries the
+    // endpoint id plus discovered addresses, and the iroh relay (not
+    // ours) bridges whatever NAT is left.
+    if args.transport == crate::network::TransportKind::WebRtc {
+        let offer_blob = args
+            .offer
+            .clone()
+            .context("--offer is required with --transport webrtc")?;
+        let mut pending = crate::network::webrtc_join(&offer_blob).await?;
+        info!("WebRTC answer (paste it back to the sharer):");
+        info!("  ANSWER: {}", pending.answer_blob);
+        // Full trickle both ways over stdin/stdout, matching the sharer:
+        // print our candidates as they arrive; read the sharer's (one
+        // JSON blob per line) until an empty line. The loopback test
+        // proved host-only signalling connects on loopback/LAN, but on a
+        // real network the srflx/host candidates only arrive via trickle
+        // — one blob each way was the "connection never opened" failure.
+        if let Some(mut rx) = pending.candidate_out.take() {
+            tokio::spawn(async move {
+                while let Some(c) = rx.recv().await {
+                    if let Ok(json) = serde_json::to_string(&c) {
+                        println!("CANDIDATE: {json}");
+                    }
+                }
+            });
+        }
+        let cand_in = pending.candidate_in.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(std::io::stdin().lock()).lines() {
+                let line = line.unwrap_or_default();
+                if line.trim().is_empty() {
+                    break;
+                }
+                // CANDIDATE: prefix optional; plain JSON also accepted.
+                let body = line
+                    .trim()
+                    .strip_prefix("CANDIDATE:")
+                    .map(str::trim)
+                    .unwrap_or(line.trim());
+                if let Ok(c) = serde_json::from_str(body) {
+                    let _ = cand_in.try_send(c);
+                }
+            }
+        });
+        // The connection forms only after the sharer applies the answer;
+        // finish the join (channel OnOpen) before the E2E handshake.
+        if let Some(open_wait) = pending.open_wait.take() {
+            open_wait
+                .await
+                .context("webrtc open task failed")?
+                .context("webrtc connection never opened")?;
+        }
+        let mut transport = crate::network::webrtc_join_open(pending).await?;
+        transport
+            .send(&Message::Hello {
+                token: args.token.as_str().to_string(),
+                resume,
+            })
+            .await?;
+        return receive_on_transport(Box::new(transport), args, surface, metrics, resume, None)
+            .await;
+    }
+    if args.transport == crate::network::TransportKind::Iroh {
+        let ticket = args
+            .ticket
+            .clone()
+            .context("--ticket is required with --transport iroh")?;
+        let mut transport = crate::network::iroh_dial(&ticket).await?;
+        transport
+            .send(&Message::Hello {
+                token: args.token.as_str().to_string(),
+                resume,
+            })
+            .await?;
+        return receive_on_transport(Box::new(transport), args, surface, metrics, resume, None)
+            .await;
+    }
     let transport: Box<dyn MessageTransport> = match (&args.connect, &args.relay) {
         // Path migration at connect time: race direct against the relay
         // list, first session wins. A viewer behind the same NAT as the
@@ -437,7 +527,20 @@ async fn receive_once(
             );
         }
     };
+    receive_on_transport(transport, args, surface, metrics, resume, quic).await
+}
 
+/// The shared tail of every viewer session: E2E handshake, audio setup,
+/// and the apply loop. Dial paths differ per transport; everything
+/// after Hello is identical, so it lives here once.
+async fn receive_on_transport(
+    transport: Box<dyn MessageTransport>,
+    args: &ViewArgs,
+    surface: &std::sync::Arc<parking_lot::Mutex<Surface>>,
+    metrics: &crate::telemetry::SharedMetrics,
+    _resume: Option<(crate::network::Epoch, crate::network::Rev)>,
+    quic: Option<quinn::Connection>,
+) -> Result<Option<(crate::network::Epoch, crate::network::Rev)>> {
     // End-to-end encryption, before anything else is exchanged. The token
     // is the pre-shared key, so there is no second credential to manage
     // and a wrong token fails here rather than after a snapshot has been

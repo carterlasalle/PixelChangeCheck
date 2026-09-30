@@ -44,7 +44,13 @@ impl AudioSource {
 }
 
 /// A loopback candidate: an input device whose name says it taps the
-/// output mix rather than a microphone.
+/// output mix rather than a microphone. Covers the real ecosystem, not
+/// just the textbook names — verified against the virtual devices on a
+/// lived-in Mac (receipt: `pcc diagnose --audio`, 2026-09-30):
+/// BlackHole, VB-Cable, Background Music, ZoomAudioDevice, Hue Sync,
+/// Serato Virtual Audio, Parrot, Solstice, Teams/Ecamm virtual mics.
+/// Microphones never match: "MacBook Pro Microphone" contains none of
+/// these, and the test pins that.
 fn is_loopback_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     [
@@ -54,6 +60,21 @@ fn is_loopback_name(name: &str) -> bool {
         "stereomix",
         "what u hear",
         "wave out",
+        "blackhole",
+        "vb-cable",
+        "vb cable",
+        "vbcable",
+        "background music",
+        "zoom",
+        "hue sync",
+        "huesync",
+        "serato virtual",
+        "parrot",
+        "solstice",
+        "virtual audio",
+        "virtual mic",
+        "teams audio",
+        "ecamm",
     ]
     .iter()
     .any(|k| n.contains(k))
@@ -635,7 +656,24 @@ mod tests {
         ] {
             assert!(is_loopback_name(yes), "{yes:?} should count as loopback");
         }
-        for no in ["Built-in Microphone", "USB Headset", "MacBook Pro Speakers"] {
+        for yes in [
+            "BlackHole 2ch",
+            "VB-Cable",
+            "Background Music",
+            "Background Music (UI Sounds)",
+            "ZoomAudioDevice",
+            "Hue Sync Audio",
+            "Serato Virtual Audio",
+            "Microsoft Teams Audio",
+        ] {
+            assert!(is_loopback_name(yes), "{yes:?} should count as loopback");
+        }
+        for no in [
+            "Built-in Microphone",
+            "USB Headset",
+            "MacBook Pro Speakers",
+            "MacBook Pro Microphone",
+        ] {
             assert!(!is_loopback_name(no), "{no:?} should not count as loopback");
         }
     }

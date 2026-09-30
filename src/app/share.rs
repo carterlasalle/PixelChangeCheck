@@ -109,6 +109,9 @@ pub struct ShareArgs {
     /// What audio to capture. `None_` (the default) sends nothing;
     /// anything else starts the capture pump.
     pub audio_source: crate::audio::AudioSource,
+    /// Which transport sessions run on. `Iroh` serves viewers over an
+    /// iroh endpoint (ticket printed at startup) instead of QUIC+relay.
+    pub transport: crate::network::TransportKind,
     /// Direct viewers at or above this count are asked to move to the
     /// first `--relay` (same session code) via `Redirect`. Per-viewer
     /// QUIC send costs scale linearly; the relay fan splits the session
@@ -568,18 +571,96 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
     // with. Computed once so the loop and the spawners cannot disagree.
     let redirect_to = redirect_target(&args);
 
-    if let Some(listen_addr) = &args.listen {
-        let addr = crate::network::resolve(listen_addr)
-            .await
-            .with_context(|| format!("Invalid --listen address '{listen_addr}'"))?;
-        let endpoint = crate::network::server_endpoint(&NetworkConfig::default(), &identity, addr)?;
-        info!("Direct viewers on {addr}");
+    // Iroh and WebRTC replace the listener+relay legs entirely: one
+    // endpoint (or offer blob), no ports to forward and no relay to run.
+    // QUIC mode keeps both legs below.
+    if args.transport == crate::network::TransportKind::WebRtc {
+        let offer = crate::network::webrtc_host_offer().await?;
+        info!("WebRTC viewers with this offer (paste it to the viewer):");
+        info!("  OFFER: {}", offer.blob);
+        // The answer arrives on stdin: the operator pastes the viewer's
+        // answer blob, and the session starts. A closed stdin means no
+        // viewer is coming — fail fast rather than hang.
+        let answer = tokio::task::spawn_blocking(|| {
+            use std::io::{BufRead, Write};
+            let _ = writeln!(
+                std::io::stdout(),
+                "Paste the viewer answer blob, then Enter:"
+            );
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            std::io::BufReader::new(std::io::stdin().lock())
+                .read_line(&mut line)
+                .ok()
+                .filter(|_| !line.trim().is_empty())
+                .map(|_| line.trim().to_string())
+        })
+        .await
+        .context("reading the answer blob")?
+        .context("no answer blob pasted (stdin closed or empty)")?;
+        let _ = offer.answer_tx.send(answer);
+        // Trickle: print our candidates as they arrive; read theirs
+        // from stdin (one JSON blob per line) until an empty line.
+        // Both directions run while the handshake task below connects.
+        let mut cand_rx = offer.candidate_rx;
+        let cand_in2 = offer.candidate_tx;
+        tokio::spawn(async move {
+            while let Some(c) = cand_rx.recv().await {
+                if let Ok(json) = serde_json::to_string(&c) {
+                    println!("CANDIDATE: {json}");
+                }
+            }
+        });
+        // Candidates keep trickling on stdin after the answer (same
+        // empty-line terminator). Runs concurrently: the handshake task
+        // connects while the operator pastes.
+        tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(std::io::stdin().lock()).lines() {
+                let line = line.unwrap_or_default();
+                if line.trim().is_empty() {
+                    break;
+                }
+                // CANDIDATE: prefix optional; plain JSON also accepted.
+                let body = line
+                    .trim()
+                    .strip_prefix("CANDIDATE:")
+                    .map(str::trim)
+                    .unwrap_or(line.trim());
+                if let Ok(c) = serde_json::from_str(body) {
+                    let _ = cand_in2.try_send(c);
+                }
+            }
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(20), offer.transport_rx).await {
+            Ok(Ok(transport)) => {
+                info!("WebRTC viewer connected; serving");
+                spawn_webrtc_session(
+                    transport,
+                    tx.clone(),
+                    published.clone(),
+                    token.clone(),
+                    viewers.clone(),
+                    next_viewer_id.clone(),
+                    Some((audio_tx.clone(), audio_rx.resubscribe())),
+                    metrics.clone(),
+                    args.approve,
+                );
+            }
+            other => {
+                warn!("WebRTC viewer never completed the handshake");
+                let _ = other;
+            }
+        }
+    }
+    if args.transport == crate::network::TransportKind::Iroh {
+        let (endpoint, ticket) = crate::network::iroh_host_endpoint().await?;
+        info!("Iroh viewers with ticket:");
         info!(
-            "  pcc view --connect {addr} --token {} --pin {}",
-            token.as_str(),
-            identity.fingerprint
+            "  pcc view --transport iroh --ticket {ticket} --token {}",
+            token.as_str()
         );
-        spawn_accept_loop(
+        spawn_iroh_accept_loop(
             endpoint,
             tx.clone(),
             published.clone(),
@@ -589,55 +670,84 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
             Some((audio_tx.clone(), audio_rx.resubscribe())),
             metrics.clone(),
             args.approve,
-            redirect_to.clone(),
         );
     }
 
-    // Geography: every named relay gets its own registration loop.
-    // The first reachable relay wins per viewer — the sharer does not
-    // need to know which one that is, because it serves whoever dials in
-    // on any of them. A bad address fails its own loop, not the share.
-    if let Some(relays) = &args.relay {
-        let pin = crate::network::hex_to_der(&args.relay_pin)?;
-        let session = args.session.clone().unwrap_or_else(generate_session_code);
-        for relay_addr in split_relays(relays) {
-            let addr = match crate::network::resolve(&relay_addr).await {
-                Ok(a) => a,
-                Err(e) => {
-                    warn!("Skipping relay '{relay_addr}': {e:#}");
-                    continue;
-                }
-            };
+    if args.transport == crate::network::TransportKind::Quic {
+        if let Some(listen_addr) = &args.listen {
+            let addr = crate::network::resolve(listen_addr)
+                .await
+                .with_context(|| format!("Invalid --listen address '{listen_addr}'"))?;
+            let endpoint =
+                crate::network::server_endpoint(&NetworkConfig::default(), &identity, addr)?;
+            info!("Direct viewers on {addr}");
             info!(
-                "Relay {relay_addr}, session '{session}', token {}",
-                token.as_str()
+                "  pcc view --connect {addr} --token {} --pin {}",
+                token.as_str(),
+                identity.fingerprint
             );
-            spawn_relay_loop(
-                addr,
-                pin.clone(),
-                session.clone(),
-                token.clone(),
+            spawn_accept_loop(
+                endpoint,
                 tx.clone(),
                 published.clone(),
+                token.clone(),
                 viewers.clone(),
                 next_viewer_id.clone(),
                 Some((audio_tx.clone(), audio_rx.resubscribe())),
                 metrics.clone(),
                 args.approve,
-                None,
+                redirect_to.clone(),
             );
+        }
+    }
+    // The first reachable relay wins per viewer — the sharer does not
+    // need to know which one that is, because it serves whoever dials in
+    // on any of them. A bad address fails its own loop, not the share.
+    // QUIC-only: iroh mode has no relay leg.
+    if args.transport == crate::network::TransportKind::Quic {
+        if let Some(relays) = &args.relay {
+            let pin = crate::network::hex_to_der(&args.relay_pin)?;
+            let session = args.session.clone().unwrap_or_else(generate_session_code);
+            for relay_addr in split_relays(relays) {
+                let addr = match crate::network::resolve(&relay_addr).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("Skipping relay '{relay_addr}': {e:#}");
+                        continue;
+                    }
+                };
+                info!(
+                    "Relay {relay_addr}, session '{session}', token {}",
+                    token.as_str()
+                );
+                spawn_relay_loop(
+                    addr,
+                    pin.clone(),
+                    session.clone(),
+                    token.clone(),
+                    tx.clone(),
+                    published.clone(),
+                    viewers.clone(),
+                    next_viewer_id.clone(),
+                    Some((audio_tx.clone(), audio_rx.resubscribe())),
+                    metrics.clone(),
+                    args.approve,
+                    None,
+                );
+            }
         }
     }
 
     drop(keepalive);
 
-    // No platform cursor API is linked: real shares have no sampler
-    // and viewers hide the overlay; `--synthetic` sweeps a scripted
-    // pointer so the plane is exercised end to end.
+    // Real shares sample the live platform pointer at the capture
+    // origin; `--synthetic` sweeps a scripted pointer so the plane is
+    // exercised end to end on headless machines too.
+    let origin = capture.origin();
     let cursor_sampler: Box<dyn crate::capture::CursorSampler> = if args.synthetic {
         Box::new(crate::capture::SweepSampler::new())
     } else {
-        Box::new(crate::capture::NoCursorSampler)
+        Box::new(crate::capture::PlatformCursorSampler::new(origin))
     };
     capture_loop(
         metrics,
@@ -786,6 +896,129 @@ async fn start_web(
 }
 
 // ------------------------------------------------------------- accepting
+
+/// Accept iroh viewers: every incoming connection with our ALPN gets
+/// one `serve_viewer` over an iroh stream. No rate limiting here — iroh
+/// connections are already authenticated by the E2E handshake inside
+/// `serve_viewer` (wrong token fails there, same as the QUIC path), and
+/// the relay's handshake-failure limiter does not apply off-relay.
+/// Serve one established webrtc transport: same `serve_viewer` as every
+/// other path, with a synthetic peer address. WebRTC viewers are direct
+/// by definition, never redirected, and have no QUIC handle for datagram
+/// audio — the same contract as the iroh leg.
+#[allow(clippy::too_many_arguments)]
+fn spawn_webrtc_session(
+    transport: crate::network::WebrtcTransport,
+    tx: EncodedBroadcast,
+    published: Shared,
+    token: SessionToken,
+    viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
+    next_id: Arc<AtomicU64>,
+    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    metrics: crate::telemetry::SharedMetrics,
+    approve: bool,
+) {
+    tokio::spawn(async move {
+        serve_viewer(
+            Box::new(transport),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            "webrtc",
+            tx,
+            published,
+            token,
+            viewers,
+            next_id,
+            audio,
+            None,
+            metrics,
+            approve,
+            None,
+        )
+        .await;
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_iroh_accept_loop(
+    endpoint: iroh::Endpoint,
+    tx: EncodedBroadcast,
+    published: Shared,
+    token: SessionToken,
+    viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
+    next_id: Arc<AtomicU64>,
+    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    metrics: crate::telemetry::SharedMetrics,
+    approve: bool,
+) {
+    tokio::spawn(async move {
+        loop {
+            let Some(incoming) = endpoint.accept().await else {
+                break;
+            };
+            let Ok(accepting) = incoming.accept() else {
+                continue;
+            };
+            // The handshake completes here; a wrong ALPN fails before any
+            // Message flows.
+            let conn = match accepting.await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!("iroh handshake failed: {e:#}");
+                    continue;
+                }
+            };
+            if conn.alpn() != crate::network::IROH_ALPN {
+                continue;
+            }
+            let peer = conn.remote_id().to_string();
+            tracing::debug!("iroh connection from {peer} (alpn ok)");
+            let Ok((send, recv)) = conn.accept_bi().await else {
+                warn!("Iroh viewer {peer} never opened a stream");
+                continue;
+            };
+            tracing::debug!("iroh stream from {peer} open; serving");
+            let (tx, published, token, viewers, next_id, audio, metrics, endpoint) = (
+                tx.clone(),
+                published.clone(),
+                token.clone(),
+                viewers.clone(),
+                next_id.clone(),
+                audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
+                metrics.clone(),
+                endpoint.clone(),
+            );
+            let endpoint2 = endpoint.clone();
+            tokio::spawn(async move {
+                let _endpoint = endpoint2;
+                // Iroh viewers are direct by definition (no relay leg),
+                // never redirected (no relay configured in this mode), and
+                // have no QUIC handle for datagram audio.
+                serve_viewer(
+                    Box::new(crate::network::IrohTransport::new(
+                        send,
+                        recv,
+                        conn,
+                        endpoint.clone(),
+                    )),
+                    peer.parse()
+                        .unwrap_or(SocketAddr::from(([127, 0, 0, 1], 0))),
+                    "iroh",
+                    tx,
+                    published,
+                    token,
+                    viewers,
+                    next_id,
+                    audio,
+                    None,
+                    metrics,
+                    approve,
+                    None,
+                )
+                .await;
+            });
+        }
+    });
+}
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_accept_loop(
@@ -2245,6 +2478,7 @@ mod tests {
             approve: false,
             broadcast_above: 2,
             audio_source: crate::audio::AudioSource::None_,
+            transport: crate::network::TransportKind::Quic,
         };
         assert!(redirect_target(&args).is_none());
         args.relay = Some("r1:1, r2:2".into());

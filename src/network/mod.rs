@@ -17,9 +17,12 @@ pub use protocol::{
 };
 pub use resilience::{NetworkResilience, ResilienceConfig};
 pub use transport::{
-    client_endpoint, connect_direct, resolve, server_endpoint, write_encoded, Connection,
-    MessageSink, MessageSource, MessageTransport, QuicTransport, SealedSink, SealedSource,
-    TransportKind,
+    client_endpoint, connect_direct, iroh_dial, iroh_host_endpoint, iroh_ticket, parse_iroh_ticket,
+    parse_webrtc_blob, resolve, server_endpoint, webrtc_blob, webrtc_chunk, webrtc_host_offer,
+    webrtc_join, webrtc_join_open, write_encoded, Connection, IrohTransport, MessageSink,
+    MessageSource, MessageTransport, PendingWebrtcJoin, QuicTransport, SealedSink, SealedSource,
+    TransportKind, WebrtcReassembler, WebrtcTransport, IROH_ALPN, WEBRTC_CHANNEL_LABEL,
+    WEBRTC_CHUNK_BYTES,
 };
 pub use wire::{WireOp, OP_COPY, OP_FILL, OP_HEADER_BYTES, OP_RECT};
 
