@@ -97,15 +97,10 @@ jpeg-encoder = { version = "0.5", features = ["simd"] }
 # Compression
 lz4_flex = "0.11"
 
-# Async runtime. The named set is what this crate uses: runtime, net,
-# sync, time, io, and macros for `#[tokio::main/test]`. `process` and
-# `signal` come from transitive deps (iroh's tree asks for them) and would
-# be compiled regardless, so naming them here would change nothing — the
-# list stays honest about what is ours.
-tokio = {
-    version = "1.35",
-    features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "io-std"],
-}
+# Async runtime: the named set is what this crate uses (runtime, net,
+# sync, time, io, macros for `#[tokio::main/test]`). `process`/`signal`
+# still compile via iroh's tree; naming them here would change nothing.
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "io-std"] }
 async-trait = "0.1"
 
 # Network
