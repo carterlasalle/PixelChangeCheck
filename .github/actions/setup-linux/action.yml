@@ -16,6 +16,8 @@ runs:
           pkg-config \
           libasound2-dev \
           libdbus-1-dev \
+          libegl-dev \
+          libgbm-dev \
           libpipewire-0.3-dev \
           libudev-dev \
           libwayland-dev \
