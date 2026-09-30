@@ -68,11 +68,12 @@ The diff is against the **reference** — the framebuffer an up-to-date viewer h
 - Rust 1.88 or newer (see `rust-version` in `Cargo.toml`)
 - System dependencies:
   - **Linux**: `pkg-config`, `libasound2-dev`, `libdbus-1-dev`,
-    `libudev-dev`, `libwayland-dev`, `libxcb1-dev`, `libxkbcommon-dev`,
-    `libxrandr-dev`. The ALSA headers are not optional: `alsa-sys`,
-    which the audio capture path links against, runs `pkg-config` at
-    build time and fails the build without them; the native window
-    (`minifb`) needs the Wayland pair the same way.
+    `libpipewire-0.3-dev`, `libudev-dev`, `libwayland-dev`, `libxcb1-dev`,
+    `libxkbcommon-dev`, `libxrandr-dev`. The ALSA headers are not
+    optional: `alsa-sys`, which the audio capture path links against,
+    runs `pkg-config` at build time and fails the build without them;
+    the native window (`minifb`) needs the Wayland pair the same way,
+    and cpal's PipeWire backend needs `libpipewire-0.3-dev`.
   - **macOS/Windows**: none
 
 ### Install
