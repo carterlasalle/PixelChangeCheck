@@ -20,7 +20,11 @@ env:
 
 jobs:
   # The floor the crate claims. `rust-version` in Cargo.toml must not be
-  # raised without also raising this, and vice versa.
+  # raised without also raising this, and vice versa. Known gap: with
+  # iroh 1.3 in the tree this job fails (iroh requires rustc 1.91), the
+  # same failure that killed the first v0.1.3 release runs. The release
+  # workflow already builds at 1.91; this job still asserts the old
+  # floor until `rust-version` itself is raised or iroh is gated.
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
