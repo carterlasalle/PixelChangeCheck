@@ -85,7 +85,11 @@ cargo binstall pixel-change-check-client
 That downloads the release archive for your platform from the
 [releases page](https://github.com/carterlasalle/PixelChangeCheck/releases)
 and installs one binary, `pcc`. The archives are named
-`pcc-<version>-<target>` (`.tar.gz`, `.zip` on Windows).
+`pcc-<version>-<target>` (`.tar.gz`, `.zip` on Windows), covering
+(`x86_64` Linux and Windows, Apple Silicon Macs). Intel Macs are not
+covered: GitHub retired the last Intel macOS runner, so there is no
+`x86_64-apple-darwin` archive — install from source there, or run the
+Apple Silicon build under Rosetta 2.
 
 From source, on any machine with a Rust toolchain:
 

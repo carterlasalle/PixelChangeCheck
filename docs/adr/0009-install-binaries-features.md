@@ -74,9 +74,9 @@ against this tree accepted five, rejected three, and reshaped one.
   weight is dependencies (iroh/webrtc/cpal), which the feature flags
   already gate, not targets.
 - **`num_cpus`.** Dead weight, verified by search: nothing in `src/`,
-  `tests/`, `examples/` or `benches/` references it. Left in the tree
-  deliberately — deleting a dependency line is a one-line follow-up and
-  this change is already large enough to review.
+  `tests/`, `examples/` or `benches/` referenced it, so the line was
+  deleted (lockfile entry with it). The receipt survives as the method:
+  search first, delete, watch the lockfile.
 
 ## Consequences
 

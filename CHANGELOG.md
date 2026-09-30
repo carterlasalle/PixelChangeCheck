@@ -117,6 +117,9 @@
   `full`. `process` and `signal` still compile (iroh's tree requires
   them), so the saving is one fewer `parking_lot` edge today and no
   silent growth tomorrow: the list now says what is ours.
+- **Dead dependency removed.** `num_cpus` was referenced nowhere in
+  `src/`, `tests/`, `examples/` or `benches/`; the line and its
+  lockfile entry are gone.
 
 ## 0.1.2
 
