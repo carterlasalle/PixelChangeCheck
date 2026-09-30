@@ -14,7 +14,9 @@ use crate::network::{
     connect_direct, Message, MessageSink, MessageSource, MessageTransport, NetworkConfig, Rev,
     SessionToken,
 };
-use crate::pcc::types::{Frame, BYTES_PER_PIXEL};
+use crate::pcc::types::Frame;
+#[cfg(feature = "native-viewer")]
+use crate::pcc::types::BYTES_PER_PIXEL;
 use crate::pcc::{ApplyError, Compositor};
 use crate::relay::{RelayRole, RelayTransport};
 use anyhow::{Context, Result};
@@ -54,6 +56,7 @@ pub struct ViewArgs {
 /// Receipt: at 30 fps this is a second of video, far more than any
 /// healthy session needs, and still bounded -- past it the oldest frame is
 /// dropped, because a stale frame is worth less than a fresh one.
+#[cfg(feature = "audio")]
 const PLAYOUT_DEPTH: usize = 30;
 
 /// What the presentation layer needs to know, shared with the receive
@@ -201,12 +204,24 @@ pub fn run_view(args: ViewArgs, metrics: crate::telemetry::SharedMetrics) -> Res
         }
     });
 
+    #[cfg(feature = "native-viewer")]
     if args.show_window {
         if let Err(e) = run_window_loop(surface.clone()) {
             warn!("Falling back to headless mode (no window available): {e}");
             run_headless_loop(surface.clone());
         }
-    } else {
+    }
+    #[cfg(feature = "native-viewer")]
+    if !args.show_window {
+        run_headless_loop(surface.clone());
+    }
+    // Without the `native-viewer` feature there is no window to open:
+    // every session is headless, exactly as if `--no-window` were passed.
+    #[cfg(not(feature = "native-viewer"))]
+    {
+        if args.show_window {
+            warn!("This build has no native window; running headless");
+        }
         run_headless_loop(surface.clone());
     }
 
@@ -539,7 +554,7 @@ async fn receive_on_transport(
     surface: &std::sync::Arc<parking_lot::Mutex<Surface>>,
     metrics: &crate::telemetry::SharedMetrics,
     _resume: Option<(crate::network::Epoch, crate::network::Rev)>,
-    quic: Option<quinn::Connection>,
+    #[cfg_attr(not(feature = "audio"), allow(unused_variables))] quic: Option<quinn::Connection>,
 ) -> Result<Option<(crate::network::Epoch, crate::network::Rev)>> {
     // End-to-end encryption, before anything else is exchanged. The token
     // is the pre-shared key, so there is no second credential to manage
@@ -590,20 +605,34 @@ async fn receive_on_transport(
     // The two clocks, and the bridge between them. Until the estimator
     // converges, video plays as soon as it arrives rather than being
     // scheduled against a plausible-but-wrong offset.
+    #[cfg(feature = "audio")]
     let mut sync = crate::audio::sync::Estimator::new();
+    #[cfg(feature = "audio")]
     let mut sharer_origin: Option<std::time::Instant> = None;
     // The output device lives on its own thread, so nothing here holds a
     // `!Send` stream across an await.
+    //
+    // Without the `audio` feature none of this exists: the viewer still
+    // runs, it just never has an audio clock and shows every frame on
+    // arrival, exactly as if the sharer had sent silence forever.
+    #[cfg(feature = "audio")]
     let mut audio_out: Option<crate::audio::AudioOutput> = None;
+    #[cfg(feature = "audio")]
     let mut audio_played: Option<crate::audio::output::PlayedReceiver<u64>> = None;
+    #[cfg(feature = "audio")]
     let mut audio: Option<crate::audio::AudioReceiver> = None;
+    #[cfg(feature = "audio")]
     let mut audio_connection: Option<quinn::Connection> = None;
     // Adaptive hold for late frames, plus the arrival/pts history that
     // feeds it. Gaps are concealed in pts order when the next frame
     // arrives; the hold bounds how many frames one gap may produce.
+    #[cfg(feature = "audio")]
     let mut audio_jitter = crate::audio::Jitter::new();
+    #[cfg(feature = "audio")]
     let mut last_arrival: Option<std::time::Instant> = None;
+    #[cfg(feature = "audio")]
     let mut last_audio_pts: Option<u64> = None;
+    #[cfg(feature = "audio")]
     if let Some(connection) = quic {
         // Datagrams exist only on QUIC direct connections. Relay
         // transports do not expose the underlying connection, so viewers
@@ -639,12 +668,14 @@ async fn receive_on_transport(
     let mut last_ack: Rev = 0;
     // With audio, a frame waits for the audio clock rather than being
     // shown the instant it decodes. Without audio there is no clock, and
-    // the frame is shown immediately.
+    // the frame is shown immediately, so there is nothing to hold.
+    #[cfg(feature = "audio")]
     let mut pending: Option<Frame> = None;
 
     loop {
         // Drain whatever audio has arrived, then take one visual message.
         // A blocked visual stream must not stop audio, and vice versa.
+        #[cfg(feature = "audio")]
         if let (Some(receiver), Some(connection), Some(out)) = (
             audio.as_mut(),
             audio_connection.as_ref(),
@@ -729,6 +760,7 @@ async fn receive_on_transport(
             }
         }
         // Release whatever the audio clock says is due.
+        #[cfg(feature = "audio")]
         if let Some(rx) = audio_played.as_ref() {
             while let Ok(played) = rx.try_recv() {
                 if played
@@ -780,18 +812,19 @@ async fn receive_on_transport(
                 metrics.apply.record_duration(apply_start.elapsed());
                 if let Some((w, h)) = compositor.dimensions() {
                     let frame = Frame::with_pts(rev, w, h, compositor.buffer().to_vec(), pts_us)?;
+                    // With audio, hold the frame for the audio clock;
+                    // without it there is no clock, so present immediately.
+                    // One if/else: the frame moves exactly once, and without
+                    // audio the hold arm (and `pending` itself) do not exist.
+                    #[cfg(feature = "audio")]
                     if sync.convergence() && audio_played.is_some() {
                         // Hold it: the audio clock decides when it is due.
                         pending = Some(frame);
                     } else {
-                        let mut s = surface.lock();
-                        s.frame = Some(Arc::new(frame));
-                        // The exact pixels decide: any interim hint at or
-                        // below this revision is now history.
-                        if s.preview.is_some_and(|p| p.rev <= rev) {
-                            s.preview = None;
-                        }
+                        present_frame(surface, frame, rev);
                     }
+                    #[cfg(not(feature = "audio"))]
+                    present_frame(surface, frame, rev);
                     // The gap between joining and this frame is the single
                     // number a new user cares about most.
                     metrics
@@ -818,17 +851,20 @@ async fn receive_on_transport(
                         if let Some((w, h)) = compositor.dimensions() {
                             let frame =
                                 Frame::with_pts(rev, w, h, compositor.buffer().to_vec(), pts_us)?;
+                            // Hold for the audio clock when there is
+                            // one; otherwise present immediately. One
+                            // if/else under audio, one bare call without:
+                            // the frame moves exactly once either way.
+                            #[cfg(feature = "audio")]
                             if sync.convergence() && audio_played.is_some() {
                                 // Hold it: the audio clock decides when
                                 // it is due, never the arrival.
                                 pending = Some(frame);
                             } else {
-                                let mut s = surface.lock();
-                                s.frame = Some(Arc::new(frame));
-                                if s.preview.is_some_and(|p| p.rev <= rev) {
-                                    s.preview = None;
-                                }
+                                present_frame(surface, frame, rev);
                             }
+                            #[cfg(not(feature = "audio"))]
+                            present_frame(surface, frame, rev);
                         }
                         if rev != last_ack {
                             last_ack = rev;
@@ -949,6 +985,7 @@ fn server_name_of(target: &str) -> &str {
     }
 }
 
+#[cfg(feature = "native-viewer")]
 fn run_window_loop(surface: Arc<Mutex<Surface>>) -> Result<()> {
     use minifb::{Key, Window, WindowOptions};
 
@@ -1013,6 +1050,7 @@ fn run_window_loop(surface: Arc<Mutex<Surface>>) -> Result<()> {
 /// A 12x16 arrow drawn into an ARGB buffer, clipped at the edges.
 /// White fill, black outline: visible on any content, and trivially
 /// cheap — a bounding-box walk, no allocation.
+#[cfg(feature = "native-viewer")]
 fn draw_cursor(argb: &mut [u32], w: usize, h: usize, cx: usize, cy: usize) {
     // (dx, dy, fill?) rows of the arrow shape.
     const ROWS: [&str; 16] = [
@@ -1047,6 +1085,20 @@ fn draw_cursor(argb: &mut [u32], w: usize, h: usize, cx: usize, cy: usize) {
     }
 }
 
+/// Publish one exact frame to the presentation surface, clearing any
+/// interim preview it supersedes. The two call sites (snapshot commit and
+/// partial update) shared this block verbatim; the helper exists so the
+/// `audio`/`native-viewer` feature matrix gates it once, not twice.
+fn present_frame(surface: &Arc<Mutex<Surface>>, frame: Frame, rev: Rev) {
+    let mut s = surface.lock();
+    s.frame = Some(Arc::new(frame));
+    // The exact pixels decide: any interim hint at or below this revision
+    // is now history.
+    if s.preview.is_some_and(|p| p.rev <= rev) {
+        s.preview = None;
+    }
+}
+
 fn run_headless_loop(surface: Arc<Mutex<Surface>>) {
     info!("Running headless (no window). Press Ctrl+C to quit.");
     loop {
@@ -1071,6 +1123,7 @@ fn run_headless_loop(surface: Arc<Mutex<Surface>>) {
 /// Wait for a frame, optionally giving up after a deadline. The old code
 /// looped here forever, so a failed connection left the app hung with no
 /// way out and no explanation.
+#[cfg(feature = "native-viewer")]
 fn wait_for_frame(
     surface: &Arc<Mutex<Surface>>,
     _deadline: Option<Duration>,
@@ -1118,6 +1171,9 @@ mod tests {
         assert!(split_relays("").is_empty());
     }
 
+    // The arrow lives behind `native-viewer` with the window loop
+    // that is its only caller.
+    #[cfg(feature = "native-viewer")]
     #[test]
     fn cursor_arrow_paints_inside_and_clips_at_edges() {
         let (w, h) = (16usize, 16usize);

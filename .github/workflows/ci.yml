@@ -49,8 +49,13 @@ jobs:
       - name: Install the Linux build dependencies
         if: runner.os == 'Linux'
         uses: ./.github/actions/setup-linux
-      - run: rustup toolchain install stable --profile minimal --component clippy
       - run: cargo clippy --all-targets --locked -- -D warnings
+      # A gate that compiles only the default rots silently: the feature
+      # flags exist so a headless relay can skip cpal/Opus and minifb, and
+      # every combination below must stay green.
+      - run: cargo clippy --no-default-features --all-targets --locked -- -D warnings
+      - run: cargo clippy --no-default-features --features audio --all-targets --locked -- -D warnings
+      - run: cargo clippy --no-default-features --features native-viewer --all-targets --locked -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})
@@ -64,8 +69,8 @@ jobs:
       - name: Install the Linux build dependencies
         if: runner.os == 'Linux'
         uses: ./.github/actions/setup-linux
-      - run: rustup toolchain install stable --profile minimal
       - run: cargo test --locked --all-targets
+      - run: cargo test --locked --all-targets --no-default-features
 
   # The transport tests bind loopback sockets; a runner that blocks them
   # would look like a product failure.

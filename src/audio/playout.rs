@@ -1,11 +1,15 @@
+#[cfg(feature = "audio")]
 use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "audio")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::codec::{SAMPLES_PER_FRAME, SAMPLE_RATE};
+use super::codec::SAMPLES_PER_FRAME;
+#[cfg(feature = "audio")]
+use super::codec::SAMPLE_RATE;
 
 const AUDIO_QUEUE_SAMPLES: usize = SAMPLES_PER_FRAME * 8;
 
@@ -30,6 +34,7 @@ pub struct Playout<R> {
     dropped_oldest: u64,
     audio: Arc<Mutex<AudioQueue>>,
     audio_now: Arc<Mutex<Option<Instant>>>,
+    #[cfg(feature = "audio")]
     output: Option<cpal::Stream>,
 }
 
@@ -43,6 +48,7 @@ impl<R> Playout<R> {
             dropped_oldest: 0,
             audio: Arc::new(Mutex::new(AudioQueue::default())),
             audio_now: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "audio")]
             output: None,
         }
     }
@@ -113,6 +119,11 @@ impl<R> Playout<R> {
 
     /// Starts the default output at 48 kHz. Input and output use the same fixed
     /// codec rate so the callback never resamples or allocates on its hot path.
+    ///
+    /// Device support only: needs `audio_output` (and therefore cpal).
+    /// Without it the scheduler still works — `audio_now()` simply stays
+    /// `None` and the caller presents frames immediately.
+    #[cfg(feature = "audio")]
     pub fn start_default_output(&mut self) -> Result<()> {
         if self.output.is_some() {
             return Err(anyhow!("audio output is already running"));
@@ -152,6 +163,7 @@ impl<R> Playout<R> {
         Ok(())
     }
 
+    #[cfg(feature = "audio")]
     pub fn stop_output(&mut self) {
         self.output.take();
     }
@@ -173,11 +185,13 @@ impl AudioQueue {
         self.samples.extend(pcm.iter().copied());
     }
 
+    #[cfg(feature = "audio")]
     fn next(&mut self) -> f32 {
         self.samples.pop_front().unwrap_or(0.0)
     }
 }
 
+#[cfg(feature = "audio")]
 fn build_output_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -226,6 +240,7 @@ fn build_output_stream(
     }
 }
 
+#[cfg(feature = "audio")]
 fn fill_output<T>(
     output: &mut [T],
     channels: usize,

@@ -52,6 +52,7 @@ impl AudioOutput {
             .name("pcc-audio-out".into())
             .spawn(move || {
                 let mut playout = Playout::<R>::new(capacity);
+                #[cfg(feature = "audio")]
                 match playout.start_default_output() {
                     Ok(()) => {}
                     Err(e) => {
@@ -60,6 +61,15 @@ impl AudioOutput {
                         tracing::debug!("no audio output device: {e}");
                     }
                 }
+                #[cfg(not(feature = "audio"))]
+                {
+                    // No device support: drain and drop so the sender
+                    // never blocks; the session keeps its clock but no
+                    // speaker. This is the headless/CI path made explicit.
+                    let _ = (&mut playout, &played_tx, &thread_stats);
+                    while frames_rx.recv().is_ok() {}
+                }
+                #[cfg(feature = "audio")]
                 while let Ok(pcm) = frames_rx.recv() {
                     playout.queue_audio(&pcm);
                     if let Some(now) = playout.audio_now() {

@@ -26,11 +26,11 @@ description = "Replicates your screen exactly and sends only the pixels that cha
 repository = "https://github.com/carterlasalle/pixelchangecheck"
 readme = "README.md"
 keywords = ["screen-share", "remote-desktop", "quic", "pixel-diff", "streaming"]
-
 categories = ["multimedia::video", "network-programming", "command-line-utilities"]
 # Tooling that belongs to this repository's development, not to its
 # consumers. Without this, `cargo publish` ships 6 MB of agent config and
 # a stale status file to every downloader.
+
 exclude = [
     "/.omp",
     "/.bughunt",
@@ -46,6 +46,18 @@ exclude = [
     "/.dockerignore",
 ]
 
+# `cargo binstall pixel-change-check-client` downloads the release
+# archives below instead of compiling 700+ crates on the user's machine.
+# The URL scheme must match the `release` job's asset names exactly;
+# binstall's `{ target }` is the Rust target triple, `{ archive-suffix }`
+# the extension with its leading dot. Windows uses zip, everything else
+# tgz (see the per-target overrides).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/pcc-{ version }-{ target }{ archive-suffix }"
+bin-dir = "pcc{ binary-ext }"
+pkg-fmt = "tgz"
+[package.metadata.binstall.overrides.'cfg(target_os = "windows")']
+pkg-fmt = "zip"
 [[bin]]
 name = "pcc"
 path = "src/main.rs"
@@ -57,6 +69,20 @@ path = "examples/simple_screen_share.rs"
 [[example]]
 name = "benchmarks"
 path = "benches/benchmarks.rs"
+
+# Optional platform-heavy surfaces. Both default on, so a plain
+# `cargo install` behaves exactly as before; `--no-default-features`
+# drops them (and the C/C++/system libraries behind them) for a
+# headless relay or a minimal viewer that never opens a window.
+#
+# * `audio` — cpal capture/playout plus the Opus codec (and its
+#   vendored cmake build of libopus when no system library is found).
+# * `native-viewer` — the minifb desktop window (X11/Wayland dev
+#   headers on Linux). The web viewer is always available instead.
+[features]
+default = ["audio", "native-viewer"]
+audio = ["dep:cpal", "dep:opus"]
+native-viewer = ["dep:minifb"]
 
 [dependencies]
 # Screen capture
@@ -71,8 +97,15 @@ jpeg-encoder = { version = "0.5", features = ["simd"] }
 # Compression
 lz4_flex = "0.11"
 
-# Async runtime
-tokio = { version = "1.35", features = ["full"] }
+# Async runtime. The named set is what this crate uses: runtime, net,
+# sync, time, io, and macros for `#[tokio::main/test]`. `process` and
+# `signal` come from transitive deps (iroh's tree asks for them) and would
+# be compiled regardless, so naming them here would change nothing — the
+# list stays honest about what is ours.
+tokio = {
+    version = "1.35",
+    features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "io-std"],
+}
 async-trait = "0.1"
 
 # Network
@@ -103,7 +136,7 @@ clap = { version = "4.5", features = ["derive"] }
 tiny_http = "0.12"
 
 # Native window viewer
-minifb = "0.27"
+minifb = { version = "0.27", optional = true }
 
 # Relay session ids
 rand = "0.8"
@@ -115,8 +148,8 @@ tokio-rustls = "0.26"
 x25519-dalek = "2.0"
 chacha20poly1305 = "0.10"
 tracing-appender = "0.2"
-cpal = "0.15"
-opus = "0.4"
+cpal = { version = "0.15", optional = true }
+opus = { version = "0.4", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 rand_core = "0.6"
 aes-gcm = "0.10"
@@ -128,9 +161,21 @@ xcap = "0.9.8"
 iroh = "1"
 webrtc = { version = "0.21.0", features = ["runtime-tokio"] }
 
+# `release` is what `cargo install` (and every local dev build) pays for,
+# so it optimizes for compile speed: thin LTO and 16 codegen units build
+# a large multiple faster than fat LTO with one, for a low single-digit
+# runtime cost this project's benches can measure before anyone commits
+# to it. `dist` is what the release workflow ships: full optimization,
+# paid once per release by CI instead of once per user.
 [profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+strip = true
+
+[profile.dist]
+inherits = "release"
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
-strip = true

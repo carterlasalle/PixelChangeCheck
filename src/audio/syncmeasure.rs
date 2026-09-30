@@ -19,7 +19,9 @@
 
 use std::time::Duration;
 
-use super::codec::{OpusDecoder, OpusEncoder, CHANNELS, SAMPLES_PER_FRAME, SAMPLE_RATE};
+#[cfg(feature = "audio")]
+use super::codec::{OpusDecoder, OpusEncoder};
+use super::codec::{CHANNELS, SAMPLES_PER_FRAME, SAMPLE_RATE};
 
 /// A one-frame burst whose energy peaks at a known sample.
 pub fn tone_burst() -> Vec<f32> {
@@ -55,6 +57,10 @@ pub fn playout_ms(samples_per_frame: usize) -> f64 {
 
 /// Round-trip a tone through Opus and return the time the audio clock says
 /// it is heard.
+///
+/// Needs the `audio` feature: without a codec there is nothing to round
+/// trip through.
+#[cfg(feature = "audio")]
 pub fn measure_tone_delay() -> Result<Duration, anyhow::Error> {
     let pcm = tone_burst();
     let mut encoder = OpusEncoder::new()?;
@@ -80,6 +86,15 @@ mod tests {
     use super::*;
     use crate::audio::sync::{Estimator, OffsetSample};
 
+    /// Without the codec only the pure-math tests run; the round trip
+    /// needs libopus.
+    #[cfg(not(feature = "audio"))]
+    #[test]
+    fn without_audio_only_the_math_is_tested() {
+        assert!((playout_ms(SAMPLES_PER_FRAME) - 20.0).abs() < 0.001);
+    }
+
+    #[cfg(feature = "audio")]
     #[test]
     fn a_tone_survives_the_codec_with_a_bounded_delay() {
         let delay = measure_tone_delay().expect("the tone must round trip");

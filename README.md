@@ -75,21 +75,47 @@ The diff is against the **reference** — the framebuffer an up-to-date viewer h
 
 ### Install
 
-From crates.io, on any machine with a Rust toolchain:
+The fastest route is a prebuilt binary — no compiler, no system
+headers, no twenty-minute build:
 
 ```sh
-cargo install pixel-change-check-client
+cargo binstall pixel-change-check-client
 ```
 
-That installs one binary, `pcc`. If you would rather not build it, the
-release page carries prebuilt archives for macOS, Linux and Windows:
+That downloads the release archive for your platform from the
+[releases page](https://github.com/carterlasalle/PixelChangeCheck/releases)
+and installs one binary, `pcc`. The archives are named
+`pcc-<version>-<target>` (`.tar.gz`, `.zip` on Windows).
 
-```text
-https://github.com/carterlasalle/PixelChangeCheck/releases
+From source, on any machine with a Rust toolchain:
+
+```sh
+cargo install pixel-change-check-client --locked
 ```
 
-Either route still needs the system dependencies above on Linux,
-because the capture path links against them.
+`--locked` matters: the committed `Cargo.lock` pins every transitive
+dependency, so the build you get is the build CI tested rather than
+whatever is newest today. The default build includes audio capture and
+the native window. A headless machine that needs neither — a relay
+host, a CI runner — can skip the system libraries entirely:
+
+```sh
+cargo install pixel-change-check-client --locked --no-default-features
+```
+
+That drops cpal/Opus (no ALSA headers, no vendored libopus cmake
+build) and minifb (no X11/Wayland dev headers); the web viewer and
+every transport keep working. With default features on Linux you still
+need the system dependencies above, because the capture path links
+against them.
+
+A note on Opus specifically: with `libopus-dev` (Debian/Ubuntu) or
+`opus` (Homebrew) plus `pkg-config` installed, the build links the
+system library instead of compiling a vendored copy with cmake. That
+one package is the difference between a pure-Rust build and a C
+toolchain step. There is deliberately no `.cargo/config.toml` forcing
+a linker here, so nothing about that choice is hidden: the default
+build works with stock `rustup`, and faster linkers stay opt-in.
 
 ### Share your screen
 

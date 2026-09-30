@@ -17,11 +17,15 @@
 //! presentation problem; corrupting the authoritative lossless pixels to
 //! fix it would undo every guarantee in `DESIGN.md`.
 
-use anyhow::{Context, Result};
+#[cfg(feature = "audio")]
+use anyhow::Context;
+use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "audio")]
 use super::codec::OpusEncoder;
+#[cfg(feature = "audio")]
 use super::codec::{CHANNELS, SAMPLES_PER_CHANNEL, SAMPLES_PER_FRAME};
 
 /// The sharer's side: capture and encode one Opus frame.
@@ -31,16 +35,19 @@ use super::codec::{CHANNELS, SAMPLES_PER_CHANNEL, SAMPLES_PER_FRAME};
 /// for it -- the stall this type is meant to avoid. A datagram is not
 /// retransmitted: frame 42 is simply gone, concealed, and 43 arrives on
 /// time. The picture stream is unaffected either way.
+#[cfg(feature = "audio")]
 pub struct AudioSender {
     encoder: OpusEncoder,
 }
 
+#[cfg(feature = "audio")]
 impl std::fmt::Debug for AudioSender {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioSender").finish_non_exhaustive()
     }
 }
 
+#[cfg(feature = "audio")]
 impl AudioSender {
     pub fn new() -> Result<Self> {
         Ok(Self {
@@ -111,6 +118,7 @@ pub struct DatagramFrame<'a> {
 }
 
 /// The viewer's side: read, decode, and hand frames to the playout clock.
+#[cfg(feature = "audio")]
 pub struct AudioReceiver {
     decoder: super::codec::OpusDecoder,
     seen: u64,
@@ -118,6 +126,7 @@ pub struct AudioReceiver {
     last_pts_us: u64,
 }
 
+#[cfg(feature = "audio")]
 impl std::fmt::Debug for AudioReceiver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioReceiver")
@@ -127,6 +136,7 @@ impl std::fmt::Debug for AudioReceiver {
     }
 }
 
+#[cfg(feature = "audio")]
 impl AudioReceiver {
     pub fn new() -> Result<Self> {
         Ok(Self {
@@ -247,12 +257,13 @@ impl DecodedAudio {
 }
 
 /// Encode a 20 ms Opus frame, for the sync harness and for tests.
+#[cfg(feature = "audio")]
 pub fn encode_frame_for_test(pcm: &[f32]) -> Result<Vec<u8>> {
     let mut encoder = OpusEncoder::new().context("test encoder")?;
     encoder.encode(pcm)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "audio"))]
 mod tests {
     use super::*;
 

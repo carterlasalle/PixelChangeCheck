@@ -1,3 +1,4 @@
+#[cfg(feature = "audio")]
 use anyhow::{anyhow, Context, Result};
 
 /// Opus operates internally at this rate, so using it avoids resampling at the
@@ -11,8 +12,10 @@ pub const CHANNELS: usize = 2;
 pub const SAMPLES_PER_CHANNEL: usize = 960;
 /// Total interleaved `f32` values in one 20 ms stereo frame.
 pub const SAMPLES_PER_FRAME: usize = SAMPLES_PER_CHANNEL * CHANNELS;
+#[cfg(feature = "audio")]
 const MAX_PACKET_BYTES: usize = 1_275;
 
+#[cfg(feature = "audio")]
 fn require_frame_len(samples: usize) -> Result<()> {
     if samples != SAMPLES_PER_FRAME {
         return Err(anyhow!(
@@ -23,10 +26,12 @@ fn require_frame_len(samples: usize) -> Result<()> {
 }
 
 /// A 48 kHz stereo Opus encoder with fixed 20 ms frames.
+#[cfg(feature = "audio")]
 pub struct OpusEncoder {
     inner: opus::Encoder,
 }
 
+#[cfg(feature = "audio")]
 impl OpusEncoder {
     pub fn new() -> Result<Self> {
         let mut inner = opus::Encoder::new(
@@ -62,10 +67,12 @@ impl OpusEncoder {
 /// Opus has roughly 6.5 ms of algorithmic delay. A decoder must therefore not
 /// expect immediately audible output from its first packet; the playout buffer
 /// owns that startup delay rather than pretending the first packet is late.
+#[cfg(feature = "audio")]
 pub struct OpusDecoder {
     inner: opus::Decoder,
 }
 
+#[cfg(feature = "audio")]
 impl OpusDecoder {
     pub fn new() -> Result<Self> {
         let inner = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Stereo)
@@ -105,7 +112,7 @@ impl OpusDecoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "audio"))]
 mod tests {
     use super::*;
 

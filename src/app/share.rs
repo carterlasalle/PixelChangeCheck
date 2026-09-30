@@ -15,6 +15,7 @@
 //!   with an explicit begin/commit, so an interrupted transfer cannot
 //!   half-replace a working surface.
 
+#[cfg(feature = "audio")]
 use crate::audio::transport::EncodedFrame as EncodedAudio;
 use crate::capture::CaptureSource;
 use crate::encoder::SurfaceSnapshot;
@@ -392,12 +393,14 @@ mod revision_ring_tests {
 
 /// The capture loop and the datagram pump share one frame shape instead
 /// of two parallel structs with a `From` between them.
+#[cfg(feature = "audio")]
 type AudioBroadcast = broadcast::Sender<Arc<EncodedAudio>>;
 
 /// How many audio frames may queue per viewer. 256 frames is five
 /// seconds at 20 ms, which is far more than any healthy viewer needs and
 /// still bounded: past it the viewer is not keeping up with audio, and a
 /// gap is a click rather than a stall.
+#[cfg(feature = "audio")]
 const AUDIO_QUEUE: usize = 256;
 
 /// Per-viewer feedback, used for adaptation and for saying who is behind.
@@ -474,7 +477,12 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
     let (tx, keepalive) = broadcast::channel::<Arc<Vec<u8>>>(BROADCAST_DEPTH);
     // Audio is encoded once here and shared, exactly as visual messages
     // are, so N viewers do not mean N Opus encodes.
+    // Without the `audio` feature there is no capture pump and no
+    // per-viewer audio leg: every session is video-only, exactly as if
+    // `--audio-source none` had been passed.
+    #[cfg(feature = "audio")]
     let (audio_tx, audio_rx) = tokio::sync::broadcast::channel::<Arc<EncodedAudio>>(AUDIO_QUEUE);
+    #[cfg(feature = "audio")]
     if args.audio_source != crate::audio::AudioSource::None_ {
         start_audio_capture(audio_tx.clone(), args.audio_source);
     }
@@ -642,7 +650,10 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
                     token.clone(),
                     viewers.clone(),
                     next_viewer_id.clone(),
+                    #[cfg(feature = "audio")]
                     Some((audio_tx.clone(), audio_rx.resubscribe())),
+                    #[cfg(not(feature = "audio"))]
+                    None,
                     metrics.clone(),
                     args.approve,
                 );
@@ -667,7 +678,10 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
             token.clone(),
             viewers.clone(),
             next_viewer_id.clone(),
+            #[cfg(feature = "audio")]
             Some((audio_tx.clone(), audio_rx.resubscribe())),
+            #[cfg(not(feature = "audio"))]
+            None,
             metrics.clone(),
             args.approve,
         );
@@ -693,7 +707,10 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
                 token.clone(),
                 viewers.clone(),
                 next_viewer_id.clone(),
+                #[cfg(feature = "audio")]
                 Some((audio_tx.clone(), audio_rx.resubscribe())),
+                #[cfg(not(feature = "audio"))]
+                None,
                 metrics.clone(),
                 args.approve,
                 redirect_to.clone(),
@@ -729,7 +746,10 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
                     published.clone(),
                     viewers.clone(),
                     next_viewer_id.clone(),
+                    #[cfg(feature = "audio")]
                     Some((audio_tx.clone(), audio_rx.resubscribe())),
+                    #[cfg(not(feature = "audio"))]
+                    None,
                     metrics.clone(),
                     args.approve,
                     None,
@@ -779,6 +799,7 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
 /// never wait on the share loop, and the share loop must never wait on
 /// audio. Each frame is encoded **once** here and broadcast, so N viewers
 /// do not mean N Opus encodes.
+#[cfg(feature = "audio")]
 fn start_audio_capture(audio_tx: AudioBroadcast, which: crate::audio::AudioSource) {
     let source = match crate::audio::capture::open_source(which) {
         Ok(s) => s,
@@ -914,7 +935,11 @@ fn spawn_webrtc_session(
     token: SessionToken,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_id: Arc<AtomicU64>,
-    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    #[cfg(feature = "audio")] audio: Option<(
+        AudioBroadcast,
+        broadcast::Receiver<Arc<EncodedAudio>>,
+    )>,
+    #[cfg(not(feature = "audio"))] audio: Option<()>,
     metrics: crate::telemetry::SharedMetrics,
     approve: bool,
 ) {
@@ -946,7 +971,11 @@ fn spawn_iroh_accept_loop(
     token: SessionToken,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_id: Arc<AtomicU64>,
-    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    #[cfg(feature = "audio")] audio: Option<(
+        AudioBroadcast,
+        broadcast::Receiver<Arc<EncodedAudio>>,
+    )>,
+    #[cfg(not(feature = "audio"))] audio: Option<()>,
     metrics: crate::telemetry::SharedMetrics,
     approve: bool,
 ) {
@@ -983,7 +1012,10 @@ fn spawn_iroh_accept_loop(
                 token.clone(),
                 viewers.clone(),
                 next_id.clone(),
+                #[cfg(feature = "audio")]
                 audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
+                #[cfg(not(feature = "audio"))]
+                audio,
                 metrics.clone(),
                 endpoint.clone(),
             );
@@ -1028,7 +1060,11 @@ fn spawn_accept_loop(
     token: SessionToken,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_id: Arc<AtomicU64>,
-    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    #[cfg(feature = "audio")] audio: Option<(
+        AudioBroadcast,
+        broadcast::Receiver<Arc<EncodedAudio>>,
+    )>,
+    #[cfg(not(feature = "audio"))] audio: Option<()>,
     metrics: crate::telemetry::SharedMetrics,
     approve: bool,
     redirect_to: Option<(String, String)>,
@@ -1051,7 +1087,10 @@ fn spawn_accept_loop(
                         token.clone(),
                         viewers.clone(),
                         next_id.clone(),
+                        #[cfg(feature = "audio")]
                         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
+                        #[cfg(not(feature = "audio"))]
+                        audio,
                         metrics.clone(),
                         redirect_to.clone(),
                     );
@@ -1100,7 +1139,11 @@ fn spawn_relay_loop(
     published: Shared,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_id: Arc<AtomicU64>,
-    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    #[cfg(feature = "audio")] audio: Option<(
+        AudioBroadcast,
+        broadcast::Receiver<Arc<EncodedAudio>>,
+    )>,
+    #[cfg(not(feature = "audio"))] audio: Option<()>,
     metrics: crate::telemetry::SharedMetrics,
     approve: bool,
     // Relayed viewers are already where broadcast mode wants them, so the
@@ -1136,7 +1179,10 @@ fn spawn_relay_loop(
                         token.clone(),
                         viewers.clone(),
                         next_id.clone(),
+                        #[cfg(feature = "audio")]
                         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
+                        #[cfg(not(feature = "audio"))]
+                        audio,
                         metrics.clone(),
                         approve,
                     )
@@ -1263,7 +1309,11 @@ async fn serve_relay_fan(
     token: SessionToken,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_viewer_id: Arc<AtomicU64>,
-    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    #[cfg(feature = "audio")] audio: Option<(
+        AudioBroadcast,
+        broadcast::Receiver<Arc<EncodedAudio>>,
+    )>,
+    #[cfg(not(feature = "audio"))] audio: Option<()>,
     metrics: crate::telemetry::SharedMetrics,
     approve: bool,
 ) {
@@ -1341,7 +1391,11 @@ fn spawn_fan_session(
     token: &SessionToken,
     viewers: &Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_viewer_id: &Arc<AtomicU64>,
-    audio: &Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
+    #[cfg(feature = "audio")] audio: &Option<(
+        AudioBroadcast,
+        broadcast::Receiver<Arc<EncodedAudio>>,
+    )>,
+    #[cfg(not(feature = "audio"))] audio: &Option<()>,
     metrics: &crate::telemetry::SharedMetrics,
     approve: bool,
     exit_tx: &tokio::sync::mpsc::Sender<u32>,
@@ -1354,7 +1408,10 @@ fn spawn_fan_session(
         token.clone(),
         viewers.clone(),
         next_viewer_id.clone(),
+        #[cfg(feature = "audio")]
         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
+        #[cfg(not(feature = "audio"))]
+        (*audio),
         metrics.clone(),
         approve,
         exit_tx.clone(),
@@ -1432,8 +1489,15 @@ async fn serve_viewer(
     token: SessionToken,
     viewers: Arc<Mutex<HashMap<u64, ViewerStats>>>,
     next_viewer_id: Arc<AtomicU64>,
-    audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
-    quic: Option<quinn::Connection>,
+    #[cfg(feature = "audio")] audio: Option<(
+        AudioBroadcast,
+        broadcast::Receiver<Arc<EncodedAudio>>,
+    )>,
+    #[cfg(not(feature = "audio"))]
+    #[cfg_attr(not(feature = "audio"), allow(unused_variables))]
+    audio: Option<()>,
+    #[cfg_attr(not(feature = "audio"), allow(unused_variables))] quic: Option<quinn::Connection>,
+    #[cfg_attr(not(feature = "audio"), allow(unused_variables))]
     metrics: crate::telemetry::SharedMetrics,
     approve: bool,
     redirect_to: Option<(String, String)>,
@@ -1571,6 +1635,7 @@ async fn serve_viewer(
     // paths do not expose the QUIC connection. That is a deliberate
     // omission, not an accident: the alternative would serialize several
     // loss-recovery protocols without measuring how anyone uses one.
+    #[cfg(feature = "audio")]
     if let (Some((_, _)), Some(mut arx), Some(connection)) = (
         audio.as_ref(),
         audio.as_ref().map(|(_, r)| r.resubscribe()),

@@ -64,17 +64,30 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+      # Archive names use the Rust target triple, not RUNNER_OS/ARCH:
+      # that is the exact scheme `[package.metadata.binstall]` points
+      # at, so `cargo binstall` resolves without per-target overrides.
+      # The matrix only covers the three triples below (notably no
+      # macOS Intel: see the matrix comment), so the mapping is exact.
+      - name: Resolve target triple
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-latest) echo "PCC_TARGET=x86_64-unknown-linux-gnu" >> "$GITHUB_ENV" ;;
+            macos-latest) echo "PCC_TARGET=aarch64-apple-darwin" >> "$GITHUB_ENV" ;;
+            windows-latest) echo "PCC_TARGET=x86_64-pc-windows-msvc" >> "$GITHUB_ENV" ;;
+          esac
       - name: Build release binary
-        run: cargo build --locked --release
+        run: cargo build --locked --profile dist
       - name: Package Unix archive
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#v}"
-          archive="${BINARY}-${version}-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz"
+          archive="${BINARY}-${version}-${PCC_TARGET}.tar.gz"
           mkdir -p package
-          cp "target/release/${BINARY}" package/
+          cp "target/dist/${BINARY}" package/
           cp README.md package/
           if [ -f LICENSE ]; then cp LICENSE package/; fi
           tar -C package -czf "$archive" .
@@ -84,9 +97,9 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:RELEASE_TAG -replace '^v', ''
-          $archive = "$env:BINARY-$version-$env:RUNNER_OS-$env:RUNNER_ARCH.zip"
+          $archive = "$env:BINARY-$version-$env:PCC_TARGET.zip"
           New-Item -ItemType Directory -Force package | Out-Null
-          Copy-Item "target/release/$env:BINARY.exe" package/
+          Copy-Item "target/dist/$env:BINARY.exe" package/
           Copy-Item README.md package/
           if (Test-Path LICENSE) { Copy-Item LICENSE package/ }
           Compress-Archive -Path package/* -DestinationPath $archive

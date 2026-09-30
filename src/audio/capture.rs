@@ -1,13 +1,20 @@
-use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "audio")]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
+#[cfg(feature = "audio")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "audio")]
+use std::sync::atomic::AtomicU64;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
     mpsc, Arc,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::codec::{SAMPLES_PER_FRAME, SAMPLE_RATE};
+use super::codec::SAMPLES_PER_FRAME;
+#[cfg(feature = "audio")]
+use super::codec::SAMPLE_RATE;
 
 /// Which audio to capture. The default stays a microphone; `system`
 /// and `both` are the seam for the per-platform loopback backends
@@ -51,6 +58,7 @@ impl AudioSource {
 /// Serato Virtual Audio, Parrot, Solstice, Teams/Ecamm virtual mics.
 /// Microphones never match: "MacBook Pro Microphone" contains none of
 /// these, and the test pins that.
+#[cfg(feature = "audio")]
 fn is_loopback_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     [
@@ -84,6 +92,7 @@ fn is_loopback_name(name: &str) -> bool {
 /// "Monitor of …", a WASAPI loopback endpoint exposed as input, a virtual
 /// cable. `None` is the common case — most machines have no such device —
 /// and the caller falls back rather than failing.
+#[cfg(feature = "audio")]
 pub fn find_loopback() -> Option<cpal::Device> {
     let host = cpal::default_host();
     let devices = host.input_devices().ok()?;
@@ -95,6 +104,15 @@ pub fn find_loopback() -> Option<cpal::Device> {
 
 /// List input devices for `pcc diagnose --audio`: (name, is_loopback).
 /// Never opens a stream; naming one is enough for the picker.
+/// Without the `audio` feature there are no devices to list.
+#[cfg(not(feature = "audio"))]
+pub fn list_input_devices() -> Vec<(String, bool)> {
+    Vec::new()
+}
+
+/// List input devices for `pcc diagnose --audio`: (name, is_loopback).
+/// Never opens a stream; naming one is enough for the picker.
+#[cfg(feature = "audio")]
 pub fn list_input_devices() -> Vec<(String, bool)> {
     let host = cpal::default_host();
     let Ok(devices) = host.input_devices() else {
@@ -116,6 +134,12 @@ pub fn list_input_devices() -> Vec<(String, bool)> {
 pub fn open_source(which: AudioSource) -> Result<Box<dyn SystemAudio>> {
     match which {
         AudioSource::None_ => Ok(Box::new(NullSource::new())),
+        #[cfg(not(feature = "audio"))]
+        _ => {
+            let _ = which;
+            Ok(Box::new(NullSource::new()))
+        }
+        #[cfg(feature = "audio")]
         AudioSource::Mic => match cpal::default_host().default_input_device() {
             Some(device) => Ok(Box::new(MicrophoneSource::from_device(device)?)),
             // No device, or the host refused to say. Silence is a valid
@@ -125,6 +149,7 @@ pub fn open_source(which: AudioSource) -> Result<Box<dyn SystemAudio>> {
         // No platform loopback backend is linked yet. If the OS exposes
         // the mix as an input device (Pulse monitor, virtual cable), use
         // it directly; otherwise the microphone with a warning.
+        #[cfg(feature = "audio")]
         AudioSource::System => match find_loopback() {
             Some(device) => Ok(Box::new(MicrophoneSource::from_device(device)?)),
             None => {
@@ -134,6 +159,7 @@ pub fn open_source(which: AudioSource) -> Result<Box<dyn SystemAudio>> {
                 open_source(AudioSource::Mic)
             }
         },
+        #[cfg(feature = "audio")]
         AudioSource::Both => match find_loopback() {
             Some(device) => Ok(Box::new(MixedSource::new(device)?)),
             None => {
@@ -157,6 +183,11 @@ pub fn default_source() -> Result<Box<dyn SystemAudio>> {
 /// together rather than wrapping into garbage. Two capture threads, one
 /// mixed receiver — the mixer drops to mic-alone if the system side
 /// stalls, because half a mix beats a stalled share.
+/// Device-backed mixing. Needs the `audio` feature like everything
+/// else that touches a device; without it `open_source` resolves every
+/// source to silence and this type has no constructor.
+/// Dead without the feature, by construction rather than by accident.
+#[cfg(feature = "audio")]
 pub struct MixedSource {
     /// Device names, resolved on the owner thread. Names — not handles —
     /// because CPAL devices are `!Send` on some hosts and a handle here
@@ -167,6 +198,7 @@ pub struct MixedSource {
     worker: Option<JoinHandle<()>>,
 }
 
+#[cfg(feature = "audio")]
 impl MixedSource {
     pub fn new(system_device: cpal::Device) -> Result<Self> {
         let system_name = system_device
@@ -186,6 +218,7 @@ impl MixedSource {
 
 /// Find an input device by name. Used by the mixer owner thread, which is
 /// the only thread that ever touches a device handle.
+#[cfg(feature = "audio")]
 fn open_named(name: &str) -> Result<MicrophoneSource> {
     let host = cpal::default_host();
     let devices = host
@@ -208,6 +241,7 @@ pub fn mix_frames(a: &[f32], b: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+#[cfg(feature = "audio")]
 impl SystemAudio for MixedSource {
     fn device_name(&self) -> &str {
         "mic+system mix"
@@ -296,6 +330,7 @@ impl SystemAudio for MixedSource {
     }
 }
 
+#[cfg(feature = "audio")]
 impl Drop for MixedSource {
     fn drop(&mut self) {
         let _ = self.stop();
@@ -307,6 +342,13 @@ impl Drop for MixedSource {
 /// Exists so `pcc doctor` can answer "will audio work here?" without
 /// starting a stream, which on some platforms is the only way to find out
 /// whether a device exists at all.
+/// Without the `audio` feature there is never a device.
+#[cfg(not(feature = "audio"))]
+pub fn default_device_name() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "audio")]
 pub fn default_device_name() -> Option<String> {
     let host = cpal::default_host();
     host.default_input_device()
@@ -346,6 +388,9 @@ const CAPTURE_QUEUE_FRAMES: usize = 8;
 /// [`Self::dropped_frames`] increases. Callers must drain the receiver
 /// continuously; this is deliberately bounded rather than risking unbounded
 /// memory growth in a real-time callback.
+/// Real-device capture. Needs the `audio` feature (cpal); without it
+/// this type does not exist and every audio source resolves to silence.
+#[cfg(feature = "audio")]
 pub struct MicrophoneSource {
     device_name: String,
     device: cpal::Device,
@@ -355,6 +400,7 @@ pub struct MicrophoneSource {
     dropped_frames: Arc<AtomicU64>,
 }
 
+#[cfg(feature = "audio")]
 impl MicrophoneSource {
     /// Opens the host's default input device at 48 kHz.
     pub fn new() -> Result<Self> {
@@ -465,6 +511,7 @@ impl MicrophoneSource {
     }
 }
 
+#[cfg(feature = "audio")]
 impl SystemAudio for MicrophoneSource {
     fn device_name(&self) -> &str {
         &self.device_name
@@ -493,11 +540,15 @@ impl SystemAudio for MicrophoneSource {
     }
 }
 
+/// Assembles interleaved frames from a cpal input callback. Only the
+/// microphone path feeds it, so without the `audio` feature nothing does.
+#[cfg(feature = "audio")]
 struct FrameAssembler {
     channels: usize,
     pcm: Vec<f32>,
 }
 
+#[cfg(feature = "audio")]
 impl FrameAssembler {
     fn new(channels: usize) -> Self {
         Self {
@@ -646,6 +697,7 @@ mod tests {
         assert!(AudioSource::parse("").is_err());
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn loopback_names_match_monitors_and_mixes() {
         for yes in [

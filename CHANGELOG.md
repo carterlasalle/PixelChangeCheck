@@ -94,6 +94,30 @@
   the same `Message` envelopes, chunked at 16 KiB. Verified two-process:
   1280x720 snapshot over offer/answer/trickle.
 
+### Changed
+
+- **Installs skip the compile.** Release archives are named
+  `pcc-<version>-<target>` (`.tar.gz`, `.zip` on Windows) and
+  `[package.metadata.binstall]` points at them, so
+  `cargo binstall pixel-change-check-client` downloads instead of
+  compiling 700+ crates. The release workflow builds them with the new
+  `dist` profile (full optimization, paid once per release); the
+  `release` profile that `cargo install` uses is now thin-LTO with 16
+  codegen units, which builds a large multiple faster for a low
+  single-digit runtime cost the benches can measure.
+- **Platform-heavy surfaces are opt-out features.** `audio` (cpal +
+  Opus, including the vendored libopus cmake build) and `native-viewer`
+  (minifb, i.e. the X11/Wayland dev headers) default on, so plain
+  installs behave exactly as before; `--no-default-features` drops both
+  for a headless relay or minimal viewer. Without `audio` every source
+  resolves to silence, without `native-viewer` every session is
+  headless — no new flags, no behavior change when the features are on.
+- **Tokio is trimmed to what the crate uses.** `rt-multi-thread`,
+  `macros`, `net`, `sync`, `time`, `io-util`, `io-std` instead of
+  `full`. `process` and `signal` still compile (iroh's tree requires
+  them), so the saving is one fewer `parking_lot` edge today and no
+  silent growth tomorrow: the list now says what is ours.
+
 ## 0.1.2
 
 ### Fixed
