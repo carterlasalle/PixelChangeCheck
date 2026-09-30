@@ -30,6 +30,13 @@
   sealing cannot fix. A non-loopback `--web` address without
   `--web-cert`/`--web-key` now fails fast with the fix; loopback stays
   plaintext for development.
+- **Capture picker: display and region.** `pcc share` takes `--display N`
+  (see `pcc diagnose --displays`), `--region x,y,w,h`, `--window`, or
+  `--application`. Display and region capture at the layer via the OS
+  enumeration (`Screen::all`, `capture_area`); the region is verified
+  against what the platform returns and clamped so geometry is stable.
+  Window/application are the seam for the platform pickers and fall back
+  to the display with a warning rather than failing the share.
 
 ## 0.1.2
 

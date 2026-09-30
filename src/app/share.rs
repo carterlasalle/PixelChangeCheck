@@ -84,6 +84,8 @@ pub struct ShareArgs {
     pub web_cert: Option<(String, String)>,
     /// Force the synthetic test pattern instead of capturing a real screen.
     pub synthetic: bool,
+    /// What to capture. Synthetic mode ignores it.
+    pub capture_target: crate::capture::CaptureTarget,
     pub fps: u32,
     pub max_fps: u32,
     pub quality: f32,
@@ -419,7 +421,7 @@ impl Pressure {
 }
 
 pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics) -> Result<()> {
-    let capture = CaptureSource::open(args.synthetic)?;
+    let capture = CaptureSource::open_target(args.synthetic, &args.capture_target)?;
     let (width, height) = (capture.width(), capture.height());
     let token = args.token.clone();
     info!("Sharing {width}x{height}");

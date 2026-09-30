@@ -89,6 +89,23 @@ enum Commands {
         /// real screen. Useful on headless machines and for local tests.
         #[arg(long)]
         synthetic: bool,
+        /// Display index to share (see `pcc diagnose --displays` order).
+        /// Default shares the primary display.
+        #[arg(long)]
+        display: Option<usize>,
+        /// Screen region to share as x,y,w,h in display pixels, e.g.
+        /// `--region 100,200,1280,720`. Captured at the layer, not cropped
+        /// afterwards. Conflicts with --display.
+        #[arg(long, conflicts_with = "display")]
+        region: Option<String>,
+        /// Window to share (title or handle). Platform pickers land here;
+        /// today it falls back to the display with a warning.
+        #[arg(long)]
+        window: Option<String>,
+        /// Application to share (name or bundle id). Same fallback as
+        /// --window for now.
+        #[arg(long)]
+        application: Option<String>,
         /// Target frames per second.
         #[arg(long, default_value_t = 30)]
         fps: u32,
@@ -143,7 +160,12 @@ enum Commands {
     },
     /// Report what this machine can do, whether audio capture is available,
     /// and which path to the internet it has. Connects to nothing.
-    Diagnose,
+    Diagnose {
+        /// List available displays for --display/--region instead of the
+        /// network report.
+        #[arg(long)]
+        displays: bool,
+    },
     /// Print a single line a viewer can open or paste, carrying the token
     /// and the certificate pin so neither has to be retyped.
     Pair {
@@ -226,6 +248,10 @@ fn main() -> Result<()> {
             web_cert,
             web_key,
             synthetic,
+            display,
+            region,
+            window,
+            application,
             fps,
             max_fps,
             quality,
@@ -247,6 +273,34 @@ fn main() -> Result<()> {
                     _ => anyhow::bail!("--web-cert and --web-key must be given together"),
                 },
                 synthetic,
+                capture_target: match (&display, &region, &window, &application) {
+                    (None, None, None, None) => {
+                        pixel_change_check_client::capture::CaptureTarget::Display(0)
+                    }
+                    (Some(i), None, None, None) => {
+                        pixel_change_check_client::capture::CaptureTarget::Display(*i)
+                    }
+                    (None, Some(r), None, None) => {
+                        let (x, y, w, h) =
+                            pixel_change_check_client::capture::CaptureTarget::parse_region(r)
+                                .with_context(|| format!("Invalid --region '{r}'"))?;
+                        pixel_change_check_client::capture::CaptureTarget::Region {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                        }
+                    }
+                    (None, None, Some(w), None) => {
+                        pixel_change_check_client::capture::CaptureTarget::Window(w.clone())
+                    }
+                    (None, None, None, Some(a)) => {
+                        pixel_change_check_client::capture::CaptureTarget::Application(a.clone())
+                    }
+                    _ => anyhow::bail!(
+                        "pick one capture source: --display, --region, --window, or --application"
+                    ),
+                },
                 fps,
                 max_fps,
                 quality,
@@ -290,7 +344,14 @@ fn main() -> Result<()> {
             println!("{}", reach::pair_url(&listen, &pin, t.as_str()));
             Ok(())
         }
-        Commands::Diagnose => {
+        Commands::Diagnose { displays } => {
+            if displays {
+                for (i, w, h) in pixel_change_check_client::capture::ScreenCapture::list_displays()
+                {
+                    println!("display {i}: {w}x{h}");
+                }
+                return Ok(());
+            }
             // Answers "do I need a relay?" without contacting anyone. The
             // STUN probe is a single UDP round trip to a public server,
             // which is the only rung that can be tested without a peer.
