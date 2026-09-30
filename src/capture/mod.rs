@@ -34,24 +34,26 @@ impl CursorSampler for NoCursorSampler {
 /// display pixels; the region offset is subtracted so the sample lands in
 /// shared-surface space, and anything outside the shared rectangle reads
 /// as "not over the share" (`None` → `CursorHide` downstream).
+///
+/// `DeviceState` is deliberately *not* stored: on Linux it holds an
+/// `Rc<X11Connection>`, which is `!Send`, and the sampler crosses into
+/// `capture_loop`'s `Send` future. A fresh state per sample costs one
+/// X11 open per frame — the same call the old code made once at
+/// startup, now made where the `Send` bound can hold.
 pub struct PlatformCursorSampler {
-    state: device_query::DeviceState,
     /// Origin of the shared area in global display pixels.
     origin: (i32, i32),
 }
 
 impl PlatformCursorSampler {
     pub fn new(origin: (i32, i32)) -> Self {
-        Self {
-            state: DeviceState::new(),
-            origin,
-        }
+        Self { origin }
     }
 }
 
 impl CursorSampler for PlatformCursorSampler {
     fn sample(&mut self, width: u32, height: u32) -> Option<CursorSample> {
-        let (gx, gy) = self.state.get_mouse().coords;
+        let (gx, gy) = DeviceState::new().get_mouse().coords;
         let (x, y) = (gx - self.origin.0, gy - self.origin.1);
         if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
             return None;
