@@ -17,11 +17,17 @@ runs:
           libasound2-dev \
           libdbus-1-dev \
           libudev-dev \
+          libwayland-dev \
           libxcb1-dev \
+          libxkbcommon-dev \
           libxrandr-dev
       env:
         # alsa-sys, which cpal pulls in for audio capture, runs pkg-config
-        # at build time and panics when the headers are missing. macOS and
-        # Windows need none of this, which is why this is a separate step
-        # and not something cargo can discover.
+        # at build time and panics when the headers are missing. minifb
+        # with default features links wayland-client and xkbcommon the
+        # same way — `wayland-sys` fails its build script without
+        # libwayland-dev, which is exactly what killed the Ubuntu leg of
+        # the first v0.1.3 release run. macOS and Windows need none of
+        # this, which is why this is a separate step and not something
+        # cargo can discover.
         DEBIAN_FRONTEND: noninteractive
