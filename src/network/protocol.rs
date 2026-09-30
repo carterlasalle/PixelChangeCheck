@@ -12,11 +12,12 @@ use crate::pcc::QualityConfig;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Bumped for the revision/epoch/handshake protocol (v5) and for resume
-/// (v6: `Hello` carries the viewer's last applied revision and epoch, so
-/// a reconnect can replay the ring instead of snapshotting). Old viewers
-/// are rejected with a version error rather than silently mis-parsed.
-pub const PROTOCOL_VERSION: u8 = 6;
+/// Bumped for the revision/epoch/handshake protocol (v5), for resume
+/// (v6: `Hello` carries the viewer's last applied revision and epoch) and
+/// for the cursor/preview/redirect control plane (v7: `CursorMove`,
+/// `CursorHide`, `MotionPreview`, `Redirect`). Old builds fail at the
+/// version gate instead of mis-parsing.
+pub const PROTOCOL_VERSION: u8 = 7;
 
 /// Largest encoded message body we will produce or accept.
 ///
@@ -63,6 +64,10 @@ const K_QUALITY: u8 = 0x08;
 const K_ERROR: u8 = 0x09;
 const K_BYE: u8 = 0x0A;
 const K_SNAPSHOT_COMMIT: u8 = 0x0B;
+const K_CURSOR_MOVE: u8 = 0x0C;
+const K_CURSOR_HIDE: u8 = 0x0D;
+const K_MOTION_PREVIEW: u8 = 0x0E;
+const K_REDIRECT: u8 = 0x0F;
 
 /// A monotonic, strictly increasing revision of the authoritative surface.
 /// `0` means "nothing has been committed yet".
@@ -152,6 +157,37 @@ pub enum Message {
         rev: Rev,
     },
     QualityConfig(QualityConfig),
+    /// Sharer -> viewer: the pointer moved. Presentation-only: the
+    /// compositor never sees it, so it cannot corrupt the authoritative
+    /// surface. Coordinates are in shared-surface pixels; a viewer whose
+    /// geometry differs scales them.
+    CursorMove {
+        x: u32,
+        y: u32,
+    },
+    /// Sharer -> viewer: the pointer left the shared area (or capture
+    /// lost it). Hide the overlay until the next `CursorMove`.
+    CursorHide,
+    /// Sharer -> viewer: cheap interim content while full motion is still
+    /// being planned/encoded — currently the changed-area rectangle and
+    /// its fraction, so a viewer can show *something* instead of a frozen
+    /// frame during a fling. Never authoritative: the exact update or
+    /// snapshot that follows still decides the pixels.
+    MotionPreview {
+        rev: Rev,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        changed_fraction: f32,
+    },
+    /// Sharer -> viewer: "reconnect at this relay session instead" —
+    /// the fanout/migration handoff. The viewer tears this session down
+    /// and dials the named relay session with its current resume point.
+    Redirect {
+        relay: String,
+        session: String,
+    },
     Error(String),
     Bye,
 }
@@ -297,6 +333,37 @@ impl Message {
                 out.extend_from_slice(&bytes[..n]);
             }
             Message::Bye => out.push(K_BYE),
+            Message::CursorMove { x, y } => {
+                out.push(K_CURSOR_MOVE);
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+            }
+            Message::CursorHide => out.push(K_CURSOR_HIDE),
+            Message::MotionPreview {
+                rev,
+                x,
+                y,
+                width,
+                height,
+                changed_fraction,
+            } => {
+                out.push(K_MOTION_PREVIEW);
+                out.extend_from_slice(&rev.to_le_bytes());
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+                out.extend_from_slice(&width.to_le_bytes());
+                out.extend_from_slice(&height.to_le_bytes());
+                out.extend_from_slice(&changed_fraction.to_le_bytes());
+            }
+            Message::Redirect { relay, session } => {
+                out.push(K_REDIRECT);
+                let rb = relay.as_bytes();
+                let sb = session.as_bytes();
+                out.extend_from_slice(&(rb.len() as u16).to_le_bytes());
+                out.extend_from_slice(rb);
+                out.extend_from_slice(&(sb.len() as u16).to_le_bytes());
+                out.extend_from_slice(sb);
+            }
         }
     }
 
@@ -384,9 +451,9 @@ pub fn peek_rev(envelope: &[u8]) -> Option<Rev> {
     let body = &envelope[5..];
     match *body.first()? {
         // SnapshotBegin, SnapshotChunk, PartialUpdate, KeepAlive,
-        // SnapshotCommit all start with a u64 revision.
+        // SnapshotCommit and MotionPreview all start with a u64 revision.
         K_SNAPSHOT_BEGIN | K_SNAPSHOT_CHUNK | K_PARTIAL_UPDATE | K_KEEP_ALIVE
-        | K_SNAPSHOT_COMMIT => {
+        | K_SNAPSHOT_COMMIT | K_MOTION_PREVIEW => {
             if body.len() < 9 {
                 return None;
             }
@@ -597,6 +664,47 @@ impl<'a> Cursor<'a> {
                 epoch: self.u32()?,
             },
             K_BYE => Message::Bye,
+            K_CURSOR_MOVE => Message::CursorMove {
+                x: self.u32()?,
+                y: self.u32()?,
+            },
+            K_CURSOR_HIDE => Message::CursorHide,
+            K_MOTION_PREVIEW => {
+                let rev = self.u64()?;
+                let x = self.u32()?;
+                let y = self.u32()?;
+                let width = self.u32()?;
+                let height = self.u32()?;
+                let changed_fraction = self.f32()?;
+                if !(0.0..=1.0).contains(&changed_fraction) {
+                    anyhow::bail!("motion preview fraction {changed_fraction} outside 0..=1");
+                }
+                Message::MotionPreview {
+                    rev,
+                    x,
+                    y,
+                    width,
+                    height,
+                    changed_fraction,
+                }
+            }
+            K_REDIRECT => {
+                let rn = self.u16()? as usize;
+                if rn == 0 || rn > 256 {
+                    anyhow::bail!("redirect relay address length {rn} outside 1..=256");
+                }
+                let relay = std::str::from_utf8(self.take(rn)?)
+                    .context("redirect relay is not valid UTF-8")?
+                    .to_string();
+                let sn = self.u16()? as usize;
+                if sn == 0 || sn > 64 {
+                    anyhow::bail!("redirect session code length {sn} outside 1..=64");
+                }
+                let session = std::str::from_utf8(self.take(sn)?)
+                    .context("redirect session is not valid UTF-8")?
+                    .to_string();
+                Message::Redirect { relay, session }
+            }
             other => anyhow::bail!("Unknown message kind: 0x{other:02x}"),
         };
         Ok(msg)
@@ -737,6 +845,20 @@ mod tests {
                 ],
             },
             Message::KeepAlive { rev: 99 },
+            Message::CursorMove { x: 10, y: 20 },
+            Message::CursorHide,
+            Message::MotionPreview {
+                rev: 8,
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 48,
+                changed_fraction: 0.5,
+            },
+            Message::Redirect {
+                relay: "127.0.0.1:5900".into(),
+                session: "ABC123".into(),
+            },
             Message::QualityConfig(QualityConfig::default()),
             Message::Error("boom".into()),
             Message::Bye,
@@ -744,6 +866,22 @@ mod tests {
         for msg in msgs {
             assert_eq!(roundtrip(&msg), msg, "roundtrip failed for {msg:?}");
         }
+    }
+
+    #[test]
+    fn hostile_preview_fraction_is_rejected() {
+        let msg = Message::MotionPreview {
+            rev: 1,
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+            changed_fraction: 2.0,
+        };
+        let err = Message::decode(&msg.encode().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fraction"), "unhelpful: {err}");
     }
 
     #[test]

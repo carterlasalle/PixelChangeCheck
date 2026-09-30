@@ -11,7 +11,7 @@ pub mod server;
 pub mod telemetry;
 
 // Re-export commonly used types
-pub use capture::{CaptureSource, ScreenCapture};
+pub use capture::{CaptureSource, CursorSample, CursorSampler, NoCursorSampler, ScreenCapture};
 pub use network::{NetworkConfig, NetworkResilience, ResilienceConfig, SessionToken};
 pub use pcc::{PCCDetector, QualityConfig};
 pub use server::renderer::SharedSurface;

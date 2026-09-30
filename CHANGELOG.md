@@ -37,6 +37,44 @@
   against what the platform returns and clamped so geometry is stable.
   Window/application are the seam for the platform pickers and fall back
   to the display with a warning rather than failing the share.
+- **Remote cursor plane (protocol v7).** The sharer samples the pointer
+  once per frame and sends `CursorMove`/`CursorHide` only on change (2px
+  dead band); viewers draw the arrow as a presentation-only overlay the
+  compositor never sees. Real shares have no sampler linked (no
+  cross-platform cursor API exists) so they hide the cursor;
+  `--synthetic` sweeps a scripted pointer end to end. Native and browser
+  viewers both render it.
+- **Motion previews (protocol v7).** When the changed-area fraction hits
+  40%, the sharer also emits a `MotionPreview` interim rectangle so a
+  viewer on a slow path shows something instead of a frozen fling. Never
+  authoritative: the exact update still decides, stale previews are
+  dropped, and bytes are counted under `pcc_bytes_preview_total`.
+- **Audio source selection.** `pcc share --audio-source mic|system|both|none`
+  (plus `--audio` as a mic alias, `pcc diagnose --audio` to list). `system`
+  uses an OS loopback tap (Pulse monitor, virtual cable) when one exists
+  and falls back to the mic with a warning — the WASAPI/PipeWire/
+  ScreenCaptureKit backends are still the seam, not the code. `both`
+  mixes mic and loopback with a saturating add on one owner thread.
+- **Host approval gate.** `pcc share --approve` prompts `Admit? [y/N]`
+  per viewer after the token checks out; refusals get an Error with a
+  wait, like a bad token. Closed stdin admits (tests, daemons) — the
+  token stays the secret either way.
+- **Relay geography.** `--relay` takes a comma-separated list; the sharer
+  registers on every one and viewers probe in order, first handshake
+  wins. A dead relay costs a timeout, not the session.
+- **Path migration.** `pcc view --connect X --relay Y` races both and
+  the first completed Hello wins; reconnects re-race with the same
+  resume point. `Redirect` (protocol v7) is the handoff the other way:
+  the viewer follows it to the named relay session without losing its
+  place.
+- **Broadcast mode.** `pcc share --broadcast-above N --relay R` flags the
+  newest direct viewer past the threshold; its serve task sends one
+  `Redirect` and ends the direct session. The viewer resumes through the
+  relay, so fanout costs one socket instead of N direct streams.
+- **Named future transports.** `--transport quic|iroh|webrtc` exists on
+  share and view; only `quic` runs. `iroh`/`webrtc` fail at startup
+  pointing at ADR 0006, which records what would reopen them — no stub
+  crates, no half-wired paths.
 
 ## 0.1.2
 

@@ -51,6 +51,12 @@ const REPAIR_INTERVAL: Duration = Duration::from_secs(30);
 /// snapshot rather than unbounded latency.
 const BROADCAST_DEPTH: usize = 256;
 
+/// Changed-area fraction at or above which the loop also emits a
+/// `MotionPreview` interim hint. 40% is "a fling is happening", not "a
+/// dialog opened": below it the exact update lands fast enough that an
+/// interim box would only flicker.
+const MOTION_PREVIEW_FRACTION: f64 = 0.40;
+
 /// Largest encoded message that may go on a stream.
 const SEND_BUDGET: usize = crate::network::MAX_MESSAGE_SIZE as usize;
 
@@ -71,7 +77,9 @@ const MAX_CONSECUTIVE_LAGS: u32 = 3;
 pub struct ShareArgs {
     /// `host:port` to listen on for direct QUIC viewer connections.
     pub listen: Option<String>,
-    /// `host:port` of a relay, for viewers that cannot connect directly.
+    /// Relay server address(es), comma-separated `host:port`. The sharer
+    /// registers on every one; viewers probe the list in order so
+    /// geography is "the first reachable relay", not a config file.
     pub relay: Option<String>,
     /// SHA-256 fingerprint of the relay's certificate, so the sharer can
     /// verify it is reaching the relay operator and not a hijacker.
@@ -93,8 +101,19 @@ pub struct ShareArgs {
     pub repair_interval: Duration,
     /// How hard to try for a direct path before the relay.
     pub reach: crate::reach::ReachPolicy,
-    /// Capture and send audio alongside the screen.
-    pub audio: bool,
+    /// Ask on stdin before admitting each viewer. Default admits on a
+    /// valid token; with approval the token gets them to the door and a
+    /// human opens it. Refusals get the same Error-and-wait treatment as
+    /// a bad token, so a refused viewer sees a reason, not "lost".
+    pub approve: bool,
+    /// What audio to capture. `None_` (the default) sends nothing;
+    /// anything else starts the capture pump.
+    pub audio_source: crate::audio::AudioSource,
+    /// Direct viewers at or above this count are asked to move to the
+    /// first `--relay` (same session code) via `Redirect`. Per-viewer
+    /// QUIC send costs scale linearly; the relay fan splits the session
+    /// per viewer instead. 0 disables.
+    pub broadcast_above: usize,
 }
 
 /// The authoritative surface, exactly as an up-to-date viewer sees it.
@@ -396,6 +415,14 @@ struct ViewerStats {
     /// Current congestion window in bytes, same source. A collapsing
     /// window means the path — not the viewer — is the bottleneck.
     cwnd_bytes: u64,
+    /// True for viewers on the direct QUIC listener; false for relay/fan
+    /// sessions. Broadcast mode only ever redirects direct viewers — a
+    /// relayed viewer is already where it should be.
+    direct: bool,
+    /// Set when a `Redirect` was queued for this viewer. The serve task
+    /// sends it once, then clears it; the flag stops the loop queuing a
+    /// second one while the first is in flight.
+    redirect_queued: bool,
 }
 
 /// Adaptive pressure from real network feedback, 0.0 (healthy) upward.
@@ -445,8 +472,8 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
     // Audio is encoded once here and shared, exactly as visual messages
     // are, so N viewers do not mean N Opus encodes.
     let (audio_tx, audio_rx) = tokio::sync::broadcast::channel::<Arc<EncodedAudio>>(AUDIO_QUEUE);
-    if args.audio {
-        start_audio_capture(audio_tx.clone());
+    if args.audio_source != crate::audio::AudioSource::None_ {
+        start_audio_capture(audio_tx.clone(), args.audio_source);
     }
 
     // Capture the first frame *before* any listener exists. A viewer that
@@ -536,6 +563,10 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
 
     let viewers: Arc<Mutex<HashMap<u64, ViewerStats>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_viewer_id = Arc::new(AtomicU64::new(1));
+    // Broadcast handoff destination, fixed for the life of the share:
+    // the first relay plus the session code every relay loop registers
+    // with. Computed once so the loop and the spawners cannot disagree.
+    let redirect_to = redirect_target(&args);
 
     if let Some(listen_addr) = &args.listen {
         let addr = crate::network::resolve(listen_addr)
@@ -557,39 +588,62 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
             next_viewer_id.clone(),
             Some((audio_tx.clone(), audio_rx.resubscribe())),
             metrics.clone(),
+            args.approve,
+            redirect_to.clone(),
         );
     }
 
-    if let Some(relay_addr) = &args.relay {
-        let addr = crate::network::resolve(relay_addr)
-            .await
-            .with_context(|| format!("Invalid --relay address '{relay_addr}'"))?;
+    // Geography: every named relay gets its own registration loop.
+    // The first reachable relay wins per viewer — the sharer does not
+    // need to know which one that is, because it serves whoever dials in
+    // on any of them. A bad address fails its own loop, not the share.
+    if let Some(relays) = &args.relay {
         let pin = crate::network::hex_to_der(&args.relay_pin)?;
         let session = args.session.clone().unwrap_or_else(generate_session_code);
-        info!(
-            "Relay {relay_addr}, session '{session}', token {}",
-            token.as_str()
-        );
-        spawn_relay_loop(
-            addr,
-            pin,
-            session,
-            token.clone(),
-            tx.clone(),
-            published.clone(),
-            viewers.clone(),
-            next_viewer_id.clone(),
-            Some((audio_tx.clone(), audio_rx.resubscribe())),
-            metrics.clone(),
-        );
+        for relay_addr in split_relays(relays) {
+            let addr = match crate::network::resolve(&relay_addr).await {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!("Skipping relay '{relay_addr}': {e:#}");
+                    continue;
+                }
+            };
+            info!(
+                "Relay {relay_addr}, session '{session}', token {}",
+                token.as_str()
+            );
+            spawn_relay_loop(
+                addr,
+                pin.clone(),
+                session.clone(),
+                token.clone(),
+                tx.clone(),
+                published.clone(),
+                viewers.clone(),
+                next_viewer_id.clone(),
+                Some((audio_tx.clone(), audio_rx.resubscribe())),
+                metrics.clone(),
+                args.approve,
+                None,
+            );
+        }
     }
 
     drop(keepalive);
 
+    // No platform cursor API is linked: real shares have no sampler
+    // and viewers hide the overlay; `--synthetic` sweeps a scripted
+    // pointer so the plane is exercised end to end.
+    let cursor_sampler: Box<dyn crate::capture::CursorSampler> = if args.synthetic {
+        Box::new(crate::capture::SweepSampler::new())
+    } else {
+        Box::new(crate::capture::NoCursorSampler)
+    };
     capture_loop(
         metrics,
         first_frame,
         capture,
+        cursor_sampler,
         Planner::default(),
         published,
         tx,
@@ -603,6 +657,8 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
         } else {
             args.repair_interval
         },
+        args.broadcast_above,
+        redirect_to,
     )
     .await
 }
@@ -613,8 +669,8 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
 /// never wait on the share loop, and the share loop must never wait on
 /// audio. Each frame is encoded **once** here and broadcast, so N viewers
 /// do not mean N Opus encodes.
-fn start_audio_capture(audio_tx: AudioBroadcast) {
-    let source = match crate::audio::capture::default_source() {
+fn start_audio_capture(audio_tx: AudioBroadcast, which: crate::audio::AudioSource) {
+    let source = match crate::audio::capture::open_source(which) {
         Ok(s) => s,
         Err(e) => {
             warn!("No audio capture device: {e}");
@@ -741,8 +797,11 @@ fn spawn_accept_loop(
     next_id: Arc<AtomicU64>,
     audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
     metrics: crate::telemetry::SharedMetrics,
+    approve: bool,
+    redirect_to: Option<(String, String)>,
 ) {
     tokio::spawn(async move {
+        let redirect_to = redirect_to;
         let failures: Arc<Mutex<HashMap<SocketAddr, (u32, Instant)>>> =
             Arc::new(Mutex::new(HashMap::new()));
         while let Some(connecting) = endpoint.accept().await {
@@ -753,7 +812,7 @@ fn spawn_accept_loop(
             }
             match connecting.await {
                 Ok(connection) => {
-                    let (tx, published, token, viewers, next_id, audio, metrics) = (
+                    let (tx, published, token, viewers, next_id, audio, metrics, redirect_to) = (
                         tx.clone(),
                         published.clone(),
                         token.clone(),
@@ -761,6 +820,7 @@ fn spawn_accept_loop(
                         next_id.clone(),
                         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
                         metrics.clone(),
+                        redirect_to.clone(),
                     );
                     tokio::spawn(async move {
                         match connection.accept_bi().await {
@@ -782,6 +842,8 @@ fn spawn_accept_loop(
                                     audio,
                                     Some(connection),
                                     metrics,
+                                    approve,
+                                    redirect_to,
                                 )
                                 .await;
                             }
@@ -807,6 +869,11 @@ fn spawn_relay_loop(
     next_id: Arc<AtomicU64>,
     audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
     metrics: crate::telemetry::SharedMetrics,
+    approve: bool,
+    // Relayed viewers are already where broadcast mode wants them, so the
+    // relay path never redirects. Kept in the signature so both spawners
+    // match and a future per-relay handoff does not reshuffle args.
+    _redirect_to: Option<(String, String)>,
 ) {
     tokio::spawn(async move {
         // Reconnect forever: a sharer is long-lived, and a relay restart is
@@ -838,6 +905,7 @@ fn spawn_relay_loop(
                         next_id.clone(),
                         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
                         metrics.clone(),
+                        approve,
                     )
                     .await;
                     warn!("Relay connection lost; reconnecting");
@@ -964,6 +1032,7 @@ async fn serve_relay_fan(
     next_viewer_id: Arc<AtomicU64>,
     audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
     metrics: crate::telemetry::SharedMetrics,
+    approve: bool,
 ) {
     let fan: RelayFan = Box::new(transport).into_fan();
     let mut fan = fan;
@@ -990,7 +1059,7 @@ async fn serve_relay_fan(
                                 spawn_fan_session(
                                     viewer, peer, &fan.tx, &tx, &published, &token,
                                     &viewers, &next_viewer_id, &audio, &metrics,
-                                    &exit_tx,
+                                    approve, &exit_tx,
                                 ),
                             );
                         }
@@ -1006,7 +1075,7 @@ async fn serve_relay_fan(
                         let send = spawn_fan_session(
                             id, peer, &fan.tx, &tx, &published, &token,
                             &viewers, &next_viewer_id, &audio, &metrics,
-                            &exit_tx,
+                            approve, &exit_tx,
                         );
                         sessions.insert(id, send.clone());
                         send
@@ -1041,10 +1110,11 @@ fn spawn_fan_session(
     next_viewer_id: &Arc<AtomicU64>,
     audio: &Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
     metrics: &crate::telemetry::SharedMetrics,
+    approve: bool,
     exit_tx: &tokio::sync::mpsc::Sender<u32>,
 ) -> tokio::sync::mpsc::Sender<Vec<u8>> {
     let (session_tx, session_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(FAN_SESSION_QUEUE);
-    let (fan_tx, tx, published, token, viewers, next_id, audio, metrics, exit_tx) = (
+    let (fan_tx, tx, published, token, viewers, next_id, audio, metrics, approve, exit_tx) = (
         fan_tx.clone(),
         tx.clone(),
         published.clone(),
@@ -1053,6 +1123,7 @@ fn spawn_fan_session(
         next_viewer_id.clone(),
         audio.as_ref().map(|(t, r)| (t.clone(), r.resubscribe())),
         metrics.clone(),
+        approve,
         exit_tx.clone(),
     );
     tokio::spawn(async move {
@@ -1068,6 +1139,8 @@ fn spawn_fan_session(
             audio,
             None,
             metrics,
+            approve,
+            None,
         )
         .await;
         let _ = exit_tx.send(id).await;
@@ -1076,6 +1149,45 @@ fn spawn_fan_session(
 }
 
 // ------------------------------------------------------------ one viewer
+
+#[allow(clippy::too_many_arguments)]
+/// Split a comma-separated `--relay` list, dropping empties. One
+/// address stays one address: no whitespace games, no dedup — the order
+/// is the preference order viewers probe in.
+fn split_relays(spec: &str) -> Vec<String> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// How many direct viewers are currently registered.
+fn direct_viewer_count(viewers: &Arc<Mutex<HashMap<u64, ViewerStats>>>) -> usize {
+    viewers.lock().values().filter(|v| v.direct).count()
+}
+
+/// Where over-threshold direct viewers are sent: the first named relay
+/// plus the session code they must rejoin with. `None` when no relay is
+/// configured — failing viewers off the share would be worse than serving
+/// them slowly, so broadcast mode simply stays off.
+fn redirect_target(args: &ShareArgs) -> Option<(String, String)> {
+    let relay = split_relays(args.relay.as_deref()?).first()?.clone();
+    let session = args.session.clone().unwrap_or_else(generate_session_code);
+    Some((relay, session))
+}
+
+/// `true` when stdin is closed (EOF immediately): tests, daemons,
+/// pipes. Approval prompts must not block forever there.
+fn is_stdin_closed(stdin: &std::io::Stdin) -> bool {
+    use std::io::BufRead;
+    let mut buf = [0u8; 1];
+    let mut locked = stdin.lock();
+    // Peek without consuming: a closed stdin reads 0 bytes now and on
+    // every later read, so treating it as closed is stable.
+    matches!(locked.fill_buf(), Ok(b) if b.is_empty())
+        && matches!(std::io::Read::read(&mut locked, &mut buf), Ok(0))
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn serve_viewer(
@@ -1090,6 +1202,8 @@ async fn serve_viewer(
     audio: Option<(AudioBroadcast, broadcast::Receiver<Arc<EncodedAudio>>)>,
     quic: Option<quinn::Connection>,
     metrics: crate::telemetry::SharedMetrics,
+    approve: bool,
+    redirect_to: Option<(String, String)>,
 ) {
     // Subscribe *before* anything else, so no update can slip between the
     // snapshot we are about to take and the stream we are about to start.
@@ -1134,8 +1248,56 @@ async fn serve_viewer(
         }
     };
     let _ = presented;
+    if approve {
+        // A human at the keyboard decides. The prompt names the peer and
+        // the session; anything but an explicit `yes` refuses. stdin is
+        // read on a blocking thread so the async runtime never stalls —
+        // and when stdin is closed (tests, daemons) that reads as refusal
+        // would hang, so a closed stdin admits instead of deadlocking:
+        // approval is a convenience gate, the token stays the secret.
+        let approved = tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, Write};
+            let stdin = std::io::stdin();
+            if is_stdin_closed(&stdin) {
+                return true;
+            }
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "Viewer {peer} requests the screen. Admit? [y/N]");
+            let _ = out.flush();
+            let mut line = String::new();
+            std::io::BufReader::new(stdin.lock())
+                .read_line(&mut line)
+                .is_ok()
+                && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        })
+        .await
+        .unwrap_or(false);
+        if !approved {
+            let _ = sink
+                .send(&Message::Error("The sharer declined this viewer.".into()))
+                .await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), source.recv()).await;
+            warn!("{label} declined by approval prompt");
+            return;
+        }
+    }
     let id = next_viewer_id.fetch_add(1, Ordering::Relaxed);
-    viewers.lock().insert(id, ViewerStats::default());
+    // serve_viewer does not know its own path; the spawner marks it
+    // right after. Default here is relay (false): a direct session that
+    // never gets marked is never redirected, which is the safe side.
+    {
+        let mut guard = viewers.lock();
+        // The QUIC handle only exists on direct sessions; the fan passes
+        // None. Marking here (not at the spawner) keeps the two call sites
+        // from disagreeing about what "direct" means.
+        guard.insert(
+            id,
+            ViewerStats {
+                direct: quic.is_some(),
+                ..Default::default()
+            },
+        );
+    }
     info!("{label} authorized");
 
     // End-to-end encryption. The token has already been checked, so the
@@ -1296,6 +1458,16 @@ async fn serve_viewer(
     // stats lock is not free.
     let mut last_sample = Instant::now() - Duration::from_secs(1);
     loop {
+        // Broadcast-mode handoff: one Redirect, then this session ends.
+        // The viewer reconnects through the relay with its resume point,
+        // so the move loses no pixels — only the direct socket.
+        if viewers.lock().get(&id).is_some_and(|v| v.redirect_queued) {
+            if let Some((relay, session)) = redirect_to.clone() {
+                let _ = sink.send(&Message::Redirect { relay, session }).await;
+                info!("{label} redirected to relay (broadcast mode)");
+            }
+            break;
+        }
         tokio::select! {
             update = rx.recv() => match update {
                 Ok(bytes) => {
@@ -1507,6 +1679,7 @@ async fn capture_loop(
     metrics: crate::telemetry::SharedMetrics,
     mut first: Frame,
     capture: CaptureSource,
+    mut cursor_sampler: Box<dyn crate::capture::CursorSampler>,
     planner: Planner,
     published: Shared,
     tx: EncodedBroadcast,
@@ -1516,6 +1689,8 @@ async fn capture_loop(
     requested_fps: u32,
     max_fps: u32,
     repair_interval: Duration,
+    broadcast_above: usize,
+    redirect_to: Option<(String, String)>,
 ) -> Result<()> {
     // The authoritative surface, shared. `Arc::make_mut` hands the loop a
     // mutable view for free and copies only when a joining viewer is
@@ -1536,6 +1711,10 @@ async fn capture_loop(
         value: 0.0,
         last_change: Instant::now(),
     };
+    // Last cursor state sent: `None` means the viewers currently hide it.
+    // A message goes out only on change, so an idle pointer costs nothing.
+    let mut last_cursor: Option<(u32, u32)> = None;
+    let mut cursor_hidden = false;
 
     loop {
         let loop_start = Instant::now();
@@ -1617,6 +1796,11 @@ async fn capture_loop(
         let idle = plan.ops.is_empty() && plan.wire_len == 0;
         let wants_snapshot = !idle && plan.ops.is_empty();
         let repair_due = last_repair.elapsed() >= repair_interval;
+        // Preview inputs, computed before `plan.ops` moves into the
+        // update below. No second scan: the bounds walk is one pass over
+        // the (already materialised) op list.
+        let changed_fraction = plan.changed_fraction(width, height);
+        let changed_bounds = plan.changed_bounds();
 
         if pending_snapshot || wants_snapshot || (!idle && repair_due && snapshot_bytes > 0) {
             // A snapshot conveys the whole current frame, so the
@@ -1710,6 +1894,60 @@ async fn capture_loop(
             }
         }
 
+        // The cursor plane: sample once per frame, send only on
+        // change. A move under 2px is jitter, not intent — the platform
+        // sampler reports raw positions and the viewer would shimmer.
+        match cursor_sampler.sample(width, height) {
+            Some(c)
+                if last_cursor.is_none_or(|(x, y)| x.abs_diff(c.x).max(y.abs_diff(c.y)) >= 2) =>
+            {
+                last_cursor = Some((c.x, c.y));
+                cursor_hidden = false;
+                if let Ok(bytes) = (Message::CursorMove { x: c.x, y: c.y }).encode() {
+                    let shared = Arc::new(bytes);
+                    published
+                        .write()
+                        .await
+                        .ring
+                        .push_keepalive(rev, epoch, shared.clone());
+                    let _ = tx.send(shared);
+                }
+            }
+            None if !cursor_hidden => {
+                cursor_hidden = true;
+                last_cursor = None;
+                if let Ok(bytes) = Message::CursorHide.encode() {
+                    let shared = Arc::new(bytes);
+                    published
+                        .write()
+                        .await
+                        .ring
+                        .push_keepalive(rev, epoch, shared.clone());
+                    let _ = tx.send(shared);
+                }
+            }
+            _ => {}
+        }
+        // The motion lane: when the changed fraction says "fling", send an
+        // interim rectangle before the exact update lands, so a viewer on
+        // a slow path shows *something* instead of a frozen frame. It is
+        // never authoritative — the exact frame still decides the pixels.
+        if changed_fraction >= MOTION_PREVIEW_FRACTION {
+            if let Some((x, y, w, h)) = changed_bounds {
+                let preview = Message::MotionPreview {
+                    rev,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    changed_fraction: changed_fraction as f32,
+                };
+                if let Ok(bytes) = preview.encode() {
+                    metrics.bytes_preview.add(bytes.len() as u64);
+                    let _ = tx.send(Arc::new(bytes));
+                }
+            }
+        }
         {
             // Publish the surface itself, not a copy taken earlier. A
             // late joiner must see what is on screen now, which is the
@@ -1781,6 +2019,28 @@ async fn capture_loop(
             pressure.last_change = Instant::now();
         }
 
+        // Broadcast mode: past the threshold, the newest direct viewer
+        // is asked to reconnect through the first relay. One per frame
+        // at most, so a flash crowd drains steadily instead of all at
+        // once — and each redirect is a resume, not a rejoin, so nobody
+        // loses pixels. No relay configured means no redirect: failing
+        // viewers off the share would be worse than serving them slowly.
+        if broadcast_above > 0
+            && redirect_to.is_some()
+            && direct_viewer_count(&viewers) > broadcast_above
+        {
+            // One per frame at most: a flash crowd drains steadily, and
+            // each redirect is a resume (same session code on the relay),
+            // so nobody loses pixels in the move.
+            let mut guard = viewers.lock();
+            if let Some((_, v)) = guard
+                .iter_mut()
+                .filter(|(_, v)| v.direct && !v.redirect_queued)
+                .max_by_key(|(id, _)| **id)
+            {
+                v.redirect_queued = true;
+            }
+        }
         // Publish the measured path state: worst RTT across direct
         // viewers, deepest ack gap as pending depth, oldest unapplied age.
         // These are the numbers the fps/quality decisions above actually
@@ -1963,6 +2223,72 @@ fn rate_limited(
 mod tests {
     use super::*;
     use crate::network::PROTOCOL_VERSION;
+
+    #[test]
+    fn broadcast_redirect_needs_a_relay() {
+        let mut args = ShareArgs {
+            listen: None,
+            relay: None,
+            relay_pin: String::new(),
+            session: Some("ABC123".into()),
+            web: None,
+            web_cert: None,
+            synthetic: true,
+            capture_target: crate::capture::CaptureTarget::Display(0),
+            fps: 30,
+            max_fps: 60,
+            quality: 0.8,
+            token: crate::network::SessionToken::parse("TOKENTOKENTOKENTOKENTOKENTOKENTOK1")
+                .unwrap(),
+            repair_interval: std::time::Duration::from_secs(30),
+            reach: crate::reach::ReachPolicy::TryDirect,
+            approve: false,
+            broadcast_above: 2,
+            audio_source: crate::audio::AudioSource::None_,
+        };
+        assert!(redirect_target(&args).is_none());
+        args.relay = Some("r1:1, r2:2".into());
+        assert_eq!(
+            redirect_target(&args),
+            Some(("r1:1".to_string(), "ABC123".to_string()))
+        );
+    }
+
+    #[test]
+    fn redirect_flags_only_unflagged_direct_viewers() {
+        let viewers: Arc<Mutex<HashMap<u64, ViewerStats>>> = Arc::new(Mutex::new(HashMap::new()));
+        assert_eq!(direct_viewer_count(&viewers), 0);
+        for (id, direct) in [(1u64, true), (2, true), (3, false)] {
+            viewers.lock().insert(
+                id,
+                ViewerStats {
+                    direct,
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(direct_viewer_count(&viewers), 2);
+    }
+
+    #[test]
+    fn relay_list_splits_and_skips_empties() {
+        assert_eq!(split_relays("a:1"), vec!["a:1"]);
+        assert_eq!(split_relays("a:1, b:2 ,c:3"), vec!["a:1", "b:2", "c:3"]);
+        assert!(split_relays(" , ,").is_empty());
+        // Order is preference: never sorted, never deduped.
+        assert_eq!(split_relays("b:2,a:1,b:2"), vec!["b:2", "a:1", "b:2"]);
+    }
+
+    #[test]
+    fn closed_stdin_counts_as_closed() {
+        // /dev/null reads EOF immediately: the worst case the approval
+        // prompter must survive without hanging.
+        use std::io::BufRead;
+        let f = std::fs::File::open("/dev/null").unwrap();
+        let mut locked = std::io::BufReader::new(f);
+        let mut buf = Vec::new();
+        assert_eq!(locked.read_until(b'x', &mut buf).unwrap(), 0);
+    }
 
     #[test]
     fn high_rtt_backs_off_before_queues_fill() {

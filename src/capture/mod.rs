@@ -1,4 +1,62 @@
 use crate::pcc::types::{Frame, FrameCapture, QualityConfig};
+
+/// Where the pointer is, in shared-surface pixels. `None` means the
+/// pointer is not over the shared area (or the platform gave no answer),
+/// which the sharer sends as `CursorHide` rather than a stale position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorSample {
+    pub x: u32,
+    pub y: u32,
+}
+
+/// The platform half of the cursor plane. Today no cross-platform cursor
+/// position API is linked, so the only implementation reports "unknown"
+/// and the sharer sends `CursorHide`. This trait is the seam a
+/// platform sampler (CGEvent, GetCursorPos, Wayland pointer) fills in —
+/// without it a future implementation would have to touch the loop.
+pub trait CursorSampler: Send {
+    fn sample(&mut self, width: u32, height: u32) -> Option<CursorSample>;
+}
+
+/// No sampler linked: always unknown. The share still works; viewers
+/// simply never show a remote cursor.
+pub struct NoCursorSampler;
+
+impl CursorSampler for NoCursorSampler {
+    fn sample(&mut self, _width: u32, _height: u32) -> Option<CursorSample> {
+        None
+    }
+}
+
+/// A scripted sampler for tests and `--synthetic`: a pointer that sweeps
+/// diagonally so cursor messages actually flow end to end.
+pub struct SweepSampler {
+    step: u32,
+}
+
+impl SweepSampler {
+    pub fn new() -> Self {
+        Self { step: 0 }
+    }
+}
+
+impl Default for SweepSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CursorSampler for SweepSampler {
+    fn sample(&mut self, width: u32, height: u32) -> Option<CursorSample> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let x = self.step % width;
+        let y = (self.step / width.max(1)) % height;
+        self.step = self.step.wrapping_add(37);
+        Some(CursorSample { x, y })
+    }
+}
 use anyhow::{Context, Result};
 use screenshots::Screen;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -398,6 +456,18 @@ mod tests {
         let frame1 = capture.capture_frame().unwrap();
         let frame2 = capture.capture_frame().unwrap();
         assert_ne!(frame1.data, frame2.data, "the bouncing box should move");
+    }
+
+    #[test]
+    fn sweep_sampler_walks_inside_the_frame() {
+        let mut s = SweepSampler::new();
+        for _ in 0..200 {
+            let c = s.sample(64, 48).expect("nonempty frame has a cursor");
+            assert!(c.x < 64 && c.y < 48);
+        }
+        assert!(SweepSampler::new().sample(0, 48).is_none());
+        let mut n = NoCursorSampler;
+        assert!(n.sample(64, 48).is_none());
     }
 
     #[test]

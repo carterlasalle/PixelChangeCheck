@@ -76,6 +76,35 @@ impl Plan {
     }
 
     /// A plan whose patches were measured and found not worth sending; the
+    /// Fraction of the frame the ops rewrite, 0..=1. The motion lane
+    /// reads this: a fling-scale fraction earns an interim preview.
+    pub fn changed_fraction(&self, width: u32, height: u32) -> f64 {
+        let total = width as f64 * height as f64;
+        if total <= 0.0 {
+            return 0.0;
+        }
+        (self.changed_pixels as f64 / total).min(1.0)
+    }
+
+    /// Bounding box of the changed area, or `None` when idle. The motion
+    /// preview draws this; the exact update that follows still decides.
+    pub fn changed_bounds(&self) -> Option<(u32, u32, u32, u32)> {
+        let mut it = self.ops.iter();
+        let first = it.next()?;
+        let (mut x0, mut y0, mut x1, mut y1) = {
+            let (x, y, w, h) = first.rect();
+            (x, y, x + w, y + h)
+        };
+        for op in it {
+            let (x, y, w, h) = op.rect();
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + w);
+            y1 = y1.max(y + h);
+        }
+        Some((x0, y0, x1 - x0, y1 - y0))
+    }
+
     /// caller should ship a snapshot instead. `wire_len` still carries the
     /// measured cost so the decision is visible.
     pub fn prefer_snapshot(
@@ -626,6 +655,35 @@ mod tests {
         let shown = replay(&base, 0, &plan.ops);
         assert_eq!(shown, current.data, "a scroll must still be pixel-exact");
         assert_eq!(reference.data, current.data);
+    }
+
+    #[test]
+    fn changed_fraction_and_bounds_measure_the_plan() {
+        // changed_pixels is authoritative here: fraction and bounds must
+        // agree with it, not with a second scan.
+        let mut plan = Plan::idle(Duration::from_micros(1));
+        assert_eq!(plan.changed_fraction(128, 96), 0.0);
+        assert_eq!(plan.changed_bounds(), None);
+        plan.ops = vec![
+            WireOp::Fill {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 40,
+                color: [1, 2, 3],
+            },
+            WireOp::Rect {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+                compressed: vec![9],
+            },
+        ];
+        plan.changed_pixels = 30 * 40 + 4 * 4;
+        let total = 128.0 * 96.0;
+        assert!((plan.changed_fraction(128, 96) - (1216.0 / total)).abs() < 1e-12);
+        assert_eq!(plan.changed_bounds(), Some((0, 0, 40, 60)));
     }
 
     #[test]

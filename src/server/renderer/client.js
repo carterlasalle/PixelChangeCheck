@@ -9,7 +9,7 @@
 // The wire format is the same explicit little-endian one the native
 // viewer parses. Nothing about the stream is re-encoded for the browser.
 
-const PROTOCOL_VERSION = 6;
+const PROTOCOL_VERSION = 7;
 const MAX_FRAME_BYTES = 100_000_000;
 
 const OP_RECT = 0x01;
@@ -27,6 +27,10 @@ const K_QUALITY = 0x08;
 const K_ERROR = 0x09;
 const K_BYE = 0x0A;
 const K_SNAPSHOT_COMMIT = 0x0B;
+const K_CURSOR_MOVE = 0x0C;
+const K_CURSOR_HIDE = 0x0D;
+const K_MOTION_PREVIEW = 0x0E;
+const K_REDIRECT = 0x0F;
 const K_BROWSER_OFFER = 0x22;
 const K_BROWSER_REPLY = 0x23;
 
@@ -200,6 +204,7 @@ class Reader {
   u8() { this.need(1); return this.view.getUint8(this.offset++); }
   u16() { this.need(2); const v = this.view.getUint16(this.offset, true); this.offset += 2; return v; }
   u32() { this.need(4); const v = this.view.getUint32(this.offset, true); this.offset += 4; return v; }
+  f32() { this.need(4); const v = this.view.getFloat32(this.offset, true); this.offset += 4; return v; }
   u64() {
     this.need(8);
     const v = this.view.getBigUint64(this.offset, true);
@@ -528,6 +533,25 @@ function parseMessage(bytes) {
     }
     case K_BYE:
       return { kind };
+    case K_CURSOR_MOVE:
+      return { kind, x: r.u32(), y: r.u32() };
+    case K_CURSOR_HIDE:
+      return { kind };
+    case K_MOTION_PREVIEW: {
+      const rev = r.u64();
+      const x = r.u32(), y = r.u32(), width = r.u32(), height = r.u32();
+      const fraction = r.f32();
+      if (!(fraction >= 0 && fraction <= 1)) throw new Reject(`motion preview fraction ${fraction} outside 0..=1`);
+      return { kind, rev, x, y, width, height, changedFraction: fraction };
+    }
+    case K_REDIRECT: {
+      const rn = r.u16();
+      if (rn === 0 || rn > 256) throw new Reject(`redirect relay length ${rn} outside 1..=256`);
+      const relay = new TextDecoder().decode(r.take(rn));
+      const sn = r.u16();
+      if (sn === 0 || sn > 64) throw new Reject(`redirect session length ${sn} outside 1..=64`);
+      return { kind, relay, session: new TextDecoder().decode(r.take(sn)) };
+    }
     default:
       throw new Reject(`unknown message kind: 0x${kind.toString(16)}`);
   }
@@ -571,6 +595,8 @@ class Session {
     this.canvas = document.getElementById('screen');
     this.ctx = this.canvas.getContext('2d');
     this.compositor.onPaint = () => this.schedulePaint();
+    this.cursor = { x: 0, y: 0, visible: false };
+    this.preview = null;
   }
 
   schedulePaint() {
@@ -590,6 +616,34 @@ class Session {
       this.canvas.height = c.height;
     }
     this.ctx.putImageData(new ImageData(new Uint8ClampedArray(c.buffer), c.width, c.height), 0, 0);
+    // Presentation-only overlays: the compositor never sees them, so a
+    // wrong box cannot corrupt the authoritative surface.
+    if (this.preview && this.preview.rev > c.rev) {
+      const p = this.preview;
+      const sx = p.x * this.canvas.width / c.width;
+      const sy = p.y * this.canvas.height / c.height;
+      const sw = Math.max(1, p.width * this.canvas.width / c.width);
+      const sh = Math.max(1, p.height * this.canvas.height / c.height);
+      this.ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      this.ctx.strokeRect(sx + 0.5, sy + 0.5, sw, sh);
+    }
+    if (this.cursor.visible) {
+      const cx = this.cursor.x * this.canvas.width / c.width;
+      const cy = this.cursor.y * this.canvas.height / c.height;
+      this.ctx.fillStyle = '#fff';
+      this.ctx.strokeStyle = '#000';
+      this.ctx.beginPath();
+      this.ctx.moveTo(cx, cy);
+      this.ctx.lineTo(cx, cy + 14);
+      this.ctx.lineTo(cx + 4, cy + 10);
+      this.ctx.lineTo(cx + 6, cy + 14);
+      this.ctx.lineTo(cx + 8, cy + 13);
+      this.ctx.lineTo(cx + 6, cy + 9);
+      this.ctx.lineTo(cx + 10, cy + 9);
+      this.ctx.closePath();
+      this.ctx.fill();
+      this.ctx.stroke();
+    }
     if (c.rev !== this.lastAck) {
       this.lastAck = c.rev;
       // Fire and forget: a failed acknowledgement must not interrupt
@@ -724,14 +778,40 @@ class Session {
         case K_SNAPSHOT_COMMIT:
           await c.commitSnapshot(msg.rev, msg.epoch);
           this.lastPtsUs = msg.ptsUs;
+          if (this.preview && this.preview.rev <= msg.rev) this.preview = null;
           this.status(`${c.width}x${c.height} rev ${c.rev}`);
           break;
         case K_PARTIAL_UPDATE:
           c.applyOps(msg.rev, msg.epoch, msg.ops);
           this.lastPtsUs = msg.ptsUs;
+          if (this.preview && this.preview.rev <= msg.rev) this.preview = null;
           break;
         case K_KEEP_ALIVE:
         case K_QUALITY:
+          break;
+        case K_CURSOR_MOVE:
+          this.cursor = { x: msg.x, y: msg.y, visible: true };
+          this.schedulePaint();
+          break;
+        case K_CURSOR_HIDE:
+          this.cursor.visible = false;
+          this.schedulePaint();
+          break;
+        case K_MOTION_PREVIEW:
+          // Interim only, and only forward: a reordered stale hint must
+          // not regress what is already on screen.
+          if (msg.rev > c.rev) {
+            this.preview = {
+              rev: msg.rev, x: msg.x, y: msg.y,
+              width: msg.width, height: msg.height,
+              changedFraction: msg.changedFraction,
+            };
+            this.schedulePaint();
+          }
+          break;
+        case K_REDIRECT:
+          this.status(`redirected to ${msg.relay} session ${msg.session}`);
+          this.socket.close();
           break;
         case K_ERROR:
           this.status(msg.text);

@@ -34,6 +34,43 @@ pub trait MessageSource: Send {
     }
 }
 
+/// Which transport a session runs on. Today only `Quic` is implemented;
+/// `Iroh` and `WebRtc` are named (see ADR 0006) so CLI parsing, help text
+/// and error paths exist before any dependency does — adding one is a new
+/// `MessageTransport` impl behind an existing variant, not a flag day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportKind {
+    /// QUIC over UDP (direct) or the relay fan (TCP+TLS). The default.
+    #[default]
+    Quic,
+    /// Peer-to-peer with relay fallback via iroh. Not implemented.
+    Iroh,
+    /// Browser-native peer connection. Not implemented.
+    WebRtc,
+}
+
+impl TransportKind {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "quic" => Ok(Self::Quic),
+            "iroh" => Ok(Self::Iroh),
+            "webrtc" | "web-rtc" | "rtc" => Ok(Self::WebRtc),
+            other => anyhow::bail!("--transport must be quic|iroh|webrtc, got '{other}'"),
+        }
+    }
+
+    /// Fail loudly for unimplemented transports at session setup, not
+    /// mid-handshake. The error names the ADR so the user learns why.
+    pub fn require_implemented(self) -> anyhow::Result<()> {
+        match self {
+            Self::Quic => Ok(()),
+            Self::Iroh | Self::WebRtc => anyhow::bail!(
+                "{self:?} transport is not implemented (see docs/adr/0006): use --transport quic"
+            ),
+        }
+    }
+}
+
 /// A bidirectional, message-framed connection to a peer. Implemented for
 /// direct QUIC connections and for TCP connections proxied through a relay
 /// server, so the rest of the app never needs to care which path frames are
@@ -297,6 +334,29 @@ pub async fn connect_direct(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_kind_parses_and_gates() {
+        assert_eq!(TransportKind::parse("quic").unwrap(), TransportKind::Quic);
+        assert_eq!(
+            TransportKind::parse("WebRTC").unwrap(),
+            TransportKind::WebRtc
+        );
+        assert_eq!(TransportKind::parse("IROH").unwrap(), TransportKind::Iroh);
+        assert!(TransportKind::parse("sneakernet").is_err());
+        assert!(TransportKind::default().require_implemented().is_ok());
+        let err = TransportKind::Iroh
+            .require_implemented()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("0006"), "must point at the ADR: {err}");
+        let err = TransportKind::WebRtc
+            .require_implemented()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("quic"), "must name the way out: {err}");
+    }
+
     use std::future::Future;
 
     /// A single `await`; reuse a current-thread runtime rather than adding

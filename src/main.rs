@@ -49,6 +49,7 @@ enum ReachPolicyArg {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Capture your screen and share it: to direct viewers, through a
     /// relay, and/or as a browser stream any device can open.
@@ -60,8 +61,9 @@ enum Commands {
         /// Disable the direct QUIC listener.
         #[arg(long)]
         no_listen: bool,
-        /// Relay server address (host:port), for viewers who cannot
-        /// connect to you directly (both behind NAT, no port forwarding).
+        /// Relay server address(es), comma-separated host:port, for
+        /// viewers who cannot connect to you directly (both behind NAT,
+        /// no port forwarding). Registers on every one.
         #[arg(long)]
         relay: Option<String>,
         /// SHA-256 fingerprint of the relay's certificate, as the relay
@@ -129,16 +131,36 @@ enum Commands {
         /// relay skips discovery entirely.
         #[arg(long, value_enum, default_value_t = ReachPolicyArg::Auto)]
         reach: ReachPolicyArg,
+        /// Transport for the session: quic (implemented), iroh or
+        /// webrtc (named, see docs/adr/0006, not implemented).
+        #[arg(long, default_value = "quic")]
+        transport: String,
         /// Also capture audio and send it alongside the screen.
+        /// Kept for compatibility; same as `--audio-source mic`.
         #[arg(long)]
         audio: bool,
+        /// Ask on stdin before admitting each viewer (`y` admits).
+        /// Closed stdin admits (tests, daemons); the token stays the
+        /// secret either way.
+        #[arg(long)]
+        approve: bool,
+        /// Past this many direct viewers, ask the newest to move to the
+        /// first --relay (same session). 0 disables. Needs --relay.
+        #[arg(long, default_value_t = 0)]
+        broadcast_above: usize,
+        /// What to capture: mic, system, both, or none. `system`/`both`
+        /// use a loopback tap when the OS exposes one, else the mic.
+        #[arg(long, default_value = "none")]
+        audio_source: String,
     },
     /// Connect to a shared session and view it.
     View {
         /// Connect directly to a sharer's listen address, as host:port.
-        #[arg(long, conflicts_with = "relay")]
+        /// With --relay too, both race and the first session wins.
+        #[arg(long)]
         connect: Option<String>,
         /// Connect through a relay instead of directly.
+        /// Comma-separated: probes in order, first answer wins.
         #[arg(long)]
         relay: Option<String>,
         /// Relay session code (required with --relay).
@@ -157,6 +179,10 @@ enum Commands {
         /// Reconnect after a dropped session instead of exiting.
         #[arg(long)]
         reconnect: bool,
+        /// Transport for the session: quic (implemented), iroh or
+        /// webrtc (named, see docs/adr/0006, not implemented).
+        #[arg(long, default_value = "quic")]
+        transport: String,
     },
     /// Report what this machine can do, whether audio capture is available,
     /// and which path to the internet it has. Connects to nothing.
@@ -165,6 +191,10 @@ enum Commands {
         /// network report.
         #[arg(long)]
         displays: bool,
+        /// List audio input devices, flagging loopback taps, instead of
+        /// the network report.
+        #[arg(long)]
+        audio: bool,
     },
     /// Print a single line a viewer can open or paste, carrying the token
     /// and the certificate pin so neither has to be retyped.
@@ -258,9 +288,16 @@ fn main() -> Result<()> {
             token,
             repair_secs,
             reach,
+            transport,
             audio,
+            audio_source,
+            approve,
+            broadcast_above,
         } => {
             let token = token_from(token.as_ref(), "viewer token")?;
+            pixel_change_check_client::network::TransportKind::parse(&transport)
+                .with_context(|| format!("Invalid --transport '{transport}'"))?
+                .require_implemented()?;
             let args = share::ShareArgs {
                 listen: if no_listen { None } else { Some(listen) },
                 relay: relay_addr,
@@ -311,7 +348,14 @@ fn main() -> Result<()> {
                     ReachPolicyArg::Direct => reach::ReachPolicy::DirectOnly,
                     ReachPolicyArg::Relay => reach::ReachPolicy::RelayOnly,
                 },
-                audio,
+                approve,
+                broadcast_above,
+                audio_source: if audio {
+                    pixel_change_check_client::audio::AudioSource::Mic
+                } else {
+                    pixel_change_check_client::audio::AudioSource::parse(&audio_source)
+                        .with_context(|| format!("Invalid --audio-source '{audio_source}'"))?
+                },
             };
             rt.block_on(share::run_share(args, metrics))
         }
@@ -323,6 +367,7 @@ fn main() -> Result<()> {
             token,
             no_window,
             reconnect,
+            transport,
         } => {
             let args = view::ViewArgs {
                 connect,
@@ -332,6 +377,8 @@ fn main() -> Result<()> {
                 token: SessionToken::parse(&token).context("Invalid --token")?,
                 show_window: !no_window,
                 reconnect,
+                transport: pixel_change_check_client::network::TransportKind::parse(&transport)
+                    .with_context(|| format!("Invalid --transport '{transport}'"))?,
             };
             view::run_view(args, metrics)
         }
@@ -344,7 +391,13 @@ fn main() -> Result<()> {
             println!("{}", reach::pair_url(&listen, &pin, t.as_str()));
             Ok(())
         }
-        Commands::Diagnose { displays } => {
+        Commands::Diagnose { displays, audio } => {
+            if audio {
+                for (name, loopback) in pixel_change_check_client::audio::list_input_devices() {
+                    println!("{name}{}", if loopback { "  [loopback]" } else { "" });
+                }
+                return Ok(());
+            }
             if displays {
                 for (i, w, h) in pixel_change_check_client::capture::ScreenCapture::list_displays()
                 {

@@ -20,7 +20,10 @@ pub mod sync;
 pub mod syncmeasure;
 pub mod transport;
 
-pub use capture::{AudioFrame, MicrophoneSource, NullSource, SystemAudio};
+pub use capture::{
+    find_loopback, list_input_devices, mix_frames, open_source, AudioFrame, AudioSource,
+    MicrophoneSource, MixedSource, NullSource, SystemAudio,
+};
 pub use codec::{
     OpusDecoder, OpusEncoder, CHANNELS, SAMPLES_PER_CHANNEL, SAMPLES_PER_FRAME, SAMPLE_RATE,
 };

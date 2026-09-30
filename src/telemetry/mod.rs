@@ -48,6 +48,7 @@ pub struct Metrics {
     pub bytes_copy: Counter,
     pub bytes_snapshot: Counter,
     pub bytes_keepalive: Counter,
+    pub bytes_preview: Counter,
     /// Largest single encoded message seen.
     pub peak_message_bytes: Gauge,
 
@@ -119,7 +120,8 @@ impl Metrics {
             + self.bytes_fill.get()
             + self.bytes_copy.get()
             + self.bytes_snapshot.get()
-            + self.bytes_keepalive.get();
+            + self.bytes_keepalive.get()
+            + self.bytes_preview.get();
         format!(
             "uptime {:.0}s  frames {}  (idle {})  fps {:.1}  changed {:.1}%\n\
              \x20 work    detect   {}\n\
@@ -127,7 +129,7 @@ impl Metrics {
              \x20         encode   {}\n\
              \x20         apply    {}\n\
              \x20         first exact image {}\n\
-             \x20 wire    total {:.2} MiB  patch {:.2}  fill {:.2}  copy {:.2}  snapshot {:.2}  peak {} B\n\
+             \x20 wire    total {:.2} MiB  patch {:.2}  fill {:.2}  copy {:.2}  snapshot {:.2}  preview {:.2}  peak {} B\n\
              \x20 viewers joined {}  rejected {}  lag {}  repairs {}  queue {}  rtt {:.0}ms  pending {:.0}ms\n\
              \x20 capture frames {}  errors {}  loop overruns {}  epoch bumps {}\n",
             uptime.as_secs_f64(),
@@ -145,6 +147,7 @@ impl Metrics {
             mib(&self.bytes_fill),
             mib(&self.bytes_copy),
             mib(&self.bytes_snapshot),
+            mib(&self.bytes_preview),
             self.peak_message_bytes.get_raw(),
             self.viewers_joined.get(),
             self.viewers_rejected.get(),
@@ -196,7 +199,14 @@ impl Metrics {
                 + self.bytes_fill.get()
                 + self.bytes_copy.get()
                 + self.bytes_snapshot.get()
-                + self.bytes_keepalive.get(),
+                + self.bytes_keepalive.get()
+                + self.bytes_preview.get(),
+        );
+        counter(
+            &mut out,
+            "pcc_bytes_preview_total",
+            "Wire bytes from motion-preview hints.",
+            self.bytes_preview.get(),
         );
         counter(
             &mut out,

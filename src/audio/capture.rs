@@ -9,17 +9,275 @@ use std::time::{Duration, Instant};
 
 use super::codec::{SAMPLES_PER_FRAME, SAMPLE_RATE};
 
+/// Which audio to capture. The default stays a microphone; `system`
+/// and `both` are the seam for the per-platform loopback backends
+/// (WASAPI loopback, PipeWire/Pulse monitor, ScreenCaptureKit app audio),
+/// which no cross-platform API exposes. Until a backend lands, asking for
+/// system audio falls back to the microphone with a warning rather than
+/// failing the share — silence about the gap would be worse than noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioSource {
+    /// The default input device (a microphone): voices, room, calls.
+    #[default]
+    Mic,
+    /// Whatever the machine is playing. Falls back to mic until a
+    /// platform loopback backend exists (see `find_loopback`).
+    System,
+    /// Mic plus system, mixed. Falls back to mic alone for the same
+    /// reason: half the mix is better than no share.
+    Both,
+    /// Silence on a real clock. The video timeline stays measurable and
+    /// the viewer never special-cases "no audio".
+    None_,
+}
+
+impl AudioSource {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "mic" | "microphone" => Ok(Self::Mic),
+            "system" | "loopback" | "output" => Ok(Self::System),
+            "both" | "mic+system" | "mix" => Ok(Self::Both),
+            "none" | "off" | "silence" => Ok(Self::None_),
+            other => anyhow::bail!("--audio-source must be mic|system|both|none, got '{other}'"),
+        }
+    }
+}
+
+/// A loopback candidate: an input device whose name says it taps the
+/// output mix rather than a microphone.
+fn is_loopback_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "monitor",
+        "loopback",
+        "stereo mix",
+        "stereomix",
+        "what u hear",
+        "wave out",
+    ]
+    .iter()
+    .any(|k| n.contains(k))
+}
+
+/// Look for a system-audio tap among the host's input devices: a PulseAudio
+/// "Monitor of …", a WASAPI loopback endpoint exposed as input, a virtual
+/// cable. `None` is the common case — most machines have no such device —
+/// and the caller falls back rather than failing.
+pub fn find_loopback() -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    let devices = host.input_devices().ok()?;
+    devices
+        .filter_map(|d| d.name().ok().map(|n| (n, d)))
+        .find(|(n, _)| is_loopback_name(n))
+        .map(|(_, d)| d)
+}
+
+/// List input devices for `pcc diagnose --audio`: (name, is_loopback).
+/// Never opens a stream; naming one is enough for the picker.
+pub fn list_input_devices() -> Vec<(String, bool)> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+    devices
+        .filter_map(|d| d.name().ok())
+        .map(|n| {
+            let loopback = is_loopback_name(&n);
+            (n, loopback)
+        })
+        .collect()
+}
+
+/// Open the requested source. Silence rather than nothing: a share with
+/// no microphone should still send a stream, so the video timeline stays
+/// on a real audio clock and the viewer does not have to special-case
+/// "no audio".
+pub fn open_source(which: AudioSource) -> Result<Box<dyn SystemAudio>> {
+    match which {
+        AudioSource::None_ => Ok(Box::new(NullSource::new())),
+        AudioSource::Mic => match cpal::default_host().default_input_device() {
+            Some(device) => Ok(Box::new(MicrophoneSource::from_device(device)?)),
+            // No device, or the host refused to say. Silence is a valid
+            // answer; failing the whole share is not.
+            None => Ok(Box::new(NullSource::new())),
+        },
+        // No platform loopback backend is linked yet. If the OS exposes
+        // the mix as an input device (Pulse monitor, virtual cable), use
+        // it directly; otherwise the microphone with a warning.
+        AudioSource::System => match find_loopback() {
+            Some(device) => Ok(Box::new(MicrophoneSource::from_device(device)?)),
+            None => {
+                tracing::warn!(
+                    "no system-audio loopback device found; capturing the microphone instead                      (WASAPI loopback / PipeWire monitor / ScreenCaptureKit backends not yet implemented)"
+                );
+                open_source(AudioSource::Mic)
+            }
+        },
+        AudioSource::Both => match find_loopback() {
+            Some(device) => Ok(Box::new(MixedSource::new(device)?)),
+            None => {
+                tracing::warn!(
+                    "no system-audio loopback device found; --audio-source both captures the microphone alone"
+                );
+                open_source(AudioSource::Mic)
+            }
+        },
+    }
+}
+
 /// The best available capture device, falling back to silence.
-///
-/// Silence rather than nothing: a share with no microphone should still
-/// send a stream, so the video timeline stays on a real audio clock and
-/// the viewer does not have to special-case "no audio".
 pub fn default_source() -> Result<Box<dyn SystemAudio>> {
-    match cpal::default_host().default_input_device() {
-        Some(device) => Ok(Box::new(MicrophoneSource::from_device(device)?)),
-        // No device, or the host refused to say. Silence is a valid
-        // answer; failing the whole share is not.
-        None => Ok(Box::new(NullSource::new())),
+    open_source(AudioSource::Mic)
+}
+
+/// Mic plus system, mixed to one stereo frame. The mic is the default
+/// input device and the system side is a loopback tap found by
+/// `find_loopback`; the mix is a saturating add, so two loud sources clip
+/// together rather than wrapping into garbage. Two capture threads, one
+/// mixed receiver — the mixer drops to mic-alone if the system side
+/// stalls, because half a mix beats a stalled share.
+pub struct MixedSource {
+    /// Device names, resolved on the owner thread. Names — not handles —
+    /// because CPAL devices are `!Send` on some hosts and a handle here
+    /// would have to cross into the spawned thread.
+    mic_name: Option<String>,
+    system_name: String,
+    running: Option<Arc<AtomicBool>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl MixedSource {
+    pub fn new(system_device: cpal::Device) -> Result<Self> {
+        let system_name = system_device
+            .name()
+            .context("reading loopback device name")?;
+        let mic_name = cpal::default_host()
+            .default_input_device()
+            .and_then(|d| d.name().ok());
+        Ok(Self {
+            mic_name,
+            system_name,
+            running: None,
+            worker: None,
+        })
+    }
+}
+
+/// Find an input device by name. Used by the mixer owner thread, which is
+/// the only thread that ever touches a device handle.
+fn open_named(name: &str) -> Result<MicrophoneSource> {
+    let host = cpal::default_host();
+    let devices = host
+        .input_devices()
+        .context("enumerating audio input devices")?;
+    for device in devices {
+        if device.name().as_deref().unwrap_or("") == name {
+            return MicrophoneSource::from_device(device);
+        }
+    }
+    anyhow::bail!("audio device '{name}' disappeared")
+}
+
+/// Saturating add of two stereo frames. Public for tests: the mix must
+/// clip, never wrap.
+pub fn mix_frames(a: &[f32], b: &[f32]) -> Vec<f32> {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x + y).clamp(-1.0, 1.0))
+        .collect()
+}
+
+impl SystemAudio for MixedSource {
+    fn device_name(&self) -> &str {
+        "mic+system mix"
+    }
+
+    fn start(&mut self) -> Result<mpsc::Receiver<AudioFrame>> {
+        if self.running.is_some() {
+            return Err(anyhow!("mixed source is already running"));
+        }
+        if self.running.is_some() {
+            return Err(anyhow!("mixed source is already running"));
+        }
+        // Handles stay behind: only names cross into the owner thread,
+        // which re-opens both sides where they will live and die.
+        let mic_name = self.mic_name.clone();
+        let system_name = self.system_name.clone();
+        // CPAL devices and streams are `!Send`: even an unstarted source
+        // cannot move into a spawned thread. So one owner thread opens,
+        // starts, mixes and drops both sources; nothing audio-flavoured
+        // ever crosses a thread, only the mixed `AudioFrame`s going out.
+        let (sender, receiver) = mpsc::sync_channel(CAPTURE_QUEUE_FRAMES);
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_running = Arc::clone(&running);
+        let worker = thread::spawn(move || {
+            // Both sources are created, started and dropped on this
+            // owner thread — nothing audio-flavoured ever crosses one.
+            let Ok(mut system) = open_named(&system_name) else {
+                return;
+            };
+            let mut mic = mic_name.as_deref().and_then(|n| open_named(n).ok());
+            let Ok(system_frames) = system.start() else {
+                return;
+            };
+            let mic_frames = match mic.as_mut() {
+                Some(m) => m.start().ok(),
+                None => None,
+            };
+            // Latest-only on both sides: 5 ms each keeps both fresh
+            // without either starving, and audio is a clock, not a log.
+            while worker_running.load(Ordering::Relaxed) {
+                let mic_frame = match &mic_frames {
+                    Some(rx) => rx.recv_timeout(Duration::from_millis(5)).ok(),
+                    None => {
+                        thread::sleep(Duration::from_millis(5));
+                        None
+                    }
+                };
+                let sys_frame = system_frames.recv_timeout(Duration::from_millis(5)).ok();
+                match (mic_frame, sys_frame) {
+                    (None, None) => continue,
+                    (m, s) => {
+                        let pcm = match (m, s) {
+                            (Some(m), Some(s)) => mix_frames(&m.pcm, &s.pcm),
+                            (Some(m), None) => m.pcm,
+                            (None, Some(s)) => s.pcm,
+                            (None, None) => unreachable!(),
+                        };
+                        if matches!(
+                            sender.try_send(AudioFrame {
+                                pcm,
+                                capture_time: Instant::now(),
+                            }),
+                            Err(mpsc::TrySendError::Disconnected(_))
+                        ) {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        self.running = Some(running);
+        self.worker = Some(worker);
+        Ok(receiver)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        if let Some(running) = self.running.take() {
+            running.store(false, Ordering::Relaxed);
+        }
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| anyhow!("mixed source worker panicked"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MixedSource {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -350,6 +608,43 @@ mod tests {
         assert_eq!(second.pcm.len(), SAMPLES_PER_FRAME);
         assert!(second.capture_time >= first.capture_time);
         source.stop().expect("stops silence source");
+    }
+
+    #[test]
+    fn audio_source_parses_and_rejects_garbage() {
+        use AudioSource::*;
+        assert_eq!(AudioSource::parse("mic").unwrap(), Mic);
+        assert_eq!(AudioSource::parse("MICROPHONE").unwrap(), Mic);
+        assert_eq!(AudioSource::parse("system").unwrap(), System);
+        assert_eq!(AudioSource::parse("loopback").unwrap(), System);
+        assert_eq!(AudioSource::parse("both").unwrap(), Both);
+        assert_eq!(AudioSource::parse("mix").unwrap(), Both);
+        assert_eq!(AudioSource::parse("none").unwrap(), None_);
+        assert_eq!(AudioSource::parse("off").unwrap(), None_);
+        assert!(AudioSource::parse("surround").is_err());
+        assert!(AudioSource::parse("").is_err());
+    }
+
+    #[test]
+    fn loopback_names_match_monitors_and_mixes() {
+        for yes in [
+            "Monitor of Built-in Audio",
+            "Stereo Mix (Realtek)",
+            "loopback PCM",
+            "What U Hear",
+        ] {
+            assert!(is_loopback_name(yes), "{yes:?} should count as loopback");
+        }
+        for no in ["Built-in Microphone", "USB Headset", "MacBook Pro Speakers"] {
+            assert!(!is_loopback_name(no), "{no:?} should not count as loopback");
+        }
+    }
+
+    #[test]
+    fn mix_clips_rather_than_wrapping() {
+        assert_eq!(mix_frames(&[0.5, -0.5], &[0.5, -0.5]), vec![1.0, -1.0]);
+        assert_eq!(mix_frames(&[0.9, 0.9], &[0.9, 0.9]), vec![1.0, 1.0]);
+        assert_eq!(mix_frames(&[0.1], &[0.2, 0.3]), vec![0.3]);
     }
 
     // A MicrophoneSource test is deliberately omitted: CI is headless and may

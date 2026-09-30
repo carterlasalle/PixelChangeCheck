@@ -222,7 +222,11 @@ fn apply_encoded(viewer: &mut Compositor, bytes: &[u8]) -> Result<()> {
         | Message::Hello { .. }
         | Message::RequestKeyframe
         | Message::E2eOffer { .. }
-        | Message::E2eReply { .. } => {}
+        | Message::E2eReply { .. }
+        | Message::CursorMove { .. }
+        | Message::CursorHide
+        | Message::MotionPreview { .. }
+        | Message::Redirect { .. } => {}
     }
     Ok(())
 }
