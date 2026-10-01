@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.1.4
+
+### Changed
+
+- **ARM Linux archive.** The release matrix gains `ubuntu-24.04-arm`
+  (native ARM64, no cross-compiling), so `cargo binstall` serves
+  `pcc-<version>-aarch64-unknown-linux-gnu` instead of falling back to
+  a full local compile there. No code change; same `dist` profile and
+  triple-named archive scheme as the other three legs.
+- **MSRV is 1.91.** iroh 1.3 requires rustc 1.91, so the floor moves
+  from 1.88 everywhere it was claimed (`rust-version`, CI, README,
+  release runners). 1.88 was the `time`/RUSTSEC-2026-0009 floor; iroh
+  moved it.
+- **Headless and Windows test fixes.** The cursor sampler uses
+  `DeviceState::checked_new` (no X display reads as `CursorHide`
+  instead of panicking); window/application capture resolves the match
+  before touching the framebuffer (headless still fails fast with "no
+  visible window matches"); the closed-stdin test reads EOF from memory
+  instead of `/dev/null`.
+- **OSV-Scanner ignores with receipts.** `osv-scanner.toml` mirrors the
+  `.cargo/audit.toml` policy for the seven flagged advisories, each
+  entry naming what upstream release lifts it.
+
+### Added
+
+- **`docs/usage.md`.** Every entry point — all five commands, every
+  flag, the browser routes, the three transports — each verified live
+  against the binary. Also corrects the relay token story: the share's
+  `--token` must equal the relay's `--token` (HMAC-checked on
+  registration), and the viewer's must match too for the E2E handshake.
+
 ## 0.1.3
 
 ### Changed
