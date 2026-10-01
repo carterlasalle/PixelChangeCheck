@@ -81,9 +81,11 @@ The diff is against the **reference** — the framebuffer an up-to-date viewer h
 ### Install
 
 The fastest route is a prebuilt binary — no compiler, no system
-headers, no twenty-minute build:
+headers, no twenty-minute build. `binstall` is a separate tool, so
+install it once first:
 
 ```sh
+cargo install cargo-binstall
 cargo binstall pixel-change-check-client
 ```
 

@@ -8,6 +8,7 @@ this page has a bug — file it.
 ## Install
 
 ```sh
+cargo install cargo-binstall   # once: the `cargo binstall` subcommand itself
 cargo binstall pixel-change-check-client   # prebuilt binary, no compile
 cargo install pixel-change-check-client --locked
 # headless (no audio capture, no native window, no system headers):
