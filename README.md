@@ -10,7 +10,7 @@
 ![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
 ![crates.io](https://img.shields.io/crates/v/pixel-change-check-client?label=crates.io)
 
-[Install](#quick-start) · [How it works](#how-pcc-works) · [Architecture](#architecture) · [Relay](#do-i-need-a-relay) · [Limitations](#known-limitations) · [Design records](docs/adr/)
+[Install](#quick-start) · [Usage](docs/usage.md) · [How it works](#how-pcc-works) · [Architecture](#architecture) · [Relay](#do-i-need-a-relay) · [Limitations](#known-limitations) · [Design records](docs/adr/)
 
 </div>
 
@@ -344,6 +344,7 @@ roadmap is in `docs/spec/roadmap.md`.
 
 | Document | Purpose |
 |---|---|
+| [Usage](docs/usage.md) | Every entry point — all five commands, every flag, the browser routes, the three transports — with how to invoke each |
 | [Architecture decisions](docs/adr/) | Why the surface is lossless, how tokens and pins work, and how sequencing is enforced |
 | [Roadmap](docs/spec/roadmap.md) | The specified workstreams and their definition of done |
 | [Design](DESIGN.md) | Product and design guidance, including what was deliberately not built |
