@@ -66,17 +66,37 @@ The diff is against the **reference** — the framebuffer an up-to-date viewer h
 ### Prerequisites
 
 - Rust 1.91 or newer (see `rust-version` in `Cargo.toml`)
-- System dependencies:
-  - **Linux**: `pkg-config`, `libasound2-dev`, `libdbus-1-dev`,
-    `libegl-dev`, `libgbm-dev`, `libpipewire-0.3-dev`, `libudev-dev`,
-    `libwayland-dev`, `libxcb1-dev`, `libxkbcommon-dev`, `libxrandr-dev`.
-    The ALSA headers are not optional: `alsa-sys`, which the audio
-    capture path links against, runs `pkg-config` at build time and
-    fails the build without them; the native window (`minifb`) needs
-    the Wayland pair the same way, cpal's PipeWire backend needs
-    `libpipewire-0.3-dev`, and the capture path's GBM/EGL stack
-    (`libwayshot-xcap` via xcap) needs `libegl-dev` and `libgbm-dev`.
-  - **macOS/Windows**: none
+- System dependencies, **Linux only** (macOS/Windows: none). Each entry
+  is here because a release run failed without it or the lockfile proves
+  the probe — never vibes. Install them all at once:
+
+  | You install | Because | Chain |
+  |---|---|---|
+  | `pkg-config` | every `-sys` probe needs the tool itself | — |
+  | `libasound2-dev` | audio capture links ALSA | `alsa-sys` ← `alsa` ← `cpal` ← `audio` feature |
+  | `libdbus-1-dev` | display enumeration over D-Bus | `libdbus-sys` ← `dbus` ← `screenshots` |
+  | `libegl-dev`, `libgbm-dev` | GBM/EGL screen capture — a release run failed in `khronos-egl`'s probe without them | `khronos-egl` + `gbm-sys` ← `gl`/`gbm` ← `libwayshot-xcap` ← `xcap` |
+  | `libpipewire-0.3-dev` | PipeWire screen capture — a release run failed in `libspa-sys`'s probe without it | `libspa-sys` ← `pipewire` ← `xcap` (not cpal — cpal's Linux audio is ALSA-only) |
+  | `libwayland-dev` | Wayland capture + native window — a release run failed in `wayland-sys`'s probe without it | `wayland-sys` ← `wayland-backend` ← `gbm`/`libwayshot-xcap` ← `xcap`, and `wayland-sys` ← `minifb` (`native-viewer` feature) |
+  | `libxcb1-dev` | X11 display info | `xcb` ← `display-info`/`screenshots`/`xcap` (all three list it directly) |
+  | `libx11-dev` and friends | the cursor pointer queries X11 | `x11` ← `device_query` ← capture (cursor sampler; `xlib` feature only, so the probe that fires today is `x11` itself — the rest of `x11`'s build-script list fires only on cargo features nothing enables) |
+  | `libudev-dev`, `libxkbcommon-dev`, `libxrandr-dev` | **kept, unverified** — no `libudev-sys`, `xkbcommon-sys`, or enabled `xrandr` probe anywhere in `Cargo.lock`. They ride with the stacks above on every real system, and dropping a working dep blind to prove a point risks the next release run. Prove-or-drop on the next'Dependencies bump: remove one, watch the Ubuntu release leg, keep or restore on evidence. |
+
+  Two things this table deliberately does **not** list:
+
+  - `libopus-dev`: worth installing (`apt install libopus-dev`, or
+    `brew install opus` on macOS) so the build links the system Opus
+    instead of compiling a vendored copy with cmake — but optional,
+    because the vendored build works without it. Set `OPUS_LIB_DIR` /
+    `OPUS_LIB_STATIC` only if you need to point at a non-standard
+    install; the default finds pkg-config's answer.
+  - Anything for `--no-default-features`: that build drops `cpal`/Opus
+    (no ALSA, no libopus cmake) and `minifb` (no X11/Wayland headers),
+    so a headless relay needs only `pkg-config` plus the capture rows.
+    The capture stack itself (`screenshots`, `display-info`, `xcap`,
+    `device_query`) is **not** feature-gated — that is the honest gap
+    in the table above, and gating it is future work, not a flag that
+    exists today.
 
 ### Install
 
@@ -122,11 +142,12 @@ against them.
 
 A note on Opus specifically: with `libopus-dev` (Debian/Ubuntu) or
 `opus` (Homebrew) plus `pkg-config` installed, the build links the
-system library instead of compiling a vendored copy with cmake. That
-one package is the difference between a pure-Rust build and a C
-toolchain step. There is deliberately no `.cargo/config.toml` forcing
-a linker here, so nothing about that choice is hidden: the default
-build works with stock `rustup`, and faster linkers stay opt-in.
+system library instead of compiling a vendored copy with cmake (see
+the prerequisites table above for why it stays optional). That one
+package is the difference between a pure-Rust build and a C toolchain
+step. There is deliberately no `.cargo/config.toml` forcing a linker
+here, so nothing about that choice is hidden: the default build works
+with stock `rustup`, and faster linkers stay opt-in.
 
 ### Share your screen
 
