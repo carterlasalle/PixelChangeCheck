@@ -2872,8 +2872,8 @@ must be changed together.
   serves a cached result for a toolchain it has already checked, so
   `rustup run 1.85.0 cargo check` can exit 0 while CI reports that a
   dependency needs a newer rustc. Trust CI, or `cargo clean` first.
-- The MSRV is 1.88 because every patched `time` requires it, not because
-  it was chosen. If `time` ever goes, the floor can drop.
+- The MSRV is 1.91 because iroh 1.3 requires it, not because it was
+  chosen. (1.88 was the `time`/RUSTSEC-2026-0009 floor; iroh moved it.)
 - `macos-13` was removed from the release matrix. It is the last Intel
   macOS image, it sat queued for over an hour with no runner, and the
   `release` job needs every matrix entry, so one dead label blocks every

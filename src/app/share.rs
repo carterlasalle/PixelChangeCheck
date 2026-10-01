@@ -2580,11 +2580,13 @@ mod tests {
 
     #[test]
     fn closed_stdin_counts_as_closed() {
-        // /dev/null reads EOF immediately: the worst case the approval
-        // prompter must survive without hanging.
+        // An empty in-memory buffer reads EOF immediately, on every
+        // platform: the worst case the approval prompter must survive
+        // without hanging. (`/dev/null` does the same on Unix but does
+        // not exist on Windows, which is exactly what CI proved.)
         use std::io::BufRead;
-        let f = std::fs::File::open("/dev/null").unwrap();
-        let mut locked = std::io::BufReader::new(f);
+        let empty: &[u8] = &[];
+        let mut locked = std::io::BufReader::new(empty);
         let mut buf = Vec::new();
         assert_eq!(locked.read_until(b'x', &mut buf).unwrap(), 0);
     }

@@ -15,16 +15,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Must match `rust-version` in Cargo.toml.
-  MSRV: "1.88.0"
+  # Must match `rust-version` in Cargo.toml. 1.91, not 1.88: iroh 1.3
+  # requires rustc 1.91, so nothing in this tree — CI, release, or a
+  # user's local build — compiles on 1.88 anymore.
+  MSRV: "1.91.0"
 
 jobs:
   # The floor the crate claims. `rust-version` in Cargo.toml must not be
-  # raised without also raising this, and vice versa. Known gap: with
-  # iroh 1.3 in the tree this job fails (iroh requires rustc 1.91), the
-  # same failure that killed the first v0.1.3 release runs. The release
-  # workflow already builds at 1.91; this job still asserts the old
-  # floor until `rust-version` itself is raised or iroh is gated.
+  # raised without also raising this, and vice versa.
   msrv:
     name: MSRV
     runs-on: ubuntu-latest

@@ -53,7 +53,12 @@ impl PlatformCursorSampler {
 
 impl CursorSampler for PlatformCursorSampler {
     fn sample(&mut self, width: u32, height: u32) -> Option<CursorSample> {
-        let (gx, gy) = DeviceState::new().get_mouse().coords;
+        // `checked_new` returns `None` instead of panicking when there is
+        // no X display (headless CI, Wayland-only sessions). No display
+        // means no pointer to report: `None` reads downstream as
+        // `CursorHide`, exactly like a pointer outside the share.
+        let state = DeviceState::checked_new()?;
+        let (gx, gy) = state.get_mouse().coords;
         let (x, y) = (gx - self.origin.0, gy - self.origin.1);
         if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
             return None;
@@ -180,11 +185,60 @@ impl ScreenCapture {
         Self::open_target(&CaptureTarget::Display(index))
     }
 
-    /// Open a capture target. Window/Application fall back to the display
-    /// with a warning: sharing the wrong rectangle is recoverable, failing
-    /// the share is not. Region is clamped to the display so geometry is
-    /// stable across frames.
+    /// Open a capture target. Region is clamped to the display so
+    /// geometry is stable across frames. Window/Application resolve the
+    /// match before touching the framebuffer, so a headless machine
+    /// still fails fast with "no visible window matches".
     pub fn open_target(target: &CaptureTarget) -> Result<Self> {
+        // Window/Application never touch the framebuffer: resolve the
+        // match first so a headless machine (no screens at all) still
+        // fails fast with "no visible window matches" instead of "No
+        // screens found". The screen below is only the fallback surface
+        // the window frames compose against.
+        if let CaptureTarget::Window(id) = target {
+            let needle = id.to_ascii_lowercase();
+            // Fail fast when nothing matches: sharing the display
+            // instead would leak pixels the user explicitly excluded.
+            let (w, h) =
+                find_window(&needle, None).context(format!("no visible window matches '{id}'"))?;
+            let screen = Screen::all()
+                .context("Failed to enumerate screens")?
+                .into_iter()
+                .next()
+                .context("No screens found")?;
+            info!("Sharing window matching '{id}' ({w}x{h})");
+            return Ok(Self {
+                screen,
+                frame_counter: AtomicU64::new(0),
+                region: None,
+                window: Some(WindowShare {
+                    needle,
+                    app: None,
+                    last: (w, h),
+                }),
+            });
+        }
+        if let CaptureTarget::Application(id) = target {
+            let needle = id.to_ascii_lowercase();
+            let (w, h) = find_window(&needle, Some(&needle))
+                .context(format!("no visible window matches application '{id}'"))?;
+            let screen = Screen::all()
+                .context("Failed to enumerate screens")?
+                .into_iter()
+                .next()
+                .context("No screens found")?;
+            info!("Sharing application matching '{id}' ({w}x{h})");
+            return Ok(Self {
+                screen,
+                frame_counter: AtomicU64::new(0),
+                region: None,
+                window: Some(WindowShare {
+                    needle: needle.clone(),
+                    app: Some(needle),
+                    last: (w, h),
+                }),
+            });
+        }
         let screens = Screen::all().context("Failed to enumerate screens")?;
         let (screen, region) = match target {
             CaptureTarget::Display(i) => (
@@ -229,41 +283,8 @@ impl ScreenCapture {
                 }
                 (screen, Some((x, y, width, height)))
             }
-            CaptureTarget::Window(id) => {
-                let screen = screens.into_iter().next().context("No screens found")?;
-                let needle = id.to_ascii_lowercase();
-                // Fail fast when nothing matches: sharing the display
-                // instead would leak pixels the user explicitly excluded.
-                let (w, h) = find_window(&needle, None)
-                    .context(format!("no visible window matches '{id}'"))?;
-                info!("Sharing window matching '{id}' ({w}x{h})");
-                return Ok(Self {
-                    screen,
-                    frame_counter: AtomicU64::new(0),
-                    region: None,
-                    window: Some(WindowShare {
-                        needle,
-                        app: None,
-                        last: (w, h),
-                    }),
-                });
-            }
-            CaptureTarget::Application(id) => {
-                let screen = screens.into_iter().next().context("No screens found")?;
-                let needle = id.to_ascii_lowercase();
-                let (w, h) = find_window(&needle, Some(&needle))
-                    .context(format!("no visible window matches application '{id}'"))?;
-                info!("Sharing application matching '{id}' ({w}x{h})");
-                return Ok(Self {
-                    screen,
-                    frame_counter: AtomicU64::new(0),
-                    region: None,
-                    window: Some(WindowShare {
-                        needle: needle.clone(),
-                        app: Some(needle),
-                        last: (w, h),
-                    }),
-                });
+            CaptureTarget::Window(id) | CaptureTarget::Application(id) => {
+                unreachable!("window/application resolved above, id={id}")
             }
         };
 

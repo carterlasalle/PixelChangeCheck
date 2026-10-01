@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/carterlasalle/PixelChangeCheck/actions/workflows/ci.yml/badge.svg)](https://github.com/carterlasalle/PixelChangeCheck/actions/workflows/ci.yml)
 [![Release](https://github.com/carterlasalle/PixelChangeCheck/actions/workflows/release.yml/badge.svg)](https://github.com/carterlasalle/PixelChangeCheck/actions/workflows/release.yml)
-![Rust](https://img.shields.io/badge/Rust-1.88%2B-dea584?logo=rust&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-1.91%2B-dea584?logo=rust&logoColor=white)
 ![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
 ![crates.io](https://img.shields.io/crates/v/pixel-change-check-client?label=crates.io)
 
@@ -65,7 +65,7 @@ The diff is against the **reference** — the framebuffer an up-to-date viewer h
 
 ### Prerequisites
 
-- Rust 1.88 or newer (see `rust-version` in `Cargo.toml`)
+- Rust 1.91 or newer (see `rust-version` in `Cargo.toml`)
 - System dependencies:
   - **Linux**: `pkg-config`, `libasound2-dev`, `libdbus-1-dev`,
     `libegl-dev`, `libgbm-dev`, `libpipewire-0.3-dev`, `libudev-dev`,

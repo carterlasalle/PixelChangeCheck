@@ -1,0 +1,34 @@
+# OSV-Scanner ignores. Each entry names the check that must lift it.
+#
+# The rule, matching `.cargo/audit.toml`: an ignore is a risk exception
+# with a receipt, not a finding deletion. Anything ignored here must
+# also be ignored there (or documented why the tools disagree), and
+# every entry says what upstream release removes it.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0194"
+reason = "Quadratic-time start-tag check in the quick-xml parser (0.28.2 via wayland-scanner 0.30.1 and xcb build scripts). Attacker XML never reaches it: inputs are the Wayland/X11 protocol definitions read off the build host. Lifts with screenshots > 0.8.10 (wayland-client 0.31, quick-xml >= 0.41). Same ignore in .cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0195"
+reason = "Unbounded namespace-declaration allocation in quick-xml NsReader (0.28.2, same build-time-only path as above). Same fix, same receipt. Same ignore in .cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0141"
+reason = "bincode 1.3.3 unmaintained. The wire format IS positional bincode records (pcc/types.rs, relay.rs); it is replaced wholesale if the format ever changes, not upgraded. Same note in .cargo/audit.toml. No patched version exists on this format."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0057"
+reason = "fxhash 0.2.1 unmaintained, via display-info and screenshots (capture enumeration only). A non-crypto hash of local display metadata; no attacker input, no patch available. Same note in .cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+reason = "instant 0.1.13 unmaintained, via minifb (window timing only). A clock wrapper on the viewer path; no attacker input, no patch available. Same note in .cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0186"
+reason = "Unchecked offset/len in memmap2 0.7.1 advise/flush_range (via libwayshot capture). This tree never calls those entry points — verified by search: no mmap/memmap reference in src/ — and the crate is transitive-only beneath screenshots/xcap. Re-verify the call graph on every cargo update; remove if memmap2 0.7.1 leaves the tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste 1.0.15 unmaintained (via netlink-packet-core, iroh's netwatch/netdev stack). A proc-macro for identifier pasting in a transitive netlink codec; this tree never invokes it directly. Remove if netlink-packet-core moves to pastey or equivalent."

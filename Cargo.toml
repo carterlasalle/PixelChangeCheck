@@ -3,11 +3,10 @@ name = "pixel-change-check-client"
 version = "0.1.3"
 edition = "2021"
 # The floor CI tests. Raise this and the MSRV job together.
-# 1.88 is not a preference: every `time` release carrying the
-# RUSTSEC-2026-0009 fix requires it, and `time` arrives through rcgen
-# (certificate validity dates) and tracing-appender (log rotation). Both
-# are used, so the floor moves rather than the fix.
-rust-version = "1.88"
+# 1.91, not 1.88: iroh 1.3 requires rustc 1.91, so the whole tree —
+# local builds included — needs it. (1.88 was the `time`/RUSTSEC-2026-0009
+# floor; iroh moved it.)
+rust-version = "1.91"
 authors = ["Carter LaSalle"]
 # AGPL-3.0 only, not "or later": the choice is deliberate, so say it
 # precisely rather than leaving a consumer to infer it.
