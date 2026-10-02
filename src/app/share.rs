@@ -462,7 +462,9 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
     let identity = Arc::new(
         crate::network::generate_identity().context("Failed to create the sharer identity")?,
     );
-    info!("Certificate fingerprint (sha256): {}", identity.fingerprint);
+    // println, not info: the viewer command below embeds this pin, and
+    // the operator copies both. Log filtering must never hide either.
+    println!("Certificate fingerprint (sha256): {}", identity.fingerprint);
 
     let target_quality = args.quality.clamp(0.1, 1.0);
     let requested_fps = args.fps.max(1).min(args.max_fps.max(1));
@@ -906,7 +908,9 @@ async fn start_web(
     // string is sent in the request line, kept in browser history, and
     // can leak through referrers, proxy logs and screenshots of the URL.
     // Everything after `#` is handled by the browser and never leaves it.
-    info!(
+    // println: the operator opens this URL, so it must survive
+    // log filtering like the fingerprint above.
+    println!(
         "Browser viewer: {scheme}://{addr}/#token={}",
         token.as_str()
     );

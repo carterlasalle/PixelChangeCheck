@@ -183,6 +183,11 @@ impl RelayTransport {
             .await
             .context("Timed out waiting for the relay to accept the registration")?
             .context("The relay closed the connection during registration")?;
+        if ack[0] == 0 {
+            anyhow::bail!(
+                "no host in this session yet — is the sharer still running?                  (the relay accepted the registration, but the session is empty)"
+            );
+        }
         if ack[0] != crate::network::PROTOCOL_VERSION {
             anyhow::bail!(
                 "The relay rejected this viewer: check --session and --token \
@@ -373,7 +378,10 @@ pub async fn run_relay_server(
     let acceptor =
         tokio_rustls::TlsAcceptor::from(Arc::new(NetworkConfig::server_crypto_config(&identity)?));
     info!("Relay server listening on {} (TLS)", listener.local_addr()?);
-    info!(
+    // println, not info: the operator copies this pin into every client
+    // command, and log-level filtering must never be able to hide it.
+    // (The test harness greps stdout for it; see the refusal test below.)
+    println!(
         "Relay certificate fingerprint (sha256): {}",
         identity.fingerprint
     );
@@ -491,13 +499,34 @@ async fn handle_client(
     }
     // The registration was good; clear the peer's failure count.
     failures.lock().await.remove(&peer);
+
+    // A viewer that arrives while no Host is registered yet parks
+    // instead of being refused: the Host usually follows within
+    // seconds (share starts the relay loops, then the capture loop),
+    // and refusing here would break every viewer-first test and every
+    // fast viewer. The parked registration holds no session resources
+    // beyond its own socket; the 30s viewer-side watchdog still ends
+    // genuinely dead sessions with the session named.
+    if reg.role == RelayRole::Viewer {
+        let empty = {
+            let map = sessions.lock().await;
+            map.get(&reg.session)
+                .map(|s| s.host.is_none())
+                .unwrap_or(true)
+        };
+        if empty {
+            info!(
+                "Relay: viewer from {peer} parked in session '{}' (no host yet)",
+                reg.session
+            );
+        }
+    }
     // Accept the connection, so the client can distinguish "authorized"
     // from "TCP accepted".
     write_half
         .write_all(&[crate::network::PROTOCOL_VERSION])
         .await?;
     write_half.flush().await?;
-
     info!(
         "Relay: {:?} joined session '{}' from {peer}",
         reg.role, reg.session
@@ -743,6 +772,9 @@ async fn handle_client(
             if session.host.is_none() && peer_role == RelayRole::Host {
                 session.viewers.clear();
             }
+            // A parked viewer in a hostless session holds only its
+            // own socket: the 1-hour idle sweep reaps the session if no
+            // Host ever arrives, so parking cannot pin memory forever.
             if session.host.is_none() && session.viewers.is_empty() {
                 map.remove(&session_id);
             }

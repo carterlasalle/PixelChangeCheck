@@ -127,6 +127,12 @@ pub fn run_view(args: ViewArgs, metrics: crate::telemetry::SharedMetrics) -> Res
         // longer covers the floor. Crypto is fresh per attempt (new
         // KeyPair inside receive_once), so no counter or nonce crosses
         // the reconnect.
+        // The 30s silence watchdog inside receive_once ends attempts
+        // whose session produces nothing (Host gone, wrong code); the
+        // loop then decides: without --reconnect the viewer exits
+        // non-zero with the cause, with it the operator opted into
+        // waiting and retries continue. Parked viewers are the normal
+        // case this serves: the Host usually follows within seconds.
         let mut resume: Option<(crate::network::Epoch, crate::network::Rev)> = None;
         loop {
             // The connection is rebuilt per attempt, so it is captured
@@ -578,14 +584,20 @@ async fn receive_on_transport(
     // decoded.
     let keys = crate::network::e2e::KeyPair::generate();
     let (mut sink, mut source) = transport.split();
-    let session = match crate::network::e2e::viewer_handshake(
-        &mut sink,
-        &mut source,
-        keys,
-        args.token.as_str(),
+    // The handshake waits on the sharer twice (offer, then reply). A
+    // parked session produces neither, so this is the second place a
+    // Host-less session hangs — same 30s budget as the frame loop, same
+    // diagnostic.
+    let session = match tokio::time::timeout(
+        Duration::from_secs(30),
+        crate::network::e2e::viewer_handshake(&mut sink, &mut source, keys, args.token.as_str()),
     )
     .await
-    {
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "no handshake reply for 30s — the sharer may have left, or the session code is wrong"
+        )
+    })? {
         Ok(s) => s,
         Err(e) => {
             // A dropped stream loses the sharer's reason, because a
