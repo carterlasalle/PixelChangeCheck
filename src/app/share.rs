@@ -694,9 +694,17 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
                 .with_context(|| format!("Invalid --listen address '{listen_addr}'"))?;
             let endpoint =
                 crate::network::server_endpoint(&NetworkConfig::default(), &identity, addr)?;
-            info!("Direct viewers on {addr}");
+            // A wildcard bind prints 0.0.0.0, which no viewer can dial.
+            // Prefer the first usable LAN address from the same probe
+            // `pcc diagnose` runs, so the printed line is copy-pasteable;
+            // fall back to the bound address when there is none.
+            let dial_addr = crate::reach::lan_address_for(addr.port()).unwrap_or(addr);
             info!(
-                "  pcc view --connect {addr} --token {} --pin {}",
+                "Direct viewers on {dial_addr} (pin the sharer: {})",
+                identity.fingerprint
+            );
+            info!(
+                "  pcc view --connect {dial_addr} --token {} --pin {}",
                 token.as_str(),
                 identity.fingerprint
             );
@@ -733,8 +741,10 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
                         continue;
                     }
                 };
+                info!("Relay {relay_addr}, session '{session}' (pin the relay, not the sharer)");
                 info!(
-                    "Relay {relay_addr}, session '{session}', token {}",
+                    "  pcc view --relay {relay_addr} --pin {} --session '{session}' --token {}",
+                    args.relay_pin,
                     token.as_str()
                 );
                 spawn_relay_loop(

@@ -217,6 +217,18 @@ pub fn pair_url(listen: &str, pin: &str, token: &str) -> String {
     format!("pcc://view?connect={}&pin={}&token={}", listen, pin, token)
 }
 
+/// The relay form of the pair line: same shape, but the address is the
+/// relay and the session rides along. The pin here is the *relay's*
+/// fingerprint — the single most-pasted wrong value in testing was the
+/// sharer's pin in this slot, and the two are indistinguishable 64-hex
+/// strings, so the builder exists to keep the two forms apart.
+pub fn pair_url_relay(relay: &str, pin: &str, session: &str, token: &str) -> String {
+    format!(
+        "pcc://view?relay={}&pin={}&session={}&token={}",
+        relay, pin, session, token
+    )
+}
+
 /// The `pcc doctor` output: reachability, plus whether audio is available.
 pub fn render_doctor(reach: &Report, audio: Option<String>) -> String {
     let mut out = render(reach);
@@ -384,6 +396,18 @@ fn interface_addresses() -> Vec<SocketAddr> {
         }
     }
     out
+}
+
+/// The address a viewer on this network should dial: the first
+/// private-LAN IPv4 from the same interface probe `diagnose` runs, with
+/// the listener's port. A wildcard bind prints 0.0.0.0, which no viewer
+/// can dial — this is what makes the printed viewer line copy-pasteable.
+/// `None` when there is no LAN address (loopback binds keep theirs).
+pub fn lan_address_for(port: u16) -> Option<SocketAddr> {
+    interface_addresses()
+        .into_iter()
+        .find(|a| matches!(a.ip(), std::net::IpAddr::V4(v) if v.is_private()))
+        .map(|a| SocketAddr::new(a.ip(), port))
 }
 
 /// A UDP "connect" to a public address and a zero-length send is the

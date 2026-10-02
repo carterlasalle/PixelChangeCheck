@@ -44,6 +44,38 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Bare `pcc share` works.** `--web` defaults to loopback, so the TLS
+  guard no longer fires on the default invocation; the README sample
+  shows the loopback browser URL the build actually prints.
+- **Pins are labelled.** Direct lines say "pin the sharer", relay lines
+  say "pin the relay" and print the exact relay viewer command with the
+  relay pin substituted; the direct line prints the LAN address instead
+  of `0.0.0.0`. `pcc pair --relay/--session` emits the relay form.
+- **Viewer stops hanging.** Relay Hello has a 10s deadline naming the
+  session, and the apply loop ends the attempt after 30s of silence;
+  `--reconnect` keeps retrying, otherwise the viewer exits non-zero
+  with the cause instead of waiting forever.
+- **Old clients get the real reason.** Registrations carry the protocol
+  version; a pre-0.1.5 client is refused with "upgrade the client",
+  naming both versions, instead of `bad credential`. The role in the
+  message is the actual role.
+- **Relay identity persists.** `pcc relay --cert/--cert-key` loads a
+  stable PEM identity, so restarts keep the fingerprint and clients
+  keep their pin. Generated identities print that the pin changes on
+  restart.
+- **Oversized updates prefer snapshots.** The planner reserves AEAD +
+  framing headroom against the send budget, so a Retina-sized patch set
+  becomes a snapshot instead of an oversized sealed write that desyncs
+  the stream. Sealed-frame auth failures request a fresh snapshot once
+  instead of killing the session.
+- **Relay token stays out of logs.** The relay prints its token only
+  when it generated it; bare TCP connects log at debug instead of WARN.
+- **HiDPI windows fit.** The native viewer opens `FitScreen` with
+  aspect-ratio stretch instead of 1:1 physical pixels, and is
+  resizable.
+
 ### Added
 
 - **Revision replay ring.** The sharer retains the last 512 broadcast

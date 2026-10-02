@@ -18,6 +18,19 @@ cargo install pixel-change-check-client --locked --no-default-features
 One binary, `pcc`. Sharer and viewer must be the same build (protocol v7);
 a mismatch is refused with a clear message, not mis-parsed.
 
+Supported binary targets are the release matrix
+(`x86_64`/`aarch64` Linux, Apple Silicon macOS, `x86_64` Windows). On a
+target with no published archive, binstall silently falls back to a full
+source compile — pass `--disable-strategies compile` to fail fast
+instead of paying ~7 minutes unknowingly.
+
+Upgraded from ≤0.1.3? The binary was renamed (`pixel-change-check-client`
+→ `pcc`), so both can be on PATH. `cargo uninstall
+pixel-change-check-client` resolves the name from the *current* manifest
+and deletes the new `pcc`, leaving the stale old binary behind — remove
+`~/.cargo/bin/pixel-change-check-client` by hand and check
+`pcc --version`.
+
 ## Global flags (work on every command)
 
 | Flag | Default | What it does |
@@ -72,7 +85,10 @@ Aliases accepted: `web-rtc`, `rtc`. Anything else fails fast naming the three.
 
 ### Browser viewer
 
-Served on `--web` (default `0.0.0.0:8080`); `--no-web` disables it.
+Served on `--web` (default `127.0.0.1:8080`); `--no-web` disables it.
+The loopback default is deliberate: a non-loopback browser address
+without `--web-cert`/`--web-key` is refused, so the old `0.0.0.0`
+default made bare `pcc share` a guaranteed error.
 
 | Path | Auth | What it is |
 |---|---|---|

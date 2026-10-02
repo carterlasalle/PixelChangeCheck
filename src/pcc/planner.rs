@@ -232,7 +232,15 @@ impl Planner {
         }
 
         // 3. A patch set bigger than a fresh snapshot is not worth sending.
-        if wire_len > limits.snapshot_bytes || wire_len > limits.max_update_bytes {
+        // `wire_len` counts op bodies only; the sealed frame adds the
+        // AEAD tag plus framing on top, so reserve that headroom here.
+        // Otherwise a patch set that fits the budget pre-seal can exceed
+        // the relay's cap post-seal, desync the stream, and surface as an
+        // auth failure on the viewer (a Retina-sized session died exactly
+        // this way: oversized write, dropped host, reconnect, bad tag).
+        let sealed_len =
+            wire_len + crate::network::e2e::SEALED_OVERHEAD + crate::network::MESSAGE_FRAMING;
+        if sealed_len > limits.snapshot_bytes || sealed_len > limits.max_update_bytes {
             // The reference is left untouched: nothing shipped, so nothing
             // may be marked as delivered.
             return Ok(Plan::prefer_snapshot(wire_len, changed_pixels, detect));
@@ -751,6 +759,53 @@ mod tests {
         assert_eq!(
             reference.data, before,
             "a plan that ships nothing must not advance the reference"
+        );
+    }
+
+    #[test]
+    fn seal_headroom_pushes_a_borderline_patch_set_to_snapshot() {
+        // A patch set that fits the budget pre-seal but exceeds it once
+        // the AEAD tag plus framing are added must prefer a snapshot:
+        // that is the Retina failure (oversized write, dropped host,
+        // reconnect, auth failure) decided at plan time instead.
+        use crate::network::{MESSAGE_FRAMING, SEALED_OVERHEAD};
+        let (w, h) = (64u32, 64u32);
+        let mut reference = blank(w, h);
+        let mut current = blank(w, h);
+        for y in 0..64 {
+            for x in 0..64 {
+                px(
+                    &mut current,
+                    x,
+                    y,
+                    [(x * 7) as u8, (y * 13) as u8, (x ^ y) as u8],
+                );
+            }
+        }
+        // First measure the set with a generous budget to learn its size.
+        let probe = Planner::default()
+            .plan(&mut reference.data.clone(), w, h, &current, limits())
+            .unwrap();
+        assert!(!probe.ops.is_empty(), "noise frame must plan patches");
+        // A budget between the raw size and the sealed size must flip
+        // the decision: raw fits, sealed does not.
+        let tight = probe.wire_len + SEALED_OVERHEAD + MESSAGE_FRAMING - 1;
+        let plan = Planner::default()
+            .plan(
+                &mut reference.data,
+                w,
+                h,
+                &current,
+                PlanLimits {
+                    snapshot_bytes: 8 * 1024 * 1024,
+                    max_update_bytes: tight,
+                },
+            )
+            .unwrap();
+        assert!(
+            plan.ops.is_empty(),
+            "sealed size {} exceeds budget {tight}: must prefer snapshot",
+            probe.wire_len + SEALED_OVERHEAD + MESSAGE_FRAMING
         );
     }
 

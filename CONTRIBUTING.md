@@ -98,3 +98,31 @@ when the job ends.
 A crates.io version, once claimed, can never be reused -- not after a
 yank, not after a deletion. If a release is broken, publish `0.1.1` and
 yank `0.1.0`; do not try to reclaim `0.1.0`.
+
+## Release asset names must match the binstall template
+
+`Cargo.toml`'s `[package.metadata.binstall]` points at
+`pcc-{version}-{target}{archive-suffix}`, where `{target}` is the Rust
+target triple. The release workflow's `Resolve target triple` step
+maintains that mapping by hand, and the archives must keep matching it:
+v0.1.1/v0.1.2 shipped `*-Linux-X64`-style names that binstall cannot
+resolve, so anyone pinned there gets a surprise source build. When the
+matrix gains an OS, add its triple case in the same commit.
+
+## The binary is `pcc`, the old name lingers
+
+Up to 0.1.3 the installed binary was `pixel-change-check-client`; since
+0.1.4 it is `pcc`. Both can be on PATH after an upgrade, and they report
+the same program name, so check `pcc --version` (or the file dates) when
+something behaves like an old build. `cargo uninstall
+pixel-change-check-client` resolves the binary name from the *current*
+manifest — it deletes the new `pcc` and leaves the stale old binary
+behind. Remove `~/.cargo/bin/pixel-change-check-client` by hand instead.
+
+## `cargo binstall` falls back to source
+
+On a target with no published archive, binstall silently compiles the
+whole graph (264 crates, ~7 minutes on ARM Linux before its asset
+existed). That is working as designed, not a failure — but tell users:
+`--disable-strategies compile` fails fast instead, and the supported
+target list is the release matrix in `.github/workflows/release.yml`.

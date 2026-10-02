@@ -113,10 +113,18 @@ That downloads the release archive for your platform from the
 [releases page](https://github.com/carterlasalle/PixelChangeCheck/releases)
 and installs one binary, `pcc`. The archives are named
 `pcc-<version>-<target>` (`.tar.gz`, `.zip` on Windows), covering
-(`x86_64` Linux and Windows, Apple Silicon Macs). Intel Macs are not
-covered: GitHub retired the last Intel macOS runner, so there is no
-`x86_64-apple-darwin` archive — install from source there, or run the
-Apple Silicon build under Rosetta 2.
+`x86_64` and ARM Linux, Apple Silicon Macs, and `x86_64` Windows. Intel
+Macs are not covered: GitHub retired the last Intel macOS runner, so
+there is no `x86_64-apple-darwin` archive — install from source there,
+or run the Apple Silicon build under Rosetta 2.
+
+> **If `pcc` runs a C compiler:** the name collides with the Portable C
+> Compiler, which some systems put earlier on PATH. `pcc share` answering
+> `clang: error: unknown argument` means you are running clang, not this
+> tool. Check `which -a pcc`, then use the cargo path directly
+> (`~/.cargo/bin/pcc …`) or fix PATH order. Confirm with
+> `pcc --version` — it must print `pcc 0.1.x`, and anything else is the
+> wrong binary.
 
 From source, on any machine with a Rust toolchain:
 
@@ -140,6 +148,13 @@ every transport keep working. With default features on Linux you still
 need the system dependencies above, because the capture path links
 against them.
 
+> **Headless/CI rule of thumb:** if a source build fails on a system
+> library (`libpipewire`, `libasound`, `wayland-client`, …) and this
+> machine only runs a relay — or never opens a window — stop installing
+> `-dev` packages: you want `--no-default-features`, not more headers.
+> The build error cannot say this (cargo owns that output), so the docs
+> say it here instead.
+
 A note on Opus specifically: with `libopus-dev` (Debian/Ubuntu) or
 `opus` (Homebrew) plus `pkg-config` installed, the build links the
 system library instead of compiling a vendored copy with cmake (see
@@ -160,10 +175,16 @@ viewer command:
 
 ```text
 Certificate fingerprint (sha256): 9f2c...
-Browser viewer: http://192.168.1.20:8080/#token=ABC...
+Browser viewer: http://127.0.0.1:8080/#token=ABC...
 Direct viewers on 0.0.0.0:5800
   pcc view --connect 192.168.1.20:5800 --token ABC... --pin 9f2c...
 ```
+
+The browser line is loopback because `--web` defaults to loopback: a
+non-loopback browser address without `--web-cert`/`--web-key` is refused
+rather than served over plaintext. The direct line prints the reachable
+address on your network (see below); the relay line, when `--relay` is
+set, prints the exact viewer command with the relay pin substituted.
 
 `pcc pair` prints a single line a viewer can open or paste, carrying both
 the token and the pin, so nobody retypes a 64-character hex string.

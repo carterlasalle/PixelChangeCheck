@@ -74,8 +74,11 @@ enum Commands {
         /// printed if omitted. This is not the secret: --token is.
         #[arg(long)]
         session: Option<String>,
-        /// Address for the browser viewer, as host:port.
-        #[arg(long, default_value_t = format!("0.0.0.0:{DEFAULT_WEB_PORT}"))]
+        /// Address for the browser viewer, as host:port. Loopback by
+        /// default: a non-loopback address without --web-cert/--web-key
+        /// is refused, so the old 0.0.0.0 default made bare `pcc share`
+        /// a guaranteed error.
+        #[arg(long, default_value_t = format!("127.0.0.1:{DEFAULT_WEB_PORT}"))]
         web: String,
         /// Disable the browser viewer entirely.
         #[arg(long)]
@@ -211,14 +214,25 @@ enum Commands {
     /// and the certificate pin so neither has to be retyped.
     Pair {
         /// Host and port the viewer should connect to, as host:port.
+        /// Ignored when --relay is given.
         #[arg(long)]
         listen: String,
-        /// Certificate fingerprint the viewer must pin.
+        /// Certificate fingerprint the viewer must pin: the sharer's for
+        /// --connect, the relay's for --relay. The two look identical
+        /// and are not interchangeable — this flag names which one.
         #[arg(long)]
         pin: String,
         /// The viewer token. Generated and printed if omitted.
         #[arg(long)]
         token: Option<String>,
+        /// Relay to connect through, as host:port. When set, the pair
+        /// line carries --relay/--session instead of --connect, with the
+        /// relay pin.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Relay session code (required with --relay).
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Run a relay so a sharer and a viewer that cannot reach each other
     /// directly can still connect: both sides dial out to this relay.
@@ -230,6 +244,14 @@ enum Commands {
         /// printed if omitted.
         #[arg(long)]
         token: Option<String>,
+        /// PEM certificate for a stable relay identity: restarts keep the
+        /// same fingerprint, so clients keep their pin. Without it the
+        /// relay generates per process (old behavior, pin churn).
+        #[arg(long, requires = "cert_key")]
+        cert: Option<String>,
+        /// PEM private key matching --cert.
+        #[arg(long)]
+        cert_key: Option<String>,
     },
 }
 
@@ -403,9 +425,21 @@ fn main() -> Result<()> {
             listen,
             pin,
             token: pair_token,
+            relay,
+            session,
         } => {
             let t = token_from(pair_token.as_ref(), "viewer token")?;
-            println!("{}", reach::pair_url(&listen, &pin, t.as_str()));
+            match (relay, session) {
+                (Some(r), Some(s)) => {
+                    println!("{}", reach::pair_url_relay(&r, &pin, &s, t.as_str()));
+                }
+                (Some(_), None) => {
+                    anyhow::bail!("--session <CODE> is required with --relay");
+                }
+                (None, _) => {
+                    println!("{}", reach::pair_url(&listen, &pin, t.as_str()));
+                }
+            }
             Ok(())
         }
         Commands::Diagnose { displays, audio } => {
@@ -429,13 +463,31 @@ fn main() -> Result<()> {
             print!("{}", pixel_change_check_client::reach::render(&report));
             Ok(())
         }
-        Commands::Relay { listen, token } => {
+        Commands::Relay {
+            listen,
+            token,
+            cert,
+            cert_key,
+        } => {
+            // Print the token only when it was generated: an operator
+            // who passed --token already knows it, and echoing a
+            // connection secret into the journal (systemd keeps it)
+            // leaks it to anyone with log access.
+            let generated = token.is_none();
             let token = token_from(token.as_ref(), "relay token")?;
-            println!("relay token: {}", token.as_str());
-            let identity = std::sync::Arc::new(
-                pixel_change_check_client::network::generate_identity()
-                    .context("Failed to create the relay identity")?,
-            );
+            if generated {
+                println!("relay token: {}", token.as_str());
+            }
+            let identity = std::sync::Arc::new(match (cert, cert_key) {
+                (Some(c), Some(k)) => pixel_change_check_client::network::load_identity(&c, &k)
+                    .context("Failed to load the relay identity")?,
+                (None, None) => {
+                    println!("relay identity: generated for this process (pin changes on restart; pass --cert/--cert-key for a stable pin)");
+                    pixel_change_check_client::network::generate_identity()
+                        .context("Failed to create the relay identity")?
+                }
+                _ => anyhow::bail!("--cert and --cert-key must be given together"),
+            });
             rt.block_on(async move {
                 let addr = pixel_change_check_client::network::resolve(&listen)
                     .await

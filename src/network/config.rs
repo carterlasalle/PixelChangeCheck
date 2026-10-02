@@ -134,6 +134,40 @@ pub fn generate_identity() -> Result<ServerIdentity> {
     })
 }
 
+/// Load a stable relay identity from PEM files: a certificate chain and
+/// its private key. The fingerprint is computed over the first
+/// certificate's DER, the same value `generate_identity` fingerprints,
+/// so a relay that switches from generated to file identity keeps its
+/// pin as long as the certificate does. PEM parsing comes from
+/// `rustls-pki-types` itself (already in the tree via rustls): no new
+/// dependency, and PKCS#8/PKCS#1/SEC1 keys all parse the same way.
+pub fn load_identity(cert_path: &str, key_path: &str) -> Result<ServerIdentity> {
+    use rustls::pki_types::pem::PemObject;
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(
+        &std::fs::read(cert_path)
+            .with_context(|| format!("Failed to read the relay certificate at {cert_path}"))?,
+    )
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .map_err(|e| anyhow::anyhow!("Invalid PEM in the relay certificate: {e}"))?;
+    let first = certs
+        .first()
+        .with_context(|| format!("No CERTIFICATE block in {cert_path}"))?;
+    let certificate = first.to_vec();
+    let fingerprint = fingerprint_hex(&certificate);
+    // Validate the key now so a typo'd path fails here with the path in
+    // the message, not later inside server startup. The bytes are kept
+    // (not the parsed key) because `ServerIdentity` stores wire bytes.
+    let key_bytes = std::fs::read(key_path)
+        .with_context(|| format!("Failed to read the relay private key at {key_path}"))?;
+    rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid PEM in the relay private key at {key_path}: {e}"))?;
+    Ok(ServerIdentity {
+        certificate,
+        private_key: key_bytes,
+        fingerprint,
+    })
+}
+
 /// Lowercase hex of a 32-byte digest.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -310,13 +344,36 @@ impl NetworkConfig {
                 vec![rustls::pki_types::CertificateDer::from(
                     identity.certificate.clone(),
                 )],
-                rustls::pki_types::PrivatePkcs8KeyDer::from(identity.private_key.clone()).into(),
+                // Generated identities store raw PKCS#8 DER; file
+                // identities store PEM text. Both parse through the same
+                // `rustls-pki-types` entry points (PKCS#8/PKCS#1/SEC1 all
+                // accepted), so an openssl-generated relay key works on
+                // first use instead of failing the stable-identity flag.
+                parse_private_key(&identity.private_key)?,
             )
             .map_err(|e| anyhow::anyhow!("Failed to build the QUIC server config: {e}"))?;
         config.alpn_protocols = vec![b"pcc".to_vec()];
         Ok(config)
     }
+}
 
+/// Parse a private key in either form this crate stores: raw PKCS#8 DER
+/// (what rcgen serializes for generated identities) or PEM text of any
+/// kind (what a relay operator writes for a stable identity).
+fn parse_private_key(raw: &[u8]) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    // Raw DER can only be PKCS#8 here: that is what rcgen serializes.
+    // (`From<Vec<u8>>` is infallible, so any byte string parses as DER;
+    // garbage fails later at server build time with its own context.)
+    if raw.starts_with(&[0x30]) {
+        return Ok(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(raw.to_vec())));
+    }
+    PrivateKeyDer::from_pem_slice(raw)
+        .map_err(|e| anyhow::anyhow!("Private key is neither PKCS#8 DER nor PEM: {e}"))
+}
+
+impl NetworkConfig {
     /// QUIC transport config (idle timeout, keep-alive) shared by both ends.
     pub fn transport_config(&self) -> Arc<quinn::TransportConfig> {
         let mut transport = quinn::TransportConfig::default();
@@ -384,5 +441,25 @@ mod tests {
         assert_eq!(id.fingerprint.len(), 64);
         assert!(id.fingerprint.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(fingerprint_hex(&id.certificate), id.fingerprint);
+    }
+
+    #[test]
+    fn generated_identities_are_unique_per_process() {
+        // The relay pin churn issue: two generations must never share a
+        // fingerprint, or "same relay, restarted" is indistinguishable
+        // from "same relay, same identity".
+        let a = generate_identity().unwrap();
+        let b = generate_identity().unwrap();
+        assert_ne!(a.fingerprint, b.fingerprint);
+        assert_ne!(a.certificate, b.certificate);
+    }
+
+    #[test]
+    fn garbage_identity_files_fail_with_their_path() {
+        let err = load_identity("/no/such/cert.pem", "/no/such/key.pem")
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/no/such/cert.pem"), "unhelpful: {err}");
     }
 }

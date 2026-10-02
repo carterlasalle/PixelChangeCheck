@@ -39,12 +39,18 @@ use tokio_rustls::client::TlsStream;
 use tracing::{info, warn};
 
 /// Sent once, immediately after connecting, to identify the session, the
-/// role, and to authorize the connection.
+/// role, and to authorize the connection. Carries the client's protocol
+/// version so a relay can tell "old client" from "wrong token" — a
+/// mismatch that previously cost a long debugging session on a correct
+/// configuration (0.1.1/0.1.2 clients rejected as `bad credential`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RelayRegister {
     pub session: String,
     pub role: RelayRole,
     pub token: String,
+    /// The client's `PROTOCOL_VERSION`. Absent (0) on pre-0.1.5
+    /// registrations, which predate the field.
+    pub protocol_version: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +166,7 @@ impl RelayTransport {
             session,
             role,
             token: relay_credential(&token),
+            protocol_version: crate::network::PROTOCOL_VERSION,
         };
         let bytes = bincode::serialize(&reg)?;
         stream
@@ -435,7 +442,17 @@ async fn handle_client(
         );
     }
 
-    let stream = acceptor.accept(tcp).await.context("TLS handshake failed")?;
+    let stream = match acceptor.accept(tcp).await {
+        Ok(s) => s,
+        Err(e) => {
+            // A bare TCP connect (health check, port scan) fails the
+            // handshake with no ClientHello to learn from. That is
+            // noise, not an attack: debug, not warn, so a 2-minute
+            // probe does not bury the journal in WARN lines.
+            tracing::debug!("Relay peer {peer}: TLS handshake failed (bare connect?): {e}");
+            return Ok(());
+        }
+    };
     // Split after the handshake so the reader and the writer can be
     // supervised together by `select!` below.
     let (mut read_half, mut write_half) = tokio::io::split(stream);
@@ -446,11 +463,31 @@ async fn handle_client(
     // the screen" is exactly the claim that has to hold against the
     // operator running it, not only against someone sniffing the wire.
     if !same_credential(relay_credential(&expected_token).as_str(), &reg.token) {
+        // A pre-0.1.5 client sends the raw token where the relay expects
+        // the HMAC credential, so it can never match — but the operator's
+        // token is correct and the fix is a version bump, not a retype.
+        // Say exactly that, with both versions named.
+        if reg.protocol_version == 0 || reg.protocol_version != crate::network::PROTOCOL_VERSION {
+            let client = if reg.protocol_version == 0 {
+                "pre-0.1.5 (no version in registration)".to_string()
+            } else {
+                format!("protocol {}", reg.protocol_version)
+            };
+            warn!(
+                "Relay: rejected {:?} from {peer}: client speaks {client}, this relay speaks protocol {} — upgrade the client, the token is not the problem",
+                reg.role,
+                crate::network::PROTOCOL_VERSION
+            );
+            anyhow::bail!(
+                "client speaks {client}, this relay speaks protocol {}: upgrade the client",
+                crate::network::PROTOCOL_VERSION
+            );
+        }
         warn!(
             "Relay: rejected {:?} from {peer} (bad credential)",
             reg.role
         );
-        anyhow::bail!("bad viewer credential");
+        anyhow::bail!("bad {:?} credential", reg.role);
     }
     // The registration was good; clear the peer's failure count.
     failures.lock().await.remove(&peer);
@@ -744,7 +781,26 @@ async fn read_registration<R: tokio::io::AsyncRead + Unpin>(
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await?;
-    Ok(bincode::deserialize(&buf)?)
+    // Pre-0.1.5 clients serialize without the trailing version byte.
+    // bincode is fixed-order, so a legacy body parses as the same
+    // prefix: try the current shape first, then the legacy one with
+    // version 0 (meaning "older than versioning").
+    if let Ok(reg) = bincode::deserialize::<RelayRegister>(&buf) {
+        return Ok(reg);
+    }
+    #[derive(serde::Deserialize)]
+    struct LegacyRegister {
+        session: String,
+        role: RelayRole,
+        token: String,
+    }
+    let legacy: LegacyRegister = bincode::deserialize(&buf)?;
+    Ok(RelayRegister {
+        session: legacy.session,
+        role: legacy.role,
+        token: legacy.token,
+        protocol_version: 0,
+    })
 }
 
 /// Per-address failure counter. Returns true when the peer is over budget.
@@ -848,5 +904,46 @@ mod tests {
             record_and_check_rate(&failures, peer).await,
             "the limit must trip"
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_registration_decodes_with_version_zero() {
+        // A pre-0.1.5 client serializes session/role/token with no
+        // trailing version byte. The relay must read it as version 0
+        // (older than versioning), not reject the bytes.
+        #[derive(serde::Serialize)]
+        struct Legacy {
+            session: String,
+            role: RelayRole,
+            token: String,
+        }
+        let body = bincode::serialize(&Legacy {
+            session: "ABC123".into(),
+            role: RelayRole::Host,
+            token: "tok".into(),
+        })
+        .unwrap();
+        let mut framed = (body.len() as u32).to_le_bytes().to_vec();
+        framed.extend_from_slice(&body);
+        let mut cursor: &[u8] = &framed;
+        let reg = read_registration(&mut cursor).await.unwrap();
+        assert_eq!(reg.protocol_version, 0);
+        assert_eq!(reg.role, RelayRole::Host);
+    }
+
+    #[tokio::test]
+    async fn current_registration_carries_the_protocol_version() {
+        let reg = RelayRegister {
+            session: "ABC123".into(),
+            role: RelayRole::Viewer,
+            token: "tok".into(),
+            protocol_version: crate::network::PROTOCOL_VERSION,
+        };
+        let body = bincode::serialize(&reg).unwrap();
+        let mut framed = (body.len() as u32).to_le_bytes().to_vec();
+        framed.extend_from_slice(&body);
+        let mut cursor: &[u8] = &framed;
+        let back: RelayRegister = read_registration(&mut cursor).await.unwrap();
+        assert_eq!(back.protocol_version, crate::network::PROTOCOL_VERSION);
     }
 }

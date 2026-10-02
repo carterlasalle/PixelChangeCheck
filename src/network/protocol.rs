@@ -28,6 +28,11 @@ pub const PROTOCOL_VERSION: u8 = 7;
 /// allocation well below anything that would destabilise a viewer.
 pub const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 
+/// Envelope framing around a sealed body: 1 version byte plus the 4-byte
+/// length. The planner reserves this alongside `SEALED_OVERHEAD` when
+/// sizing a patch set, for the same reason.
+pub const MESSAGE_FRAMING: usize = 5;
+
 /// Ceiling on rectangles in one update.
 ///
 /// Receipt: a 1080p frame is 2,040 tiles; a 4K frame is 8,160. Anything

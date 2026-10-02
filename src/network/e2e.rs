@@ -33,6 +33,11 @@ pub const HANDSHAKE_RESPONSE: u8 = 0x21;
 /// Every message carries a 12-byte nonce and a 16-byte tag.
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
+/// What `seal` adds on top of the plaintext: 4-byte counter header plus
+/// the 16-byte AEAD tag. The planner reserves this when sizing a patch
+/// set against the send budget, so a set that fits pre-seal cannot
+/// exceed the relay's cap post-seal.
+pub const SEALED_OVERHEAD: usize = 4 + TAG_LEN;
 
 /// A key pair for one handshake.
 ///

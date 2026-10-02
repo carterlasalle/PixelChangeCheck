@@ -325,6 +325,12 @@ async fn dial_direct(
 /// Dial the relay list in probe order through Hello. No QUIC handle:
 /// the relay exposes no connection, so relayed viewers get no datagram
 /// audio — the existing deliberate omission, unchanged.
+///
+/// A session with no Host accepts the registration and then never sends
+/// a frame, so without a deadline this waits forever with no
+/// diagnostic. The whole probe gets one budget: when it expires the
+/// viewer names the session and asks whether the sharer is running,
+/// instead of hanging on silence.
 async fn dial_relays(
     args: &ViewArgs,
     targets: &str,
@@ -375,12 +381,22 @@ async fn dial_relays(
     }
     let mut transport =
         transport.ok_or_else(|| last_err.context("no relay in --relay answered"))?;
-    transport
-        .send(&Message::Hello {
+    // The relay accepts a viewer into a session with no Host and then
+    // sends nothing, so this Hello is the only thing standing between
+    // the viewer and a silent infinite wait. Ten seconds matches the
+    // sharer's handshake timeout; on expiry the viewer says the session
+    // has no Host and asks whether the sharer is still running.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        transport.send(&Message::Hello {
             token: args.token.as_str().to_string(),
             resume,
-        })
-        .await?;
+        }),
+    )
+    .await
+    .with_context(|| {
+        format!("no host in session '{session}' answered within 10s — is the sharer still running?")
+    })??;
     Ok((Box::new(transport), None))
 }
 
@@ -666,6 +682,10 @@ async fn receive_on_transport(
     let joined_at = std::time::Instant::now();
     let mut compositor = Compositor::new();
     let mut last_ack: Rev = 0;
+    // One failed sealed frame requests a fresh snapshot instead of
+    // exiting; the second consecutive one exits, so a truly broken peer
+    // cannot spin here forever. Reset on every good message.
+    let mut resyncing = false;
     // With audio, a frame waits for the audio clock rather than being
     // shown the instant it decodes. Without audio there is no clock, and
     // the frame is shown immediately, so there is nothing to hold.
@@ -774,16 +794,48 @@ async fn receive_on_transport(
                 }
             }
         }
-        let msg = match transport.recv().await {
-            Ok(msg) => msg,
-            Err(e) => {
+        // Silence is a symptom too: a Host that left (or a wrong
+        // session code) yields no frames and no error, only this wait.
+        // 30s without progress ends the attempt with the session named,
+        // so the operator learns "sharer gone", not "still connecting".
+        let msg = match tokio::time::timeout(Duration::from_secs(30), transport.recv()).await {
+            Ok(Ok(msg)) => {
+                resyncing = false;
+                msg
+            }
+            Ok(Err(e)) => {
+                // A sealed frame that fails authentication means the
+                // byte stream is no longer aligned with the surface:
+                // treat it as a lost sync point, not a fatal error.
+                // Request a fresh snapshot and keep going; a second
+                // consecutive failure still exits below, so a truly
+                // broken peer cannot spin here forever.
+                let context = format!("{e:#}");
+                if (context.contains("sealed frame") || context.contains("authentication"))
+                    && !resyncing
+                {
+                    warn!(
+                        "Frame failed authentication at applied {}:{}; resyncing with a fresh snapshot",
+                        compositor.epoch(),
+                        compositor.rev()
+                    );
+                    metrics.repairs.incr();
+                    let _ = transport.send(&Message::RequestKeyframe).await;
+                    resyncing = true;
+                    continue;
+                }
                 return Err(e).with_context(|| {
                     format!(
                         "transport failed at applied {}:{}",
                         compositor.epoch(),
                         compositor.rev()
                     )
-                })
+                });
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "no frame for 30s — the sharer may have left, or the session code is wrong"
+                ));
             }
         };
         match msg {
@@ -987,17 +1039,27 @@ fn server_name_of(target: &str) -> &str {
 
 #[cfg(feature = "native-viewer")]
 fn run_window_loop(surface: Arc<Mutex<Surface>>) -> Result<()> {
-    use minifb::{Key, Window, WindowOptions};
+    use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 
     info!("Waiting for the first frame to size the window...");
     let first = wait_for_frame(&surface, None)?;
     let (width, height) = (first.width, first.height);
 
+    // HiDPI: a 1512x982@2x share is a 3024x1964 surface, and a window
+    // sized in physical pixels overflows a display measured in logical
+    // points. `Scale::FitScreen` asks minifb to fit the buffer to the
+    // screen instead of opening 1:1 — the pixels stay exact, the
+    // window fits. Resize stays on so a geometry change re-fits.
     let mut window = Window::new(
         "PixelChangeCheck Viewer",
         width as usize,
         height as usize,
-        WindowOptions::default(),
+        WindowOptions {
+            resize: true,
+            scale: Scale::FitScreen,
+            scale_mode: ScaleMode::AspectRatioStretch,
+            ..WindowOptions::default()
+        },
     )
     .context("Failed to open a window (no display available?)")?;
     window.set_target_fps(60);
@@ -1120,14 +1182,16 @@ fn run_headless_loop(surface: Arc<Mutex<Surface>>) {
     }
 }
 
-/// Wait for a frame, optionally giving up after a deadline. The old code
-/// looped here forever, so a failed connection left the app hung with no
-/// way out and no explanation.
+/// Wait for a frame, optionally giving up after a deadline. A session
+/// with no Host never produces a frame, so waiting forever is a hang
+/// with no diagnostic — the caller names the session, this names the
+/// wait.
 #[cfg(feature = "native-viewer")]
 fn wait_for_frame(
     surface: &Arc<Mutex<Surface>>,
-    _deadline: Option<Duration>,
+    deadline: Option<Duration>,
 ) -> Result<std::sync::Arc<Frame>> {
+    let start = std::time::Instant::now();
     loop {
         let s = surface.lock();
         if let Some((reason, _)) = &s.terminal {
@@ -1135,6 +1199,12 @@ fn wait_for_frame(
         }
         if let Some(frame) = &s.frame {
             return Ok(frame.clone());
+        }
+        if deadline.is_some_and(|d| start.elapsed() >= d) {
+            anyhow::bail!(
+                "no frame arrived within {}s — is the sharer still running?",
+                deadline.map(|d| d.as_secs()).unwrap_or(0)
+            );
         }
         drop(s);
         std::thread::sleep(Duration::from_millis(50));
