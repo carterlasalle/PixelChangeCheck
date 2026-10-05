@@ -2846,12 +2846,13 @@ must be changed together.
   bounces its viewers so they rejoin fresh.
 - `p256` is pinned to 0.13. Version 0.14 moved `diffie_hellman` and
   `to_encoded_point` off the types this code calls them on.
-- Publishing is `git tag v<version> && git push --tags`. The tag drives
-  both the GitHub Release and the crates.io publish, and the workflow
-  refuses a tag that disagrees with `Cargo.toml` or a version that
-  already exists. A crates.io version can never be reused, not even
-  after a yank. See `CONTRIBUTING.md` for the one-time trusted-publisher
-  setup and `LICENSE` for the licence choice.
+- Publishing is `scripts/release.sh <version>`: gates, bump, annotated
+  tag, push, and watch, in one command (see CONTRIBUTING.md). The tag
+  drives both the GitHub Release and the crates.io publish, and the
+  workflow refuses a tag that disagrees with `Cargo.toml` or a version
+  that already exists. A crates.io version can never be reused, not
+  even after a yank. See `CONTRIBUTING.md` for the one-time
+  trusted-publisher setup and `LICENSE` for the licence choice.
 - CI installs its Linux system dependencies in four separate jobs via the
   `LINUX_DEPS` env var. `alsa-sys` (via cpal) runs `pkg-config` at build
   time and *panics* without the ALSA headers, so a missing package is a
