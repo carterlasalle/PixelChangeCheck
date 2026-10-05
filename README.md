@@ -215,7 +215,8 @@ pcc relay --listen 0.0.0.0:5900 --web --cert relay.pem --cert-key relay-key.pem
 `--web` makes the relay host the browser viewer too, on that same port
 and behind that same certificate, so a viewer needs no binary and no
 terminal — only a link. Use a real certificate (`--cert`/`--cert-key`,
-see [pcc relay](#pcc-relay--bridge-two-nats)) or browsers will warn.
+see [`pcc relay` in the usage guide](docs/usage.md#pcc-relay--bridge-two-nats))
+or browsers will warn.
 
 It prints its own token and fingerprint. On the sharer:
 
