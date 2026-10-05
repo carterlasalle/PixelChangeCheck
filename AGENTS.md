@@ -2896,6 +2896,30 @@ must be changed together.
   the invariant trailer at the bottom of this file. `trace verify
   --changed` exits 0 with an explanatory message. Do not add `trace:v1`
   markers on the assumption that something is checking them.
+- The relay's browser surface shares the relay port by **ALPN**. A
+  browser offers `h2, http/1.1`; if the relay's `ServerConfig` advertises
+  only `pcc`, rustls aborts with `no_application_protocol` and the
+  browser sees an unexplained connection failure. That is why
+  `NetworkConfig::relay_server_config` exists separately from
+  `server_crypto_config` — the QUIC endpoints must keep advertising only
+  `pcc`.
+- **The viewer leg is length-framed; a WebSocket frame is not.** The
+  relay's host-leg reader re-attaches a 4-byte length on the way out,
+  which a native viewer's `Message` reader consumes. The browser bridge
+  must strip it (`relay_web::strip_len_prefix`) or the browser receives
+  the length's low byte where it expects the frame kind — the first
+  relay-hosted browser viewer failed exactly this way, with "the first
+  sealed frame did not open: not sealed yet".
+- **The host answers the browser handshake, not the relay.**
+  `server::renderer::web::run_browser_session` is generic over a
+  `FrameChannel`, so the sharer's own web port (a WebSocket) and the
+  relay bridge (a relay viewer leg) run the *same* handshake, sealing and
+  catch-up code. If you change one, you have changed both — do not add a
+  second browser session implementation.
+- `pcc` is also the name of the Portable C Compiler, which some systems
+  put earlier on `PATH`. If `pcc share` answers with `clang: error:`,
+  the wrong binary is being run; check `which -a pcc` and
+  `pcc --version`.
 
 ## ADR index
 
@@ -2904,7 +2928,13 @@ See `docs/adr/`:
 - `0001-lossless-authoritative-surface.md`
 - `0002-token-and-pin.md`
 - `0003-revision-and-epoch-sequencing.md`
-- `0004-end-to-end-encryption.md` (specified, not implemented)
+- `0004-end-to-end-encryption.md`
+- `0005-browser-key-exchange-p256.md`
+- `0006-deferred-transports-iroh-webrtc.md`
+- `0007-iroh-transport.md`
+- `0008-webrtc-transport.md`
+- `0009-install-binaries-features.md`
+- `0010-relay-hosted-browser-viewer.md`
 
 ## Specified, not built
 

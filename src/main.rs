@@ -214,14 +214,17 @@ enum Commands {
     /// and the certificate pin so neither has to be retyped.
     Pair {
         /// Host and port the viewer should connect to, as host:port.
-        /// Ignored when --relay is given.
+        /// Required for a direct pair line; ignored with --relay.
         #[arg(long)]
-        listen: String,
+        listen: Option<String>,
         /// Certificate fingerprint the viewer must pin: the sharer's for
         /// --connect, the relay's for --relay. The two look identical
         /// and are not interchangeable — this flag names which one.
+        /// Omit it with --relay to have `pcc pair` fetch the relay's
+        /// fingerprint over the network instead of copying it out of a
+        /// log line.
         #[arg(long)]
-        pin: String,
+        pin: Option<String>,
         /// The viewer token. Generated and printed if omitted.
         #[arg(long)]
         token: Option<String>,
@@ -252,6 +255,12 @@ enum Commands {
         /// PEM private key matching --cert.
         #[arg(long)]
         cert_key: Option<String>,
+        /// Also serve the browser viewer on this same port: a viewer needs
+        /// no binary and no terminal, just a URL. Uses the relay's own
+        /// certificate, so pass a real one with --cert/--cert-key for
+        /// browsers to trust it.
+        #[arg(long)]
+        web: bool,
     },
 }
 
@@ -431,12 +440,36 @@ fn main() -> Result<()> {
             let t = token_from(pair_token.as_ref(), "viewer token")?;
             match (relay, session) {
                 (Some(r), Some(s)) => {
+                    // With a relay, the pin is the relay's fingerprint and
+                    // can be fetched over the network, which is the whole
+                    // point: nobody should have to copy 64 hex characters
+                    // out of a journal to start a session.
+                    let pin = match pin {
+                        Some(p) => p,
+                        None => {
+                            let addr = rt
+                                .block_on(pixel_change_check_client::network::resolve(&r))
+                                .with_context(|| format!("Invalid relay address '{r}'"))?;
+                            let name = r.rsplit_once(':').map(|(h, _)| h).unwrap_or("pcc");
+                            let fetched = rt.block_on(
+                                pixel_change_check_client::network::fetch_fingerprint(addr, name),
+                            )?;
+                            eprintln!("relay {r} presents sha256:{fetched}");
+                            fetched
+                        }
+                    };
                     println!("{}", reach::pair_url_relay(&r, &pin, &s, t.as_str()));
                 }
                 (Some(_), None) => {
                     anyhow::bail!("--session <CODE> is required with --relay");
                 }
                 (None, _) => {
+                    let listen = listen.context(
+                        "--listen <host:port> is required for a direct pair line (or pass --relay)",
+                    )?;
+                    let pin = pin.context(
+                        "--pin <fingerprint> is required for a direct pair line; only --relay can fetch it",
+                    )?;
                     println!("{}", reach::pair_url(&listen, &pin, t.as_str()));
                 }
             }
@@ -468,6 +501,7 @@ fn main() -> Result<()> {
             token,
             cert,
             cert_key,
+            web,
         } => {
             // Print the token only when it was generated: an operator
             // who passed --token already knows it, and echoing a
@@ -497,7 +531,15 @@ fn main() -> Result<()> {
                     .with_context(|| format!("Failed to bind relay on {addr}"))?;
                 let bound = listener.local_addr()?;
                 println!("relay listening on {bound}");
-                relay::run_relay_server(listener, identity, token).await
+                if web {
+                    // The page lives on this same port, behind the same
+                    // certificate, because the relay is the one host both
+                    // sides can already reach. The viewer URL names the
+                    // session, so only the operator can print a complete
+                    // link; this line says what shape it takes.
+                    println!("browser viewer: https://{bound}/v/<session>/#token=<token>");
+                }
+                relay::run_relay_server_with(listener, identity, token, web).await
             })
         }
     }

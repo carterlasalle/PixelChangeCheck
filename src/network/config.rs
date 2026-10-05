@@ -287,6 +287,110 @@ impl rustls::client::danger::ServerCertVerifier for PinningVerifier {
     }
 }
 
+/// Accept any certificate and record its fingerprint.
+///
+/// Used only by `pcc pair --relay` to *discover* a relay's pin on first
+/// contact, which is trust-on-first-use by construction: the caller is
+/// about to print that pin for a human to compare out of band, and the
+/// connection carries no session. Every session-bearing path still uses
+/// [`PinningVerifier`].
+#[derive(Debug)]
+struct CaptureVerifier {
+    seen: std::sync::Mutex<Option<[u8; 32]>>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for CaptureVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let digest: [u8; 32] = Sha256::digest(end_entity).into();
+        *self.seen.lock().expect("capture verifier mutex") = Some(digest);
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Connect to a TLS peer and return the SHA-256 fingerprint of the
+/// certificate it presents, without trusting it.
+///
+/// This is the "ask the relay for its pin" half of the zero-flag flow:
+/// the alternative is copying 64 hex characters out of a journal, which
+/// is exactly the friction the one-link share exists to remove. The
+/// fingerprint returned here is only as trustworthy as the network path
+/// to the relay, which is why the caller prints it for the human to
+/// compare against whatever the relay operator published.
+pub async fn fetch_fingerprint(addr: std::net::SocketAddr, server_name: &str) -> Result<String> {
+    let seen = Arc::new(CaptureVerifier {
+        seen: std::sync::Mutex::new(None),
+    });
+    let mut config = rustls::ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(rustls::ALL_VERSIONS)
+        .expect("the ring provider supports these versions")
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+    config.dangerous().set_certificate_verifier(seen.clone());
+    // The relay speaks `pcc`; offering it is what makes the relay serve
+    // the relay protocol rather than an HTTP page on a shared port.
+    config.alpn_protocols = vec![b"pcc".to_vec()];
+
+    let name = rustls::pki_types::ServerName::try_from(server_name.to_owned())
+        .map_err(|e| anyhow::anyhow!("Invalid relay server name '{server_name}': {e}"))?;
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .with_context(|| format!("Failed to connect to {addr}"))?;
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    // A completed handshake is what proves the certificate was presented;
+    // dropping the stream immediately after is deliberate.
+    let _stream = connector
+        .connect(name, tcp)
+        .await
+        .with_context(|| format!("TLS handshake with {addr} failed"))?;
+    let digest = seen
+        .seen
+        .lock()
+        .expect("capture verifier mutex")
+        .ok_or_else(|| anyhow::anyhow!("{addr} presented no certificate"))?;
+    Ok(hex(&digest))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// How long a connection may sit idle before QUIC gives up on it.
@@ -353,6 +457,26 @@ impl NetworkConfig {
             )
             .map_err(|e| anyhow::anyhow!("Failed to build the QUIC server config: {e}"))?;
         config.alpn_protocols = vec![b"pcc".to_vec()];
+        Ok(config)
+    }
+
+    /// TLS server config for the relay's TCP listener when it also hosts
+    /// the browser viewer.
+    ///
+    /// Two protocols share one certificate and one port: `pcc` for the
+    /// relay protocol, `http/1.1` so a browser reaches the viewer page and
+    /// its WebSocket over the relay's real certificate. Without
+    /// `http/1.1` in the list rustls aborts a browser handshake with
+    /// `no_application_protocol`, which surfaces as an unexplained
+    /// connection failure rather than "this relay serves no web viewer".
+    pub fn relay_server_config(
+        identity: &ServerIdentity,
+        serve_web: bool,
+    ) -> Result<rustls::ServerConfig> {
+        let mut config = Self::server_crypto_config(identity)?;
+        if serve_web {
+            config.alpn_protocols = vec![b"pcc".to_vec(), b"http/1.1".to_vec()];
+        }
         Ok(config)
     }
 }

@@ -270,7 +270,10 @@ kill $METRICS_PID 2>/dev/null
 
 # ----------------------------------------------------------------- relay
 echo "starting a relay and a second sharer through it"
-$BIN relay --listen "127.0.0.1:$RELAY_PORT" --token "$TOKEN" > "$LOG_DIR/relay.log" 2>&1 &
+# `--web` serves the browser viewer on the relay's own port, behind its
+# own certificate, so a viewer needs no binary and no terminal.
+$BIN relay --listen "127.0.0.1:$RELAY_PORT" --token "$TOKEN" --web \
+  > "$LOG_DIR/relay.log" 2>&1 &
 RELAY_PID=$!
 sleep 1
 RELAY_PIN=""
@@ -295,6 +298,30 @@ if kill -0 $VIEW2_PID 2>/dev/null && kill -0 $SHARE2_PID 2>/dev/null; then
   pass "a viewer receives frames through the relay"
 else
   fail "a viewer receives frames through the relay" "$(tail -3 "$LOG_DIR/view2.log")"
+fi
+
+# ------------------------------------------------- relay-hosted browser
+echo "checking the relay-hosted browser viewer"
+RELAY_BASE="https://127.0.0.1:$RELAY_PORT"
+JS_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$RELAY_BASE/pcc.js")
+check "the relay serves the browser compositor" "$([ "$JS_CODE" = 200 ] && echo 0 || echo 1)" "got $JS_CODE"
+PAGE_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$RELAY_BASE/v/SMOKE/")
+check "the relay serves the session page" "$([ "$PAGE_CODE" = 200 ] && echo 0 || echo 1)" "got $PAGE_CODE"
+SOCK_NO_TOKEN=$(curl -sk -o /dev/null -w '%{http_code}' "$RELAY_BASE/v/SMOKE/ws")
+check "the relay refuses a browser socket without a token" \
+  "$([ "$SOCK_NO_TOKEN" = 401 ] && echo 0 || echo 1)" "got $SOCK_NO_TOKEN"
+
+# The real check: the *shipped* browser compositor, over the relay's TLS,
+# completing the WebCrypto handshake and reading a sealed frame.
+if command -v node >/dev/null 2>&1; then
+  curl -sk "$RELAY_BASE/pcc.js" -o "$LOG_DIR/relay-pcc.js"
+  BROWSER=$(NODE_TLS_REJECT_UNAUTHORIZED=0 node scripts/browser-client-check.mjs \
+    "$LOG_DIR/relay-pcc.js" \
+    "wss://127.0.0.1:$RELAY_PORT/v/SMOKE/ws?token=$TOKEN" "$TOKEN" 2>/dev/null)
+  check "the shipped browser client views through the relay" \
+    "$([ "$BROWSER" = "SHIPPED_CLIENT_OK" ] && echo 0 || echo 1)" "got: $BROWSER"
+else
+  echo "  skip the shipped browser client check (node is not installed)"
 fi
 
 # ------------------------------------------------- new planes (fast gates)

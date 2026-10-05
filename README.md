@@ -209,8 +209,13 @@ cannot, `/fallback` serves a lossy MJPEG preview, labelled as such.
 **Behind NAT on both ends?** Run a relay on any reachable host:
 
 ```sh
-pcc relay --listen 0.0.0.0:5900
+pcc relay --listen 0.0.0.0:5900 --web --cert relay.pem --cert-key relay-key.pem
 ```
+
+`--web` makes the relay host the browser viewer too, on that same port
+and behind that same certificate, so a viewer needs no binary and no
+terminal — only a link. Use a real certificate (`--cert`/`--cert-key`,
+see [pcc relay](#pcc-relay--bridge-two-nats)) or browsers will warn.
 
 It prints its own token and fingerprint. On the sharer:
 
@@ -218,7 +223,29 @@ It prints its own token and fingerprint. On the sharer:
 pcc share --relay <relay-ip>:5900 --relay-pin <relay-fingerprint> --token <token>
 ```
 
-and on each viewer:
+which prints two one-line invites — one for a `pcc` viewer, one for a
+browser:
+
+```text
+Viewer link: pcc://view?relay=<relay-ip>:5900&pin=<relay-fingerprint>&session=<code>&token=<token>
+Browser link: https://<relay-ip>:5900/v/<code>/#token=<token>
+```
+
+Hand the viewer one of those. Nothing is retyped, and the pin is already
+the right one (the relay's, not the sharer's).
+
+Prefer not to copy the relay's pin out of its log at all? `pcc pair`
+fetches it:
+
+```sh
+pcc pair --relay <relay-ip>:5900 --session <code> --token <token>
+```
+
+That reads the fingerprint from the relay's certificate over the network
+and prints the same `pcc://` line. It is trust-on-first-use: compare the
+printed fingerprint against whatever the relay operator published.
+
+A native viewer can also take the pieces explicitly:
 
 ```sh
 pcc view --relay <relay-ip>:5900 --pin <relay-pin> --session <session> --token <token>

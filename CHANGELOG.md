@@ -44,6 +44,23 @@
 
 ## Unreleased
 
+### Added
+
+- **The relay can host the browser viewer.** `pcc relay --web` serves the
+  viewer page and its WebSocket on the relay's own port, behind the
+  relay's own certificate: a viewer needs no binary, no terminal, and no
+  `--web-cert` files, just a URL. The page lives at
+  `/v/<session>/#token=...` and the socket at `/v/<session>/ws`. The host
+  answers the browser's WebCrypto handshake, not the relay, so the relay
+  still sees only frame sizes and timing. ALPN decides what a connection
+  is (`pcc` for the relay protocol, `http/1.1` for a browser), so one
+  port serves both.
+- **`pcc pair --relay` fetches the relay's pin.** Omit `--pin` and the
+  relay's fingerprint is read from its certificate over the network, so
+  nobody copies 64 hex characters out of a journal. `pcc share --relay`
+  now also prints a one-line `pcc://` viewer link and the equivalent
+  browser link.
+
 ### Fixed
 
 - **Bare `pcc share` works.** `--web` defaults to loopback, so the TLS

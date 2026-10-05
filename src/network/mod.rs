@@ -7,8 +7,9 @@ pub mod web_e2e;
 mod wire;
 
 pub use config::{
-    fingerprint_hex, generate_identity, hex_to_der, load_identity, relay_credential, verify_token,
-    NetworkConfig, ServerIdentity, SessionToken, MAX_AUDIO_DATAGRAM,
+    fetch_fingerprint, fingerprint_hex, generate_identity, hex_to_der, load_identity,
+    relay_credential, verify_token, NetworkConfig, ServerIdentity, SessionToken,
+    MAX_AUDIO_DATAGRAM,
 };
 pub use e2e::SEALED_OVERHEAD;
 pub use protocol::{

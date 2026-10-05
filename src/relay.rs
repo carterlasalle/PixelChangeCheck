@@ -123,7 +123,7 @@ struct Peer {
     tx: mpsc::Sender<Vec<u8>>,
 }
 
-struct Session {
+pub(crate) struct Session {
     host: Option<Peer>,
     viewers: Vec<Peer>,
     /// Next viewer id for this session. Starts at 1, never reused, so a
@@ -132,7 +132,7 @@ struct Session {
     last_seen: Instant,
 }
 
-type Sessions = Arc<Mutex<HashMap<String, Session>>>;
+pub(crate) type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
 /// A TLS-wrapped TCP connection to a relay, already registered and
 /// authorized.
@@ -210,6 +210,12 @@ pub const RELAY_CONTROL_ID: u32 = 0xFFFF_FFFF;
 const K_CONTROL_VIEWER_HERE: u8 = 0xEF;
 /// Relay -> host: the viewer with this id disconnected.
 const K_CONTROL_VIEWER_LEFT: u8 = 0xEE;
+/// Relay -> host: the viewer with this id is a **browser**, so it speaks
+/// the WebCrypto handshake (P-256 + AES-GCM) rather than the native one,
+/// and its payloads are opaque browser frames rather than `Message`
+/// envelopes. The id is registered in the same step, so a host that
+/// receives this must not also expect a `ViewerHere` for it.
+pub(crate) const K_CONTROL_BROWSER_HERE: u8 = 0xED;
 
 /// One host relay connection, multiplexed into per-viewer sessions.
 ///
@@ -365,6 +371,125 @@ impl MessageTransport for RelayTransport {
     }
 }
 
+/// A relay viewer leg owned by the browser bridge rather than by a
+/// `RelayTransport` over TLS.
+pub(crate) struct BrowserViewer {
+    pub(crate) id: u32,
+    /// Payloads the host addressed to this viewer, in order.
+    pub(crate) rx: mpsc::Receiver<Vec<u8>>,
+    /// Registration generation, so cleanup removes only its own entry.
+    gen: u64,
+}
+
+/// Register a browser viewer in `session_id` and tell the host about it.
+///
+/// The host learns "id N is a browser" through a control frame, so it runs
+/// the WebCrypto handshake on that leg instead of the native one. The
+/// error text is what the HTTP layer turns into a status code, so it says
+/// which of the three ways it failed.
+pub(crate) async fn register_browser_viewer(
+    sessions: &Sessions,
+    next_gen: &AtomicU64,
+    session_id: &str,
+) -> Result<BrowserViewer> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(MAX_PEER_QUEUE_MESSAGES);
+    let mut map = sessions.lock().await;
+    let session = map
+        .get_mut(session_id)
+        .with_context(|| format!("no session '{session_id}'"))?;
+    if session.viewers.len() >= MAX_VIEWERS_PER_SESSION {
+        anyhow::bail!(
+            "session '{session_id}' already has {} viewers (max {MAX_VIEWERS_PER_SESSION})",
+            session.viewers.len()
+        );
+    }
+    let host = session
+        .host
+        .as_ref()
+        .with_context(|| format!("session '{session_id}' has no host"))?;
+    let id = session.next_viewer_id;
+    session.next_viewer_id = session.next_viewer_id.saturating_add(1).max(1);
+    if id == RELAY_CONTROL_ID {
+        anyhow::bail!("session '{session_id}' exhausted its viewer ids");
+    }
+    let gen = next_gen.fetch_add(1, Ordering::Relaxed);
+    session.viewers.push(Peer { gen, id, tx });
+    session.last_seen = Instant::now();
+    // Told before any payload can arrive, so the host has the browser
+    // handshake ready when the offer lands.
+    let mut frame = Vec::with_capacity(9);
+    frame.extend_from_slice(&9u32.to_le_bytes());
+    frame.extend_from_slice(&RELAY_CONTROL_ID.to_le_bytes());
+    frame.push(K_CONTROL_BROWSER_HERE);
+    frame.extend_from_slice(&id.to_le_bytes());
+    let _ = host.tx.try_send(frame);
+    Ok(BrowserViewer { id, rx, gen })
+}
+
+/// Remove a browser viewer and tell the host it left. Generation-checked,
+/// so a reconnecting viewer's cleanup cannot erase its replacement.
+pub(crate) async fn unregister_browser_viewer(
+    sessions: &Sessions,
+    session_id: &str,
+    viewer: &BrowserViewer,
+) {
+    let mut map = sessions.lock().await;
+    let Some(session) = map.get_mut(session_id) else {
+        return;
+    };
+    session.viewers.retain(|v| v.gen != viewer.gen);
+    if let Some(host) = session.host.as_ref() {
+        let mut frame = Vec::with_capacity(9);
+        frame.extend_from_slice(&9u32.to_le_bytes());
+        frame.extend_from_slice(&RELAY_CONTROL_ID.to_le_bytes());
+        frame.push(K_CONTROL_VIEWER_LEFT);
+        frame.extend_from_slice(&viewer.id.to_le_bytes());
+        let _ = host.tx.try_send(frame);
+    }
+    if session.host.is_none() && session.viewers.is_empty() {
+        map.remove(session_id);
+    }
+}
+
+/// Forward one opaque browser payload to the host, tagged with the viewer
+/// id. The host-leg length grows by the id bytes, exactly as a native
+/// viewer frame does — the relay never looks inside.
+pub(crate) async fn forward_browser_payload(
+    sessions: &Sessions,
+    session_id: &str,
+    viewer_id: u32,
+    payload: &[u8],
+) -> Result<()> {
+    let target = {
+        let mut map = sessions.lock().await;
+        map.get_mut(session_id).and_then(|s| {
+            s.last_seen = Instant::now();
+            s.host.as_ref().map(|h| h.tx.clone())
+        })
+    };
+    let Some(host) = target else {
+        anyhow::bail!("session '{session_id}' has no host");
+    };
+    let mut frame = Vec::with_capacity(8 + payload.len());
+    frame.extend_from_slice(&((payload.len() + RELAY_ID_BYTES) as u32).to_le_bytes());
+    frame.extend_from_slice(&viewer_id.to_le_bytes());
+    frame.extend_from_slice(payload);
+    host.try_send(frame)
+        .map_err(|_| anyhow::anyhow!("host is not draining; dropping the browser viewer"))
+}
+
+/// Whether the session exists and currently has a host.
+pub(crate) async fn session_has_host(sessions: &Sessions, session_id: &str) -> bool {
+    sessions
+        .lock()
+        .await
+        .get(session_id)
+        .is_some_and(|s| s.host.is_some())
+}
+
+/// The relay's session table, exposed to the browser bridge.
+pub(crate) type SessionTable = Sessions;
+
 /// Run a relay server until the listener errors.
 ///
 /// The listener is supplied by the caller so the bound address is known
@@ -375,8 +500,23 @@ pub async fn run_relay_server(
     identity: Arc<ServerIdentity>,
     token: SessionToken,
 ) -> Result<()> {
-    let acceptor =
-        tokio_rustls::TlsAcceptor::from(Arc::new(NetworkConfig::server_crypto_config(&identity)?));
+    run_relay_server_with(listener, identity, token, false).await
+}
+
+/// The same server, with the browser-viewer surface switched on.
+///
+/// `serve_web` only changes which ALPN protocols the TLS listener
+/// advertises: with it, a browser reaches the viewer page on the relay's
+/// own certificate, and `pcc` clients are unaffected.
+pub async fn run_relay_server_with(
+    listener: TcpListener,
+    identity: Arc<ServerIdentity>,
+    token: SessionToken,
+    serve_web: bool,
+) -> Result<()> {
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(NetworkConfig::relay_server_config(
+        &identity, serve_web,
+    )?));
     info!("Relay server listening on {} (TLS)", listener.local_addr()?);
     // println, not info: the operator copies this pin into every client
     // command, and log-level filtering must never be able to hide it.
@@ -397,21 +537,39 @@ pub async fn run_relay_server(
         tokio::spawn(async move { sweep(sessions, failures).await });
     }
 
+    let ctx = RelayCtx {
+        acceptor,
+        sessions,
+        next_gen,
+        token,
+        failures,
+        serve_web,
+    };
+
     loop {
         let (tcp, peer) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let sessions = sessions.clone();
-        let next_gen = next_gen.clone();
-        let token = token.clone();
-        let failures = failures.clone();
+        let ctx = ctx.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_client(tcp, peer, acceptor, sessions, next_gen, token, failures).await
-            {
+            if let Err(e) = handle_client(tcp, peer, ctx).await {
                 warn!("Relay peer {peer}: {e}");
             }
         });
     }
+}
+
+/// Everything one accepted connection needs.
+///
+/// Grouped rather than passed as seven positional arguments: the fields
+/// travel together for the whole connection, and a caller that has to
+/// remember their order is a caller that will one day swap two of them.
+#[derive(Clone)]
+struct RelayCtx {
+    acceptor: tokio_rustls::TlsAcceptor,
+    sessions: Sessions,
+    next_gen: Arc<AtomicU64>,
+    token: SessionToken,
+    failures: Arc<tokio::sync::Mutex<HashMap<std::net::SocketAddr, (u32, Instant)>>>,
+    serve_web: bool,
 }
 
 /// Retire sessions that have gone quiet, and forget auth-failure counters
@@ -434,23 +592,8 @@ async fn sweep(
     }
 }
 
-async fn handle_client(
-    tcp: TcpStream,
-    peer: std::net::SocketAddr,
-    acceptor: tokio_rustls::TlsAcceptor,
-    sessions: Sessions,
-    next_gen: Arc<AtomicU64>,
-    expected_token: SessionToken,
-    failures: Arc<tokio::sync::Mutex<HashMap<std::net::SocketAddr, (u32, Instant)>>>,
-) -> Result<()> {
-    if record_and_check_rate(&failures, peer).await {
-        anyhow::bail!(
-            "too many failed registrations (max {AUTH_FAILURES_ALLOWED} per {}s)",
-            AUTH_FAILURE_WINDOW.as_secs()
-        );
-    }
-
-    let stream = match acceptor.accept(tcp).await {
+async fn handle_client(tcp: TcpStream, peer: std::net::SocketAddr, ctx: RelayCtx) -> Result<()> {
+    let stream = match ctx.acceptor.accept(tcp).await {
         Ok(s) => s,
         Err(e) => {
             // A bare TCP connect (health check, port scan) fails the
@@ -461,6 +604,43 @@ async fn handle_client(
             return Ok(());
         }
     };
+    // ALPN decides what this connection is. A browser negotiates
+    // `http/1.1` and gets the viewer page; everything else speaks the
+    // relay protocol, unchanged.
+    if ctx.serve_web && stream.get_ref().1.alpn_protocol() == Some(b"http/1.1") {
+        return crate::relay_web::handle_http(
+            stream,
+            &ctx.sessions,
+            ctx.next_gen.as_ref(),
+            &ctx.token,
+        )
+        .await;
+    }
+    // Rate limiting sits after the ALPN split on purpose: a browser
+    // reloading the page is not a failed registration, and counting it
+    // would lock out a viewer whose sharer is merely slow to start.
+    if record_and_check_rate(&ctx.failures, peer).await {
+        anyhow::bail!(
+            "too many failed registrations (max {AUTH_FAILURES_ALLOWED} per {}s)",
+            AUTH_FAILURE_WINDOW.as_secs()
+        );
+    }
+    handle_relay_client(stream, peer, ctx).await
+}
+
+/// The relay protocol half of a connection: registration, framing, fanout.
+async fn handle_relay_client(
+    stream: tokio_rustls::server::TlsStream<TcpStream>,
+    peer: std::net::SocketAddr,
+    ctx: RelayCtx,
+) -> Result<()> {
+    let RelayCtx {
+        sessions,
+        next_gen,
+        token: expected_token,
+        failures,
+        ..
+    } = ctx;
     // Split after the handshake so the reader and the writer can be
     // supervised together by `select!` below.
     let (mut read_half, mut write_half) = tokio::io::split(stream);

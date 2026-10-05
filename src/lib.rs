@@ -7,6 +7,9 @@ pub mod network;
 pub mod pcc;
 pub mod reach;
 pub mod relay;
+// The relay browser-viewer surface: an internal split of `relay`, not a
+// second public entry point, so it stays crate-private.
+pub(crate) mod relay_web;
 pub mod server;
 pub mod telemetry;
 

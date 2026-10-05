@@ -26,7 +26,10 @@ use crate::network::{
 use crate::pcc::types::{rgb_len, Frame};
 use crate::pcc::{PlanLimits, Planner};
 use crate::reach::Rung;
-use crate::relay::{generate_session_code, RelayFan, RelayRole, RelayTransport, RELAY_CONTROL_ID};
+use crate::relay::{
+    generate_session_code, RelayFan, RelayRole, RelayTransport, K_CONTROL_BROWSER_HERE,
+    RELAY_CONTROL_ID,
+};
 use crate::server::renderer::{web, SharedSurface};
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -744,6 +747,27 @@ pub async fn run_share(args: ShareArgs, metrics: crate::telemetry::SharedMetrics
                     }
                 };
                 info!("Relay {relay_addr}, session '{session}' (pin the relay, not the sharer)");
+                // One line a viewer pastes, carrying session, relay pin
+                // and token. This is the zero-flag path: the operator
+                // sends this, not three separate hex values.
+                println!(
+                    "Viewer link: {}",
+                    crate::reach::pair_url_relay(
+                        &relay_addr,
+                        &args.relay_pin,
+                        &session,
+                        token.as_str()
+                    )
+                );
+                // The browser link is the same session seen from a tab:
+                // no install, no terminal. It only works when the relay
+                // was started with --web, which the sharer cannot detect
+                // from here, so the line says so rather than pretending.
+                println!(
+                    "Browser link: https://{relay_addr}/v/{session}/#token={} \
+                     (needs `pcc relay --web`)",
+                    token.as_str()
+                );
                 info!(
                     "  pcc view --relay {relay_addr} --pin {} --session '{session}' --token {}",
                     args.relay_pin,
@@ -1345,11 +1369,23 @@ async fn serve_relay_fan(
                 if id == RELAY_CONTROL_ID {
                     // `[kind][viewer_id]`: ViewerLeft tears the session
                     // down; ViewerHere spawns one for an idle viewer the
-                    // host would otherwise never hear from.
+                    // host would otherwise never hear from; BrowserHere
+                    // spawns the WebCrypto session a relay-hosted page
+                    // needs, because that leg speaks the browser handshake
+                    // rather than the native one.
                     if bytes.len() == 5 {
                         let viewer = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
                         if bytes[0] == 0xEE {
                             sessions.remove(&viewer);
+                        } else if bytes[0] == K_CONTROL_BROWSER_HERE
+                            && !sessions.contains_key(&viewer)
+                        {
+                            sessions.insert(
+                                viewer,
+                                spawn_browser_session(
+                                    viewer, &fan.tx, &tx, &published, &token, &exit_tx,
+                                ),
+                            );
                         } else if bytes[0] == 0xEF && !sessions.contains_key(&viewer) {
                             sessions.insert(
                                 viewer,
@@ -1453,6 +1489,73 @@ fn spawn_fan_session(
 }
 
 // ------------------------------------------------------------ one viewer
+
+/// A relay viewer leg carrying **browser** frames, as a
+/// [`web::FrameChannel`].
+///
+/// The payloads are the browser's own frames — its WebCrypto offer, its
+/// sealed acknowledgements — not `Message` envelopes, which is exactly why
+/// the relay tags this id with `BrowserHere` before any of them arrive.
+struct FanBrowserChannel {
+    id: u32,
+    tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+#[async_trait::async_trait]
+impl web::FrameChannel for FanBrowserChannel {
+    async fn send_frame(&mut self, payload: &[u8]) -> Result<()> {
+        self.tx
+            .send((self.id, payload.to_vec()))
+            .await
+            .map_err(|_| anyhow::anyhow!("relay fan is gone"))
+    }
+
+    async fn recv_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        Ok(self.rx.recv().await)
+    }
+}
+
+/// Serve one relay-hosted browser viewer.
+///
+/// The host, not the relay, answers the browser's handshake: that is what
+/// keeps "the relay cannot read the screen" true against the operator
+/// running it. Everything below the handshake is the same session the
+/// sharer's own web port runs, so there is one implementation of it.
+fn spawn_browser_session(
+    id: u32,
+    fan_tx: &tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
+    tx: &EncodedBroadcast,
+    published: &Shared,
+    token: &SessionToken,
+    exit_tx: &tokio::sync::mpsc::Sender<u32>,
+) -> tokio::sync::mpsc::Sender<Vec<u8>> {
+    let (session_tx, session_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(FAN_SESSION_QUEUE);
+    let updates = tx.subscribe();
+    let source = published.clone();
+    let token = token.as_str().to_string();
+    let fan_tx = fan_tx.clone();
+    let exit_tx = exit_tx.clone();
+    tokio::spawn(async move {
+        let snapshot: web::SnapshotFn = Arc::new(move || match try_current_snapshot(&source) {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                warn!("Could not build a browser snapshot: {e}");
+                Vec::new()
+            }
+        });
+        let mut channel = FanBrowserChannel {
+            id,
+            tx: fan_tx,
+            rx: session_rx,
+        };
+        if let Err(e) = web::run_browser_session(&mut channel, &updates, snapshot, token).await {
+            warn!("relay browser viewer {id} ended: {e}");
+        }
+        let _ = exit_tx.send(id).await;
+    });
+    session_tx
+}
 
 #[allow(clippy::too_many_arguments)]
 /// Split a comma-separated `--relay` list, dropping empties. One

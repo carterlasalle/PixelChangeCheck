@@ -85,10 +85,19 @@ Aliases accepted: `web-rtc`, `rtc`. Anything else fails fast naming the three.
 
 ### Browser viewer
 
-Served on `--web` (default `127.0.0.1:8080`); `--no-web` disables it.
-The loopback default is deliberate: a non-loopback browser address
-without `--web-cert`/`--web-key` is refused, so the old `0.0.0.0`
-default made bare `pcc share` a guaranteed error.
+Two places serve this page, with the identical compositor:
+
+- **The sharer**, on `--web` (default `127.0.0.1:8080`); `--no-web`
+  disables it. The loopback default is deliberate: a non-loopback
+  browser address without `--web-cert`/`--web-key` is refused, so the old
+  `0.0.0.0` default made bare `pcc share` a guaranteed error.
+- **The relay**, when it was started with `--web`. The page is then at
+  `https://<relay>/v/<session>/#token=…` and its socket at
+  `/v/<session>/ws`, both behind the relay's own certificate. This is the
+  path that needs nothing installed on the viewer's machine.
+
+In both cases the token stays in the URL fragment and the handshake is
+answered by the *host*, never by whatever is serving the page.
 
 | Path | Auth | What it is |
 |---|---|---|
@@ -144,7 +153,20 @@ pcc relay --listen 0.0.0.0:5900
 
 Prints its own token and fingerprint, then pairs hosts with viewers by
 session code and forwards framed bytes. Default port `5900`; `--token`
-auto-generates if omitted. **The share's `--token` must equal the relay's
+auto-generates if omitted.
+
+| Flag | What it does |
+|---|---|
+| `--cert`, `--cert-key` | PEM certificate and key for a **stable** relay identity: restarts keep the same fingerprint, so clients keep their pin. Without them the relay generates per process and the pin changes on every restart. Use a real certificate here if you also run `--web`. |
+| `--web` | Also serve the browser viewer on this same port, behind this same certificate. The page is at `/v/<session>/#token=...` and its WebSocket at `/v/<session>/ws`. A browser needs no binary and no terminal — just the link the sharer prints. |
+
+`--web` shares the port by ALPN: a client offering `pcc` gets the relay
+protocol, a browser offering `http/1.1` gets the viewer page. The relay
+still forwards opaque frames and never sees a key — the *host* answers
+the browser's WebCrypto handshake, over the same host leg a native
+viewer uses.
+
+**The share's `--token` must equal the relay's
 `--token`** — the relay checks `HMAC(session-token)` on registration and
 closes mismatches with `bad credential`, and the viewer's `--token` must
 match too for the E2E handshake after it (all three verified live just
@@ -172,12 +194,28 @@ server); the rest is local inspection.
 ## `pcc pair` — one line instead of retyped hex
 
 ```sh
+# direct: the pin is the sharer's, and only the sharer can tell you it
 pcc pair --listen <host:port> --pin <fp> [--token <t>]
+
+# through a relay: the pin is the relay's, and it can be fetched
+pcc pair --relay <relay:port> --session <code> [--pin <fp>] [--token <t>]
 ```
 
-Prints a single `pcc://view?connect=…&pin=…&token=…` line carrying token
-and pin (token generated if omitted) — open it or paste it, nobody
-retypes 64 hex characters.
+Prints a single `pcc://view?…` line carrying session, pin and token
+(token generated if omitted) — open it or paste it, nobody retypes 64 hex
+characters.
+
+With `--relay` and no `--pin`, the relay's fingerprint is read from its
+certificate over the network and echoed on stderr before the link is
+printed. That is trust-on-first-use by construction — compare the printed
+fingerprint against whatever the relay operator published — and it is
+the difference between starting a session and copying hex out of a
+journal.
+
+`--pin` is **not** interchangeable between the two forms: direct takes
+the sharer's fingerprint, relay takes the relay's, and the two look
+identical. The command names which one it wants, and `pcc share` labels
+them the same way in its output.
 
 ## Library, example, benches, checks
 

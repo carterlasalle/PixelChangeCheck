@@ -127,12 +127,13 @@ pub fn run_view(args: ViewArgs, metrics: crate::telemetry::SharedMetrics) -> Res
         // longer covers the floor. Crypto is fresh per attempt (new
         // KeyPair inside receive_once), so no counter or nonce crosses
         // the reconnect.
-        // The 30s silence watchdog inside receive_once ends attempts
-        // whose session produces nothing (Host gone, wrong code); the
-        // loop then decides: without --reconnect the viewer exits
-        // non-zero with the cause, with it the operator opted into
-        // waiting and retries continue. Parked viewers are the normal
-        // case this serves: the Host usually follows within seconds.
+        // Two 30s watchdogs inside receive_once end attempts whose
+        // session produces nothing (Host gone, wrong code): one on the
+        // E2E handshake reply, one on the frame stream. The loop then
+        // decides: without --reconnect the viewer exits non-zero with
+        // the cause, with it the operator opted into waiting and retries
+        // continue. Parked viewers are the normal case this serves: the
+        // Host usually follows within seconds.
         let mut resume: Option<(crate::network::Epoch, crate::network::Rev)> = None;
         loop {
             // The connection is rebuilt per attempt, so it is captured
@@ -332,11 +333,11 @@ async fn dial_direct(
 /// the relay exposes no connection, so relayed viewers get no datagram
 /// audio — the existing deliberate omission, unchanged.
 ///
-/// A session with no Host accepts the registration and then never sends
-/// a frame, so without a deadline this waits forever with no
-/// diagnostic. The whole probe gets one budget: when it expires the
-/// viewer names the session and asks whether the sharer is running,
-/// instead of hanging on silence.
+/// Parked viewers (no Host yet) pass registration and then wait on the
+/// 30s handshake and frame watchdogs downstream, which name the session
+/// when they fire. Nothing here needs its own deadline: `send` on a live
+/// relay transport completes, so a timeout here would only mislabel a
+/// slow handshake as a missing Host.
 async fn dial_relays(
     args: &ViewArgs,
     targets: &str,
@@ -387,22 +388,12 @@ async fn dial_relays(
     }
     let mut transport =
         transport.ok_or_else(|| last_err.context("no relay in --relay answered"))?;
-    // The relay accepts a viewer into a session with no Host and then
-    // sends nothing, so this Hello is the only thing standing between
-    // the viewer and a silent infinite wait. Ten seconds matches the
-    // sharer's handshake timeout; on expiry the viewer says the session
-    // has no Host and asks whether the sharer is still running.
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        transport.send(&Message::Hello {
+    transport
+        .send(&Message::Hello {
             token: args.token.as_str().to_string(),
             resume,
-        }),
-    )
-    .await
-    .with_context(|| {
-        format!("no host in session '{session}' answered within 10s — is the sharer still running?")
-    })??;
+        })
+        .await?;
     Ok((Box::new(transport), None))
 }
 

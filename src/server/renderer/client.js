@@ -659,7 +659,12 @@ class Session {
 
   async connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(this.token)}`;
+    // The WebSocket lives beside the page, not at a fixed root: the
+    // sharer serves it at /ws, while a relay-hosted page lives at
+    // /v/<session>/ and answers at /v/<session>/ws. Deriving the path
+    // from the page keeps one client.js correct on both.
+    const dir = location.pathname.replace(/[^/]*$/, '');
+    const url = `${proto}://${location.host}${dir}ws?token=${encodeURIComponent(this.token)}`;
     const socket = new WebSocket(url);
     socket.binaryType = 'arraybuffer';
     this.socket = socket;
