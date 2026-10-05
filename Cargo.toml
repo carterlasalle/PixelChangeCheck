@@ -1,6 +1,6 @@
 [package]
 name = "pixel-change-check-client"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 # The floor CI tests. Raise this and the MSRV job together.
 # 1.91, not 1.88: iroh 1.3 requires rustc 1.91, so the whole tree —

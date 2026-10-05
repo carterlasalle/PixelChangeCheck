@@ -58,18 +58,25 @@ cargo test
 
 ## Releasing
 
-One tag does everything: GitHub Release binaries and a crates.io
-publish. The tag must match the `version` in `Cargo.toml`, and the
-workflow refuses to run if it does not, because a version that disagrees
-with its tag is one nobody can find by release and blocks the next one.
+One command, from a clean `master`:
 
 ```sh
-cargo test && cargo clippy --all-targets && cargo fmt --all
-cargo build --release && bash scripts/smoke.sh   # against the real binaries
-
-# bump version in Cargo.toml, update CHANGELOG.md, commit
-git tag v0.1.0 && git push origin master --tags
+scripts/release.sh 0.1.5
 ```
+
+The version argument is the bare number; the tag becomes `v0.1.5`. Before
+running it, write the `## 0.1.5` section in `CHANGELOG.md` — the script
+refuses to run without it, because an untagged release with no notes is
+how versions ship unexplained.
+
+The script runs every gate (`fmt`, clippy on both feature configs, full
+tests, release-binary `smoke.sh`), bumps `Cargo.toml` to the version in
+one commit, creates an annotated tag, pushes commit + tag (the tag push
+starts the release workflow), and watches the run to completion. One tag
+does everything: GitHub Release binaries and a crates.io publish. The tag
+must match the `version` in `Cargo.toml`, and the workflow refuses to run
+if it does not, because a version that disagrees with its tag is one
+nobody can find by release and blocks the next one.
 
 `0.1.0` was published by hand, because crates.io cannot attach a
 trusted publisher to a crate that does not exist yet. Every release after

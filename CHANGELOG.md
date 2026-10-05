@@ -42,7 +42,7 @@
   named set; `num_cpus` removed. Protocol version 7 two releases in:
   sharers and viewers must be the same build.
 
-## Unreleased
+## 0.1.5 — the relay-hosted viewer release
 
 ### Added
 
