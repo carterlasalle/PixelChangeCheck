@@ -2853,6 +2853,15 @@ must be changed together.
   that already exists. A crates.io version can never be reused, not
   even after a yank. See `CONTRIBUTING.md` for the one-time
   trusted-publisher setup and `LICENSE` for the licence choice.
+- `CHANGELOG.md` is newest-first: a release section goes at the *top*,
+  directly under `# Changelog`. An accumulating `## Unreleased` section
+  belongs there too, and `scripts/release.sh` requires a `## <version>`
+  section before it will tag. Watch the position — 0.1.5 shipped once
+  parked below 0.1.4/0.1.3 because the working section drifted down the
+  file while newer headings were inserted above it.
+- The release script must not assume a toolchain path. This dev machine
+  keeps rustup's toolchains off `PATH`, so the script falls back to
+  rustup's `stable` toolchain rather than a hardcoded macOS triple.
 - CI installs its Linux system dependencies in four separate jobs via the
   `LINUX_DEPS` env var. `alsa-sys` (via cpal) runs `pkg-config` at build
   time and *panics* without the ALSA headers, so a missing package is a

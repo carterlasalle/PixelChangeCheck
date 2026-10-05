@@ -10,7 +10,7 @@
 ![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
 ![crates.io](https://img.shields.io/crates/v/pixel-change-check-client?label=crates.io)
 
-[Install](#quick-start) · [Usage](docs/usage.md) · [How it works](#how-pcc-works) · [Architecture](#architecture) · [Relay](#do-i-need-a-relay) · [Limitations](#known-limitations) · [Design records](docs/adr/)
+[Install](#quick-start) · [Everyday tasks](#everyday-tasks) · [Usage](docs/usage.md) · [How it works](#how-pcc-works) · [Architecture](#architecture) · [Relay](#do-i-need-a-relay) · [Limitations](#known-limitations) · [Design records](docs/adr/)
 
 </div>
 
@@ -62,6 +62,63 @@ The diff is against the **reference** — the framebuffer an up-to-date viewer h
 | Transports | Direct QUIC, multi-relay fan with redirect-based broadcast mode, iroh tickets (ADR 0007), and manual-signalling WebRTC data channels (ADR 0008) |
 
 ## Quick start
+
+### The 30-second version
+
+On the machine you want to show:
+
+```sh
+cargo install cargo-binstall          # once, if you do not have it
+cargo binstall pixel-change-check-client
+pcc share
+```
+
+`pcc share` prints a fingerprint and ready-made viewer lines. How the other
+person watches:
+
+| The two of you are… | The viewer does |
+|---|---|
+| on the same network | Runs the `pcc view --connect … --token … --pin …` line `pcc share` printed (they need the binary installed). The printed browser URL is loopback, so it only opens on the sharing machine. |
+| anywhere else, or they want no install at all | You both go through a relay: the viewer opens **one link in any browser** and installs nothing. See [the one-link setup](#the-one-link-setup). |
+
+### The one-link setup
+
+Run a relay on any host both sides can reach — a cheap VPS, a home server,
+even your own machine for a quick test:
+
+```sh
+pcc relay --listen 0.0.0.0:5900 --web
+```
+
+`--web` makes the relay serve the browser viewer too, on the same port and
+behind the same certificate. The relay prints its own token and fingerprint.
+On the machine being shared:
+
+```sh
+pcc share --relay <relay-ip>:5900 --relay-pin <relay-fingerprint> --token <token>
+```
+
+That `<token>` must be the **relay's** token, exactly as the relay printed
+it — the share and the relay authenticate with the same string, and a
+mismatch closes the connection with `bad credential`.
+
+That prints two one-line invites. Send the **browser** one:
+
+```text
+Viewer link:  pcc://view?relay=…&pin=…&session=…&token=…
+Browser link: https://<relay-ip>:5900/v/<session>/#token=…
+```
+
+The other person opens the browser link on a phone, a Chromebook, anything —
+no binary, no terminal, no configuration. The token rides in the URL fragment
+(after `#`), which the browser never sends as part of the request.
+
+Two notes for a real deployment:
+- Without `--cert`/`--cert-key` the relay generates a certificate per
+  process, so browsers warn and the fingerprint changes on every restart.
+  Supply a real certificate (and a stable identity) for anything beyond a
+  test: `pcc relay --listen 0.0.0.0:5900 --web --cert relay.pem --cert-key relay-key.pem`.
+- Prefer not to copy the relay's fingerprint by hand? `pcc pair --relay <relay-ip>:5900 --session <code> --token <token>` reads it straight from the relay's certificate and prints the same link.
 
 ### Prerequisites
 
@@ -206,51 +263,34 @@ http://<sharer-ip>:8080/#token=<token>
 That page runs the same compositor as the native client. If your browser
 cannot, `/fallback` serves a lossy MJPEG preview, labelled as such.
 
-**Behind NAT on both ends?** Run a relay on any reachable host:
-
-```sh
-pcc relay --listen 0.0.0.0:5900 --web --cert relay.pem --cert-key relay-key.pem
-```
-
-`--web` makes the relay host the browser viewer too, on that same port
-and behind that same certificate, so a viewer needs no binary and no
-terminal — only a link. Use a real certificate (`--cert`/`--cert-key`,
-see [`pcc relay` in the usage guide](docs/usage.md#pcc-relay--bridge-two-nats))
-or browsers will warn.
-
-It prints its own token and fingerprint. On the sharer:
-
-```sh
-pcc share --relay <relay-ip>:5900 --relay-pin <relay-fingerprint> --token <token>
-```
-
-which prints two one-line invites — one for a `pcc` viewer, one for a
-browser:
-
-```text
-Viewer link: pcc://view?relay=<relay-ip>:5900&pin=<relay-fingerprint>&session=<code>&token=<token>
-Browser link: https://<relay-ip>:5900/v/<code>/#token=<token>
-```
-
-Hand the viewer one of those. Nothing is retyped, and the pin is already
-the right one (the relay's, not the sharer's).
-
-Prefer not to copy the relay's pin out of its log at all? `pcc pair`
-fetches it:
-
-```sh
-pcc pair --relay <relay-ip>:5900 --session <code> --token <token>
-```
-
-That reads the fingerprint from the relay's certificate over the network
-and prints the same `pcc://` line. It is trust-on-first-use: compare the
-printed fingerprint against whatever the relay operator published.
-
-A native viewer can also take the pieces explicitly:
+**Behind NAT on both ends?** Use the relay — see
+[the one-link setup](#the-one-link-setup) for running one and the links it
+produces. If you would rather pass the pieces explicitly:
 
 ```sh
 pcc view --relay <relay-ip>:5900 --pin <relay-pin> --session <session> --token <token>
+pcc view --connect <sharer-ip>:5800 --relay <relay-ip>:5900 --pin <relay-pin> --session <session> --token <token>
 ```
+
+The second form races the direct path and the relay and takes whichever
+answers first, so you do not have to know which one will work.
+
+**No relay at all**, if the two ends can reach each other directly:
+
+```sh
+pcc share --transport iroh                 # prints a ticket
+pcc view --transport iroh --ticket <ticket> --token <token>
+```
+
+iroh handles hole-punching and falls back to its own relay; the ticket is
+the whole address, so there are no ports to open. (There is also a
+manual-signalling WebRTC transport — `--transport webrtc` — for the case
+where both ends can only exchange a blob by hand; see the usage guide.)
+
+**Through a disconnect:** add `--reconnect` to the viewer. It keeps the
+last frame on screen, then resumes from where it stopped — the sharer
+replays the recent updates it still holds, or sends a fresh snapshot if
+the viewer fell too far behind.
 
 ### Do I need a relay?
 
@@ -291,6 +331,24 @@ pcc share --web-cert cert.pem --web-key key.pem
 
 The surface content is encrypted either way. A certificate stops the key
 exchange itself from being readable on the wire.
+
+### Everyday tasks
+
+| I want to… | Command |
+|---|---|
+| share my whole screen | `pcc share` |
+| share one display | `pcc share --display 1` — list them with `pcc diagnose --displays` |
+| share part of the screen | `pcc share --region 100,200,1280,720` (x,y,w,h in display pixels) |
+| share one window | `pcc share --window "Firefox"` — title substring, fails fast on no match |
+| share one app | `pcc share --application "Code"` |
+| include audio | `pcc share --audio-source system` — or `mic`, `both`, `none`; list devices with `pcc diagnose --audio` |
+| approve each viewer by hand | `pcc share --approve` — prompts `Admit? [y/N]` per viewer |
+| add a browser viewer on another machine without a certificate | use the relay's `--web` (above) — the relay brings its own certificate |
+| share with no open port and no relay to run | `pcc share --transport iroh` — prints a ticket; the viewer runs `pcc view --transport iroh --ticket <ticket> --token <token>` |
+| keep watching through a disconnect | `pcc view --reconnect` — the last frame stays on screen and it catches up |
+| see what this machine can do | `pcc diagnose` (add `--displays` or `--audio`) |
+
+The exhaustive reference for every flag is [docs/usage.md](docs/usage.md).
 
 ### Commands
 

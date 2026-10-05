@@ -1,46 +1,26 @@
 # Changelog
 
-## 0.1.4
+## Unreleased
 
 ### Changed
 
-- **ARM Linux archive.** The release matrix gains `ubuntu-24.04-arm`
-  (native ARM64, no cross-compiling), so `cargo binstall` serves
-  `pcc-<version>-aarch64-unknown-linux-gnu` instead of falling back to
-  a full local compile there. No code change; same `dist` profile and
-  triple-named archive scheme as the other three legs.
-- **MSRV is 1.91.** iroh 1.3 requires rustc 1.91, so the floor moves
-  from 1.88 everywhere it was claimed (`rust-version`, CI, README,
-  release runners). 1.88 was the `time`/RUSTSEC-2026-0009 floor; iroh
-  moved it.
-- **Headless and Windows test fixes.** The cursor sampler uses
-  `DeviceState::checked_new` (no X display reads as `CursorHide`
-  instead of panicking); window/application capture resolves the match
-  before touching the framebuffer (headless still fails fast with "no
-  visible window matches"); the closed-stdin test reads EOF from memory
-  instead of `/dev/null`.
-- **OSV-Scanner ignores with receipts.** `osv-scanner.toml` mirrors the
-  `.cargo/audit.toml` policy for the seven flagged advisories, each
-  entry naming what upstream release lifts it.
+- **A portable release script.** `scripts/release.sh <version>` runs every
+  gate, bumps the manifest, tags, pushes, and watches the release run. It
+  no longer assumes this development machine's toolchain path: it uses
+  whatever `cargo` is on `PATH` and falls back to rustup's `stable`
+  toolchain, reads the repository slug from the remote, and picks the run
+  for the tag rather than the latest one.
+- **The README leads with the easy path.** A "30-second version" and a
+  "one-link setup" now come first, followed by an everyday-tasks table
+  (share a display/region/window/app, audio, approval, iroh, reconnect).
+  The relay walkthrough no longer appears twice.
 
-### Added
+### Fixed
 
-- **`docs/usage.md`.** Every entry point — all five commands, every
-  flag, the browser routes, the three transports — each verified live
-  against the binary. Also corrects the relay token story: the share's
-  `--token` must equal the relay's `--token` (HMAC-checked on
-  registration), and the viewer's must match too for the E2E handshake.
-
-## 0.1.3
-
-### Changed
-
-- **Installs and builds.** Prebuilt `pcc-<version>-<target>` archives
-  and `cargo binstall` support; the `release` profile builds fast
-  (thin LTO) while CI ships a full-optimization `dist` profile; `audio`
-  and `native-viewer` are opt-out features; tokio is trimmed to the
-  named set; `num_cpus` removed. Protocol version 7 two releases in:
-  sharers and viewers must be the same build.
+- **Changelog order.** `0.1.5` had been appended below `0.1.4`/`0.1.3`,
+  and a leftover `Unreleased` heading sat below `0.1.1` while describing
+  work that had already shipped. The releases are now newest-first and
+  the leftover material is labelled as background.
 
 ## 0.1.5 — the relay-hosted viewer release
 
@@ -212,6 +192,48 @@
   `src/`, `tests/`, `examples/` or `benches/`; the line and its
   lockfile entry are gone.
 
+## 0.1.4
+
+### Changed
+
+- **ARM Linux archive.** The release matrix gains `ubuntu-24.04-arm`
+  (native ARM64, no cross-compiling), so `cargo binstall` serves
+  `pcc-<version>-aarch64-unknown-linux-gnu` instead of falling back to
+  a full local compile there. No code change; same `dist` profile and
+  triple-named archive scheme as the other three legs.
+- **MSRV is 1.91.** iroh 1.3 requires rustc 1.91, so the floor moves
+  from 1.88 everywhere it was claimed (`rust-version`, CI, README,
+  release runners). 1.88 was the `time`/RUSTSEC-2026-0009 floor; iroh
+  moved it.
+- **Headless and Windows test fixes.** The cursor sampler uses
+  `DeviceState::checked_new` (no X display reads as `CursorHide`
+  instead of panicking); window/application capture resolves the match
+  before touching the framebuffer (headless still fails fast with "no
+  visible window matches"); the closed-stdin test reads EOF from memory
+  instead of `/dev/null`.
+- **OSV-Scanner ignores with receipts.** `osv-scanner.toml` mirrors the
+  `.cargo/audit.toml` policy for the seven flagged advisories, each
+  entry naming what upstream release lifts it.
+
+### Added
+
+- **`docs/usage.md`.** Every entry point — all five commands, every
+  flag, the browser routes, the three transports — each verified live
+  against the binary. Also corrects the relay token story: the share's
+  `--token` must equal the relay's `--token` (HMAC-checked on
+  registration), and the viewer's must match too for the E2E handshake.
+
+## 0.1.3
+
+### Changed
+
+- **Installs and builds.** Prebuilt `pcc-<version>-<target>` archives
+  and `cargo binstall` support; the `release` profile builds fast
+  (thin LTO) while CI ships a full-optimization `dist` profile; `audio`
+  and `native-viewer` are opt-out features; tokio is trimmed to the
+  named set; `num_cpus` removed. Protocol version 7 two releases in:
+  sharers and viewers must be the same build.
+
 ## 0.1.2
 
 ### Fixed
@@ -316,7 +338,13 @@ A security release. `0.1.0` shipped quinn 0.10.2 and rustls 0.21, and
 carries two remote denial-of-service advisories against the QUIC
 endpoint this product exposes to the internet. Upgrade to `0.1.1`.
 
-## Unreleased
+## Earlier releases (0.1.0–0.1.4) — details
+
+This material was written while those releases were being prepared and
+was never folded into per-version headings. It is kept for provenance:
+the protocol-version history, the dependency and advisory work, the
+packaging metadata, and the browser-encryption design notes that
+produced the current tree.
 
 The wire protocol is version 6. Viewers and sharers must be the same
 build; a version mismatch is refused with a clear message rather than

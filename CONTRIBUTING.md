@@ -65,9 +65,10 @@ scripts/release.sh 0.1.5
 ```
 
 The version argument is the bare number; the tag becomes `v0.1.5`. Before
-running it, write the `## 0.1.5` section in `CHANGELOG.md` — the script
-refuses to run without it, because an untagged release with no notes is
-how versions ship unexplained.
+running it, write the `## 0.1.5` section in `CHANGELOG.md` — at the top,
+directly under `# Changelog`, since the file is newest-first. The script
+refuses to run without that section, because an untagged release with no
+notes is how versions ship unexplained.
 
 The script runs every gate (`fmt`, clippy on both feature configs, full
 tests, release-binary `smoke.sh`), bumps `Cargo.toml` to the version in

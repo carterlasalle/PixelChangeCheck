@@ -5,6 +5,10 @@ The CLI help (`pcc <command> --help`) is generated from the same definitions
 in `src/main.rs`; if this page and `--help` ever disagree, `--help` wins and
 this page has a bug — file it.
 
+New here? The README's [quick start](https://github.com/carterlasalle/PixelChangeCheck#quick-start)
+gets you sharing in two commands and watching from any browser in one;
+this page is the exhaustive reference you reach for after that.
+
 ## Install
 
 ```sh
