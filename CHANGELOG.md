@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 — one-command releases, and the easy path up front
 
 ### Changed
 
