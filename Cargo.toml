@@ -127,7 +127,7 @@ clap = { version = "4.5", features = ["derive"] }
 tiny_http = "0.12"
 
 # Native window viewer
-minifb = { version = "0.27", optional = true }
+minifb = { version = "0.28", optional = true }
 
 # Relay session ids
 rand = "0.8"
