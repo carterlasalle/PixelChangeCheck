@@ -86,7 +86,7 @@ native-viewer = ["dep:minifb"]
 [dependencies]
 # Screen capture
 screenshots = "0.8.5"
-display-info = "0.4.3"
+display-info = "0.5.9"
 
 # Image processing
 image = { version = "0.24", features = ["jpeg", "png"] }
@@ -127,7 +127,7 @@ clap = { version = "4.5", features = ["derive"] }
 tiny_http = "0.12"
 
 # Native window viewer
-minifb = { version = "0.27", optional = true }
+minifb = { version = "0.28", optional = true }
 
 # Relay session ids
 rand = "0.8"
