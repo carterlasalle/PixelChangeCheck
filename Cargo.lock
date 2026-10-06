@@ -2858,7 +2858,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -4291,7 +4291,7 @@ dependencies = [
  "quinn",
  "rand 0.8.6",
  "rand_core 0.6.4",
- "rcgen 0.13.2",
+ "rcgen",
  "rgb",
  "rustls",
  "rustls-native-certs",
@@ -4774,19 +4774,6 @@ dependencies = [
 
 [[package]]
 name = "rcgen"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
-dependencies = [
- "pem 3.0.4",
- "ring",
- "rustls-pki-types",
- "time",
- "yasna 0.5.2",
-]
-
-[[package]]
-name = "rcgen"
 version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
@@ -4796,7 +4783,7 @@ dependencies = [
  "rustls-pki-types",
  "time",
  "x509-parser 0.18.1",
- "yasna 0.6.0",
+ "yasna",
 ]
 
 [[package]]
@@ -4978,7 +4965,7 @@ dependencies = [
  "log",
  "pem 3.0.4",
  "rand 0.10.3",
- "rcgen 0.14.10",
+ "rcgen",
  "rtc-crypto",
  "rtc-datachannel",
  "rtc-dtls",
@@ -5047,7 +5034,7 @@ dependencies = [
  "der-parser 9.0.0",
  "log",
  "pem 3.0.4",
- "rcgen 0.14.10",
+ "rcgen",
  "rkyv",
  "rtc-crypto",
  "rtc-shared",
@@ -7498,15 +7485,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7d8a75eaf6557bb84a65ace8609883db44a29951042ada9b393151532e41fcb"
 dependencies = [
  "xml-rs",
-]
-
-[[package]]
-name = "yasna"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
-dependencies = [
- "time",
 ]
 
 [[package]]
