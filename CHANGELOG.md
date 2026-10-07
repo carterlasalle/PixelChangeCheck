@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.7 — run `pcc` and answer questions
+
+### Added
+
+- **An interactive menu.** Bare `pcc` (and `pcc menu`) walks through what to
+  share, how viewers connect, audio, and approval, then prints the exact command
+  plus the command the other side runs, and offers to start it. It builds argv
+  and feeds it through the same parser as a typed command, so it cannot drift
+  from the flags and its errors are identical. Empty input quits rather than
+  falling through to the first option; bare `pcc` off a terminal still prints
+  help, so scripts are unaffected.
+- **`pcc://` invites can be pasted whole.** `reach::parse_pair_url` is the
+  inverse of `pair_url`/`pair_url_relay`, used by the menu's *View → A link*.
+  Both long values in an invite are easy to mistype and impossible to tell apart
+  once you have, and the relay form puts the *relay's* pin where the direct form
+  puts the *sharer's*. A pasted browser link is correctly treated as "open this",
+  not as a command.
+- **A skill for coding agents** at `.omp/skills/pixelchangecheck/SKILL.md`:
+  every flow, the three secrets (token vs pin vs session), command reference,
+  troubleshooting, and the observability recipes.
+
+### Changed
+
+- `pcc` no longer requires a subcommand. It was an error to run it bare; now it
+  is the entry point.
+
 ## 0.1.6 — one-command releases, and the easy path up front
 
 ### Changed

@@ -345,6 +345,26 @@ GATE=$($BIN share --audio-source bogus --synthetic --no-listen --no-web --token 
 check "an unknown --audio-source is refused with the choices" \
   "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "no gate message"
 
+# ------------------------------------------------- interactive menu
+# The menu is a front end that builds argv for the same parser, so what it
+# prints must be the command a typed invocation would be.
+echo "checking the interactive menu"
+MENU_OUT=$(printf '2\n1\npcc://view?connect=127.0.0.1:1&pin=aa11&token=TOKEN1234\nn\nn\nn\n' | \
+  $BIN menu 2>/dev/null)
+GATE=$(printf '%s' "$MENU_OUT" | grep -c -- 'view --connect 127.0.0.1:1 --pin aa11 --token TOKEN1234')
+check "a pasted invite becomes the matching view command" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "no matching command printed"
+# Empty input must quit rather than fall through to the first option, or a
+# script that pipes nothing would start sharing the screen.
+printf '' | $BIN menu >/dev/null 2>&1
+MENU_EOF=$?
+check "the menu quits on empty input" \
+  "$([ "$MENU_EOF" -eq 0 ] && echo 0 || echo 1)" "exit $MENU_EOF"
+# Off a terminal, bare `pcc` must print usage rather than wait on a prompt.
+GATE=$($BIN < /dev/null 2>&1 | grep -c "Usage: pcc")
+check "bare pcc off a terminal prints usage" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "no usage printed"
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
   echo "smoke: all checks passed"

@@ -9,6 +9,30 @@ New here? The README's [quick start](https://github.com/carterlasalle/PixelChang
 gets you sharing in two commands and watching from any browser in one;
 this page is the exhaustive reference you reach for after that.
 
+## `pcc` with no arguments — the interactive menu
+
+```sh
+pcc          # on a terminal: walk through the choices
+pcc menu     # the same, explicitly, even off a terminal
+```
+
+Walks through what to share, how viewers connect, audio, and whether to ask
+before admitting each viewer; prints the exact command plus what the other side
+runs; offers to start it. It parses a pasted `pcc://view?...` invite whole, and
+recognizes a pasted `https://…/v/<session>/#token=…` browser link as something
+to open rather than a command to run.
+
+Two properties worth relying on:
+
+- **It cannot drift from the flags.** Every path builds an argv and feeds it
+  through the same parser a typed command goes through, so a menu-built command
+  is validated identically, including its errors.
+- **Empty input quits.** `pcc menu < /dev/null` must never fall through to the
+  first option and start sharing the screen.
+
+Bare `pcc` *off* a terminal prints the help instead, so scripts that run `pcc`
+are unaffected.
+
 ## Install
 
 ```sh

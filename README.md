@@ -63,6 +63,24 @@ The diff is against the **reference** — the framebuffer an up-to-date viewer h
 
 ## Quick start
 
+### The easiest path: answer questions
+
+```sh
+pcc
+```
+
+That is the whole thing. Run with no arguments, `pcc` walks you through what to
+share, how viewers connect, audio, and whether to ask before admitting each
+viewer — then prints the exact command **and what the other person runs**, and
+offers to start it. Nothing is hidden behind flags.
+
+`pcc menu` does the same when you want it explicitly (or off a terminal).
+
+If a viewer sends you a `pcc://view?...` link, choose *View → A link* and paste
+it whole: both long values in it — the token, and a pin that means the *relay*
+in one form and the *sharer* in the other — are easy to mistype and impossible to
+tell apart afterwards.
+
 ### The 30-second version
 
 On the machine you want to show:
@@ -475,6 +493,7 @@ roadmap is in `docs/spec/roadmap.md`.
 | Document | Purpose |
 |---|---|
 | [Usage](docs/usage.md) | Every entry point — all five commands, every flag, the browser routes, the three transports — with how to invoke each |
+| [Agent skill](.omp/skills/pixelchangecheck/SKILL.md) | Every flow, the three secrets, troubleshooting, and the observability recipes, written to be read by a coding agent |
 | [Architecture decisions](docs/adr/) | Why the surface is lossless, how tokens and pins work, and how sequencing is enforced |
 | [Roadmap](docs/spec/roadmap.md) | The specified workstreams and their definition of done |
 | [Design](DESIGN.md) | Product and design guidance, including what was deliberately not built |

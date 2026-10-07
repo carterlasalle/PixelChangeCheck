@@ -229,6 +229,117 @@ pub fn pair_url_relay(relay: &str, pin: &str, session: &str, token: &str) -> Str
     )
 }
 
+/// The pieces of a `pcc://view?...` invite, as produced by [`pair_url`]
+/// and [`pair_url_relay`].
+///
+/// Exactly one of `connect` and `relay` is set: the first is a direct
+/// address, the second a relay plus its session code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairInvite {
+    pub connect: Option<String>,
+    pub relay: Option<String>,
+    pub pin: String,
+    pub session: Option<String>,
+    pub token: String,
+}
+
+impl PairInvite {
+    /// The `pcc view` arguments this invite stands for, ready to hand to
+    /// the same parser the flags go through.
+    pub fn to_view_args(&self) -> Vec<String> {
+        let mut args = vec!["view".to_string()];
+        if let Some(c) = &self.connect {
+            args.push("--connect".into());
+            args.push(c.clone());
+        }
+        if let Some(r) = &self.relay {
+            args.push("--relay".into());
+            args.push(r.clone());
+        }
+        if let Some(s) = &self.session {
+            args.push("--session".into());
+            args.push(s.clone());
+        }
+        args.push("--pin".into());
+        args.push(self.pin.clone());
+        args.push("--token".into());
+        args.push(self.token.clone());
+        args
+    }
+}
+
+/// Parse a `pcc://view?...` invite back into its pieces.
+///
+/// This is the inverse of [`pair_url`] / [`pair_url_relay`], and it exists
+/// so an invite can be pasted whole rather than decomposed by hand — the
+/// pin and the token are both long opaque strings, and the relay form puts
+/// the *relay's* pin where the direct form puts the sharer's, which is the
+/// mistake this is meant to make impossible.
+pub fn parse_pair_url(raw: &str) -> Result<PairInvite, String> {
+    let rest = raw
+        .trim()
+        .strip_prefix("pcc://")
+        .ok_or_else(|| "an invite starts with pcc:// — this does not".to_string())?;
+    let (kind, query) = rest
+        .split_once('?')
+        .ok_or_else(|| "an invite needs a ? before its fields".to_string())?;
+    if kind != "view" {
+        return Err(format!("unknown invite kind '{kind}'; expected 'view'"));
+    }
+
+    let mut connect = None;
+    let mut relay = None;
+    let mut pin = None;
+    let mut session = None;
+    let mut token = None;
+    for field in query.split('&') {
+        if field.is_empty() {
+            continue;
+        }
+        let (key, value) = field
+            .split_once('=')
+            .ok_or_else(|| format!("invite field '{field}' has no '='"))?;
+        if value.is_empty() {
+            return Err(format!("invite field '{key}' is empty"));
+        }
+        let slot = match key {
+            "connect" => &mut connect,
+            "relay" => &mut relay,
+            "pin" => &mut pin,
+            "session" => &mut session,
+            "token" => &mut token,
+            other => return Err(format!("unknown invite field '{other}'")),
+        };
+        if slot.is_some() {
+            return Err(format!("invite repeats the '{key}' field"));
+        }
+        *slot = Some(value.to_string());
+    }
+
+    // The two forms are mutually exclusive, and saying so beats silently
+    // preferring one: a link carrying both was assembled by hand.
+    if connect.is_some() && relay.is_some() {
+        return Err("invite has both connect= and relay=".to_string());
+    }
+    if connect.is_none() && relay.is_none() {
+        return Err("invite has neither connect= nor relay=".to_string());
+    }
+
+    let pin = pin.ok_or_else(|| "invite is missing pin=".to_string())?;
+    let token = token.ok_or_else(|| "invite is missing token=".to_string())?;
+    if relay.is_some() && session.is_none() {
+        return Err("a relay invite needs session=".to_string());
+    }
+
+    Ok(PairInvite {
+        connect,
+        relay,
+        pin,
+        session,
+        token,
+    })
+}
+
 /// The `pcc doctor` output: reachability, plus whether audio is available.
 pub fn render_doctor(reach: &Report, audio: Option<String>) -> String {
     let mut out = render(reach);
@@ -494,5 +605,62 @@ mod tests {
         assert!(Rung::PortMapping < Rung::StunIce);
         assert!(Rung::StunIce < Rung::Relay);
         assert!(!Rung::Relay.is_direct());
+    }
+
+    /// The parser is the inverse of the two builders, so anything the
+    /// builders emit must come back identical. A drift here is silent:
+    /// the viewer would connect to the wrong endpoint or with the wrong
+    /// pin, and both failures look like a network problem.
+    #[test]
+    fn every_invite_the_builders_emit_parses_back() {
+        let direct = pair_url("10.0.0.5:5800", "aa11", "TOKEN1234");
+        let invite = parse_pair_url(&direct).expect("direct invite should parse");
+        assert_eq!(invite.connect.as_deref(), Some("10.0.0.5:5800"));
+        assert_eq!(invite.relay, None);
+        assert_eq!(invite.pin, "aa11");
+        assert_eq!(invite.token, "TOKEN1234");
+        assert_eq!(
+            invite.to_view_args(),
+            vec![
+                "view",
+                "--connect",
+                "10.0.0.5:5800",
+                "--pin",
+                "aa11",
+                "--token",
+                "TOKEN1234",
+            ]
+        );
+
+        let relay = pair_url_relay("relay.example:5900", "bb22", "S9", "TOKEN1234");
+        let invite = parse_pair_url(&relay).expect("relay invite should parse");
+        assert_eq!(invite.relay.as_deref(), Some("relay.example:5900"));
+        assert_eq!(invite.connect, None);
+        assert_eq!(invite.session.as_deref(), Some("S9"));
+        assert!(invite.to_view_args().contains(&"--session".to_string()));
+    }
+
+    /// Each of these would otherwise become a confusing connection error
+    /// rather than a named cause.
+    #[test]
+    fn malformed_invites_are_refused_with_a_reason() {
+        assert!(parse_pair_url("https://relay/v/S/#token=T")
+            .unwrap_err()
+            .contains("pcc://"));
+        assert!(parse_pair_url("pcc://view?pin=a&token=T")
+            .unwrap_err()
+            .contains("neither"));
+        assert!(parse_pair_url("pcc://view?connect=a&relay=b&pin=p&token=T")
+            .unwrap_err()
+            .contains("both"));
+        assert!(parse_pair_url("pcc://view?connect=a&token=T")
+            .unwrap_err()
+            .contains("missing pin"));
+        assert!(parse_pair_url("pcc://view?relay=r&pin=p&token=T")
+            .unwrap_err()
+            .contains("session"));
+        assert!(parse_pair_url("pcc://view?connect=a&pin=p&token=T&typo=1")
+            .unwrap_err()
+            .contains("unknown"));
     }
 }
