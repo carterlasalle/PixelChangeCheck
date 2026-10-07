@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use pixel_change_check_client::app::{share, view};
 use pixel_change_check_client::network::{SessionToken, DEFAULT_PORT};
 use pixel_change_check_client::reach;
 use pixel_change_check_client::relay;
 use pixel_change_check_client::telemetry::{self, LogFormat, Metrics};
+use std::io::IsTerminal;
 use std::time::Duration;
 
 const DEFAULT_RELAY_PORT: u16 = 5900;
@@ -33,8 +34,10 @@ struct Cli {
     /// Serve Prometheus metrics on this address.
     #[arg(long, global = true)]
     metrics_listen: Option<String>,
+    /// Which subcommand to run. Omitted, `pcc` walks you through the
+    /// choices interactively instead of printing usage.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 /// How hard to try for a direct connection.
@@ -262,6 +265,9 @@ enum Commands {
         #[arg(long)]
         web: bool,
     },
+    /// Walk through the options interactively, printing (and optionally
+    /// running) the exact command. This is what bare `pcc` does.
+    Menu,
 }
 
 fn token_from(arg: Option<&String>, what: &str) -> Result<SessionToken> {
@@ -276,7 +282,55 @@ fn token_from(arg: Option<&String>, what: &str) -> Result<SessionToken> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let Some(cli) = resolve_menu(Cli::parse())? else {
+        return Ok(());
+    };
+    run(cli)
+}
+
+/// Turn a bare `pcc` (or an explicit `pcc menu`) into a real command by
+/// interviewing the user.
+///
+/// The menu builds an argv and this parses it back through the same `Cli`,
+/// so a menu-built command is validated and dispatched exactly like a
+/// typed one — including the errors, which stay identical.
+fn resolve_menu(cli: Cli) -> Result<Option<Cli>> {
+    match &cli.command {
+        Some(Commands::Menu) => {}
+        // Bare `pcc` on a terminal means "walk me through it". Off a
+        // terminal it means "tell me the options", because a script that
+        // runs `pcc` must not be answered with a prompt.
+        None if std::io::stdin().is_terminal() => {}
+        None => {
+            Cli::command().print_help()?;
+            println!();
+            return Ok(None);
+        }
+        Some(_) => return Ok(Some(cli)),
+    }
+
+    let outcome =
+        pixel_change_check_client::menu::run(&mut std::io::stdin().lock(), &mut std::io::stdout())?;
+    match outcome {
+        pixel_change_check_client::menu::Outcome::Quit => Ok(None),
+        pixel_change_check_client::menu::Outcome::Run(argv) => {
+            let mut full = vec!["pcc".to_string()];
+            full.extend(argv);
+            let mut parsed = Cli::parse_from(full);
+            // Carry over the global flags the user typed on the outer
+            // invocation; re-parsing the menu's argv would otherwise reset
+            // them to their defaults.
+            parsed.log_level = cli.log_level;
+            parsed.log_format = cli.log_format;
+            parsed.log_file = cli.log_file;
+            parsed.stats_interval = cli.stats_interval;
+            parsed.metrics_listen = cli.metrics_listen;
+            Ok(Some(parsed))
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     // The guard must outlive everything, or the last events are dropped.
     let _log_guard =
         telemetry::logging::init(&cli.log_level, cli.log_format, cli.log_file.as_deref())?;
@@ -308,7 +362,14 @@ fn main() -> Result<()> {
         })?;
     }
 
-    match cli.command {
+    // `resolve_menu` returns a parsed command or nothing to do; the
+    // `Menu` arm cannot survive it, and saying so beats an unreachable
+    // panic in a match arm.
+    let Some(command) = cli.command else {
+        return Ok(());
+    };
+    match command {
+        Commands::Menu => Ok(()),
         Commands::Share {
             listen,
             no_listen,
