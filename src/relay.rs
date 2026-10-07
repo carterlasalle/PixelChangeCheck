@@ -526,6 +526,39 @@ pub async fn run_relay_server_with(
         identity.fingerprint
     );
 
+    // Everything below is a real value — the token, the pin, and an address
+    // a remote side can actually dial. Printing `<this-host>` and
+    // `<token>` placeholders here is what made a first setup a guessing
+    // game: the operator had the values on screen and still had to
+    // reassemble them by hand.
+    let bound = listener.local_addr()?;
+    let dial = if bound.ip().is_unspecified() {
+        // A wildcard bind is not an address anyone can dial.
+        crate::reach::outbound_address_for(bound.port()).unwrap_or(bound)
+    } else {
+        bound
+    };
+    println!();
+    println!("On the machine being shared, run:");
+    println!(
+        "  pcc share --relay {dial} --relay-pin {} --token {}",
+        identity.fingerprint,
+        token.as_str()
+    );
+    println!();
+    println!("Viewers then run (using the session code the sharer prints):");
+    println!(
+        "  pcc view --relay {dial} --pin {} --session <session> --token {}",
+        identity.fingerprint,
+        token.as_str()
+    );
+    if serve_web {
+        println!();
+        println!("Or open this in any browser once the sharer is running:");
+        println!("  https://{dial}/v/<session>/#token={}", token.as_str());
+    }
+    println!();
+
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let next_gen = Arc::new(AtomicU64::new(1));
     let failures: Arc<Mutex<HashMap<std::net::SocketAddr, (u32, Instant)>>> =

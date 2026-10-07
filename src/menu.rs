@@ -276,7 +276,17 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
     let mut relay_pin = None;
     let mut session = String::new();
     if route >= 1 {
-        let addr = ask(input, out, "Relay address as host:port", "")?;
+        let _ = writeln!(
+            out,
+            "\n  Use the address the relay printed when it started — its\n  \
+             `relay listening on …` line, or the `pcc share --relay …` line it\n  \
+             printed for you to copy. If the relay runs on this machine, that\n  \
+             is 127.0.0.1:5900.\n  \
+             No relay yet? Quit here and run `pcc` → \"Run a relay\" in another\n  \
+             terminal; it prints a complete `pcc share …` line you can paste\n  \
+             straight back into this one."
+        );
+        let addr = ask(input, out, "Relay address as host:port", "127.0.0.1:5900")?;
         if addr.is_empty() {
             let _ = writeln!(out, "  (a relay address is required — stopping)");
             return Ok(Outcome::Quit);
@@ -370,11 +380,34 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
     if !browser {
         args.push("--no-web".into());
     }
-    // A token the menu chose, so the viewer instructions below are complete
-    // rather than "read it off the sharer's output".
-    let token = SessionToken::generate();
+    // Through a relay the token is not ours to choose. The share's --token
+    // must equal the *relay's* --token or registration is refused with
+    // `bad credential`, so generating one here would guarantee failure on
+    // the one path this menu exists to make easy. Only a direct share gets
+    // a generated token, and then it is generated so the viewer
+    // instructions below are complete rather than "read it off the output".
+    let token = if relay_addr.is_some() {
+        let t = ask(
+            input,
+            out,
+            "Relay token (the `relay token:` line the relay printed)",
+            "",
+        )?;
+        if t.is_empty() {
+            let _ = writeln!(
+                out,
+                "\n  A relay share must use the relay's own token, and the relay\n  \
+                 refuses to register without it. Stopping rather than starting a\n  \
+                 session that cannot connect."
+            );
+            return Ok(Outcome::Quit);
+        }
+        t
+    } else {
+        SessionToken::generate().as_str().to_string()
+    };
     args.push("--token".into());
-    args.push(token.as_str().to_string());
+    args.push(token.clone());
 
     show(out, "Command", &args);
     let _ = writeln!(
@@ -387,19 +420,14 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
             let _ = writeln!(out, "  Viewer (another machine, nothing else needed):");
             let _ = writeln!(
                 out,
-                "    pcc view --relay {addr} --pin {pin} --session {session} --token {}",
-                token.as_str()
+                "    pcc view --relay {addr} --pin {pin} --session {session} --token {token}"
             );
             if browser {
                 let _ = writeln!(
                     out,
                     "\n  Viewer (any browser — needs `pcc relay --web` on the relay):"
                 );
-                let _ = writeln!(
-                    out,
-                    "    https://{addr}/v/{session}/#token={}",
-                    token.as_str()
-                );
+                let _ = writeln!(out, "    https://{addr}/v/{session}/#token={token}");
             }
         }
     } else {
@@ -574,18 +602,22 @@ fn relay<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
     show(out, "Command", &args);
     let _ = writeln!(
         out,
-        "\n  It prints its own token and certificate pin. Keep it running.\n\n  \
-         On the machine being shared, run:\n    \
-         pcc share --relay <this-host>:{port} --relay-pin <the pin it printed> --token <its token>\n\n  \
-         On the other machine, run:\n    \
-         pcc view --relay <this-host>:{port} --pin <the same pin> --session <code> --token <the same token>\n\n  \
-         The token is one value shared by all three: the relay's --token must\n  \
-         equal the sharer's --token, and the viewer's must match too. Getting\n  \
-         that wrong is the most common failure, and it reports itself as\n  \
-         `bad credential`.",
-        port = listen.rsplit_once(':').map(|(_, p)| p).unwrap_or("5900")
+        "\n  Leave it running: it stays in the foreground of this terminal, so\n  \
+         open a second terminal on this machine for the sharer.\n\n  \
+         The moment it starts, the relay prints a complete line beginning\n  \
+         `pcc share --relay …` with its own token and pin already filled in.\n  \
+         Copy that whole line to the machine being shared and run it there.\n  \
+         Nothing needs retyping, and the token is guaranteed to be the right\n  \
+         one — a share whose token disagrees with the relay's is refused with\n  \
+         `bad credential`."
     );
-    if !web {
+    if web {
+        let _ = writeln!(
+            out,
+            "\n  It also prints the browser link, so a viewer can watch with only\n  \
+             a URL once the sharer is running."
+        );
+    } else {
         let _ = writeln!(
             out,
             "\n  You chose not to serve the browser viewer, so viewers need the\n  \
@@ -728,17 +760,49 @@ mod tests {
         assert!(matches!(outcome, Outcome::Quit));
     }
 
-    /// Sharing through a relay proves the viewer line is complete.
+    /// Sharing through a relay proves the viewer line is complete, and that
+    /// the token is the *relay's* — generating one here would guarantee
+    /// `bad credential` on the one path this menu exists to make easy.
     #[test]
-    fn relay_share_prints_a_complete_viewer_command() {
-        let (outcome, text) = drive("1\n1\n2\nrelay.example:5900\ndeadbeef\nSESS\n1\ny\nn\ny\n");
+    fn relay_share_uses_the_relay_token_not_a_generated_one() {
+        let (outcome, text) =
+            drive("1\n1\n2\nrelay.example:5900\ndeadbeef\nSESS\n1\ny\nn\nRELAYTOKEN\ny\n");
         match outcome {
             Outcome::Run(args) => {
                 assert_eq!(args[0], "share");
                 assert!(args.contains(&"--relay".to_string()));
                 assert!(args.contains(&"--relay-pin".to_string()));
                 let token = args[args.iter().position(|a| a == "--token").unwrap() + 1].clone();
+                assert_eq!(token, "RELAYTOKEN");
                 assert!(text.contains(&format!("--session SESS --token {token}")));
+            }
+            _ => panic!("expected a share command"),
+        }
+    }
+
+    /// A relay share with no token cannot work, so it must stop rather than
+    /// start a session that will be refused.
+    #[test]
+    fn a_relay_share_without_a_token_stops() {
+        let (outcome, text) = drive("1\n1\n2\nrelay.example:5900\ndeadbeef\nSESS\n1\ny\nn\n\nn\n");
+        assert!(matches!(outcome, Outcome::Quit));
+        assert!(text.contains("relay's own token"));
+    }
+
+    /// A direct share has no relay token to borrow, so it must generate one
+    /// (and print it in the viewer line).
+    #[test]
+    fn a_direct_share_generates_a_token() {
+        let (outcome, text) = drive("1\n1\n1\n1\ny\nn\ny\n");
+        match outcome {
+            Outcome::Run(args) => {
+                let token = args[args.iter().position(|a| a == "--token").unwrap() + 1].clone();
+                assert!(
+                    token.len() >= 8,
+                    "a generated token must satisfy the parser"
+                );
+                assert!(!args.contains(&"--relay".to_string()));
+                assert!(text.contains(&token));
             }
             _ => panic!("expected a share command"),
         }

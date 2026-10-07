@@ -284,6 +284,18 @@ for _ in $(seq 1 40); do
 done
 check "relay printed its certificate pin" "$([ -n "$RELAY_PIN" ] && echo 0 || echo 1)" "no pin in relay.log"
 
+# The operator should never have to reassemble a command from placeholders:
+# the relay knows its token, its pin and its port, so it must print a line
+# that runs as-is. `<this-host>` and `<token>` here cost a first-time user a
+# whole round of guesswork.
+RELAY_INVITE=$(grep -E '^  pcc share --relay ' "$LOG_DIR/relay.log" 2>/dev/null | head -1)
+GATE=$(printf '%s' "$RELAY_INVITE" | grep -c -- "--relay-pin [0-9a-f]\{64\} --token $TOKEN$")
+check "the relay prints a copy-pasteable share line with real values" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "got: ${RELAY_INVITE:-<none>}"
+GATE=$(printf '%s' "$RELAY_INVITE" | grep -c '<this-host>\|<token>\|<session>')
+check "that line contains no placeholders" \
+  "$([ "$GATE" -eq 0 ] && echo 0 || echo 1)" "got: $RELAY_INVITE"
+
 $BIN share --synthetic --no-listen --no-web \
   --relay "127.0.0.1:$RELAY_PORT" --relay-pin "$RELAY_PIN" \
   --session SMOKE --token "$TOKEN" --fps 10 > "$LOG_DIR/share2.log" 2>&1 &

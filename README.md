@@ -109,34 +109,29 @@ pcc relay --listen 0.0.0.0:5900 --web
 ```
 
 `--web` makes the relay serve the browser viewer too, on the same port and
-behind the same certificate. The relay prints its own token and fingerprint.
-On the machine being shared:
-
-```sh
-pcc share --relay <relay-ip>:5900 --relay-pin <relay-fingerprint> --token <token>
-```
-
-That `<token>` must be the **relay's** token, exactly as the relay printed
-it — the share and the relay authenticate with the same string, and a
-mismatch closes the connection with `bad credential`.
-
-That prints two one-line invites. Send the **browser** one:
+behind the same certificate. It prints its token, its certificate fingerprint,
+and then **a complete share line you can copy verbatim** — its own token and pin
+already filled in, and an address a remote side can actually dial:
 
 ```text
-Viewer link:  pcc://view?relay=…&pin=…&session=…&token=…
-Browser link: https://<relay-ip>:5900/v/<session>/#token=…
+On the machine being shared, run:
+  pcc share --relay 203.0.113.5:5900 --relay-pin e495ea… --token LBYYJV…
 ```
 
-The other person opens the browser link on a phone, a Chromebook, anything —
-no binary, no terminal, no configuration. The token rides in the URL fragment
-(after `#`), which the browser never sends as part of the request.
+Run that on the machine being shared. It prints a `Viewer link: pcc://…` and a
+`Browser link: https://…`; send either one. The browser link needs nothing
+installed on the other end — just open it.
 
-Two notes for a real deployment:
-- Without `--cert`/`--cert-key` the relay generates a certificate per
-  process, so browsers warn and the fingerprint changes on every restart.
-  Supply a real certificate (and a stable identity) for anything beyond a
-  test: `pcc relay --listen 0.0.0.0:5900 --web --cert relay.pem --cert-key relay-key.pem`.
-- Prefer not to copy the relay's fingerprint by hand? `pcc pair --relay <relay-ip>:5900 --session <code> --token <token>` reads it straight from the relay's certificate and prints the same link.
+Two things that will otherwise cost you a round trip:
+
+- The share's `--token` must be the **relay's** token, exactly as printed. One
+  value across all three sides; a mismatch closes with `bad credential`.
+- Without `--cert`/`--cert-key` the relay generates a certificate per process,
+  so browsers warn and the fingerprint changes on restart. Supply a real
+  certificate for anything beyond a test.
+
+`pcc` with no arguments walks through all of this interactively and prints the
+same lines for you.
 
 ### Prerequisites
 
@@ -493,7 +488,7 @@ roadmap is in `docs/spec/roadmap.md`.
 | Document | Purpose |
 |---|---|
 | [Usage](docs/usage.md) | Every entry point — all five commands, every flag, the browser routes, the three transports — with how to invoke each |
-| [Agent skill](.omp/skills/pixelchangecheck/SKILL.md) | Every flow, the three secrets, troubleshooting, and the observability recipes, written to be read by a coding agent |
+| [Agent skill](skills/pixelchangecheck/SKILL.md) | Every flow, the three secrets, troubleshooting, and the observability recipes, written to be read by a coding agent (also installed at `.omp/skills/pixelchangecheck/SKILL.md`) |
 | [Architecture decisions](docs/adr/) | Why the surface is lossless, how tokens and pins work, and how sequencing is enforced |
 | [Roadmap](docs/spec/roadmap.md) | The specified workstreams and their definition of done |
 | [Design](DESIGN.md) | Product and design guidance, including what was deliberately not built |

@@ -521,6 +521,28 @@ pub fn lan_address_for(port: u16) -> Option<SocketAddr> {
         .map(|a| SocketAddr::new(a.ip(), port))
 }
 
+/// The address a peer *off this network* should dial: the local address of
+/// the interface the default route uses.
+///
+/// This is the relay's case, not the sharer's. A relay on a VPS binds
+/// `0.0.0.0` and has a public address, so `lan_address_for` is wrong there
+/// (it returns the provider's private network, which nobody can reach) and
+/// the bound address is `0.0.0.0`, which is not an address at all. The
+/// routing table knows the right answer and this asks it.
+///
+/// `connect` on a UDP socket only sets the destination; it sends nothing,
+/// so this is instant and touches no network.
+pub fn outbound_address_for(port: u16) -> Option<SocketAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // TEST-NET-3, so the route is the default route and never a real peer.
+    sock.connect("203.0.113.1:9").ok()?;
+    let local = sock.local_addr().ok()?;
+    if local.ip().is_unspecified() || local.ip().is_loopback() {
+        return None;
+    }
+    Some(SocketAddr::new(local.ip(), port))
+}
+
 /// A UDP "connect" to a public address and a zero-length send is the
 /// portable way to ask the routing table whether a default route exists,
 /// without parsing platform routing tables.

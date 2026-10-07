@@ -592,14 +592,10 @@ fn run(cli: Cli) -> Result<()> {
                     .with_context(|| format!("Failed to bind relay on {addr}"))?;
                 let bound = listener.local_addr()?;
                 println!("relay listening on {bound}");
-                if web {
-                    // The page lives on this same port, behind the same
-                    // certificate, because the relay is the one host both
-                    // sides can already reach. The viewer URL names the
-                    // session, so only the operator can print a complete
-                    // link; this line says what shape it takes.
-                    println!("browser viewer: https://{bound}/v/<session>/#token=<token>");
-                }
+                // The copy-paste invite is printed by the relay itself,
+                // once, after it has its identity: it owns the pin, the
+                // token and the bound port, so it is the only place that
+                // can print them together and correctly.
                 relay::run_relay_server_with(listener, identity, token, web).await
             })
         }

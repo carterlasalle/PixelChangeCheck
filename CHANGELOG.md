@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.8 — the relay prints the command for you
+
+### Fixed
+
+- **The relay printed placeholders instead of values.** It knew its token and
+  its pin and still told you to run
+  `pcc share --relay <this-host>:5900 --relay-pin <the pin it printed> --token <its token>`,
+  and its browser line said `https://0.0.0.0:5900/v/<session>/#token=<token>` —
+  an address nobody can dial, with the token it had just generated hidden. It
+  now prints a complete `pcc share --relay …` line with the real token, the real
+  pin, and an address from the interface the default route uses (a wildcard bind
+  is not an address). Copy one line to the machine being shared.
+- **The menu generated a token for relay shares.** The share's `--token` must
+  equal the *relay's*, so a generated one guaranteed `bad credential` — the
+  exact failure the menu exists to prevent. It now asks for the relay's token
+  and stops rather than starting a session that cannot connect.
+- **The menu asked for values without saying where they come from.** The relay
+  address prompt now says it is the address the relay printed, offers
+  `127.0.0.1:5900` for a relay on this machine, and says what to do if you have
+  no relay yet. The relay branch no longer prints `<this-host>` placeholders;
+  it explains that the relay prints the real line, and that it holds the
+  terminal.
+
 ## 0.1.7 — run `pcc` and answer questions
 
 ### Added
