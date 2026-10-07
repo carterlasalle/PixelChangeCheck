@@ -335,6 +335,12 @@ if kill -0 $VIEW2_PID 2>/dev/null && kill -0 $SHARE2_PID 2>/dev/null; then
 else
   fail "a viewer receives frames through the relay" "$(tail -3 "$LOG_DIR/view2.log")"
 fi
+# A frame the relay refuses to forward is a framing bug, and the usual cause
+# is a stream that was left mid-frame — which is what a cancel-unsafe read
+# under `select!` produces. Nothing valid should ever trip it.
+GATE=$(grep -c "too large" "$LOG_DIR/relay.log" 2>/dev/null || echo 0)
+check "the relay refused no frames it forwarded" \
+  "$([ "$GATE" -eq 0 ] && echo 0 || echo 1)" "$GATE oversized frame(s) in relay.log"
 
 # ------------------------------------------------- relay-hosted browser
 echo "checking the relay-hosted browser viewer"

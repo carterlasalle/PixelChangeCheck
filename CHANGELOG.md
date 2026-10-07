@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.10 — a viewer through a relay is no longer dropped
+
+### Fixed
+
+- **The relay lost every viewer a second after its first snapshot.** The
+  relay's forwarding loop read the socket inside a `tokio::select!`, and
+  `read_exact` is not cancel-safe: when the write arm won the race — which
+  it does exactly while the relay is streaming a snapshot back — the
+  in-flight read was dropped after consuming the 4-byte length but before
+  the payload. The next frame was then decoded from the middle of the
+  previous one, so the relay saw a nonsense length and disconnected the
+  peer with `Framed message too large`. Loopback rarely lost the race and
+  hid it; a viewer over the tailnet lost it every time. The read now runs
+  in its own task and the loop awaits a channel, which is cancel-safe.
+  Verified by the scenario that reproduced it: a Mac sharing into a relay
+  on a VPS with a second process watching through it.
+- **`Framed message too large` now names the bytes it read**, not only the
+  decoded length. A misaligned stream is the usual cause and the raw
+  prefix is what distinguishes it from a peer genuinely sending something
+  absurd.
+
+### Changed
+
+- **The menu no longer reads the relay store itself.** It is passed in, so
+  a test on a machine that has a real `~/.config/pcc/relays.json` behaves
+  the same as one that does not. Adding the saved-relay picker broke four
+  menu tests that way, on a machine where a relay happened to be saved.
+
 ## 0.1.9 — pick a relay, paste nothing
 
 ### Added

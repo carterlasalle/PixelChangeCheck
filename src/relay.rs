@@ -869,25 +869,49 @@ async fn handle_relay_client(
             break;
         }
     }
+    // The reader lives in its own task and hands frames over a channel.
+    //
+    // `select!` cancels whichever future loses each race, and
+    // `read_exact` is *not* cancel-safe: a read cancelled after it has
+    // consumed the 4-byte length but before the payload leaves the stream
+    // mid-frame, so the next frame is decoded from the middle of the
+    // previous one. That is not theoretical — it is the "Framed message
+    // too large" a viewer over a relay hit one second after its first
+    // snapshot, when the relay was busy writing that snapshot back.
+    // Awaiting a channel is cancel-safe; awaiting a half-finished read is
+    // not.
+    let (in_tx, mut in_rx) = mpsc::channel::<Result<Option<Vec<u8>>>>(1);
+    tokio::spawn(async move {
+        loop {
+            let next = if host_channel {
+                // Split `[len][id][env]` into its parts; the unicast arm
+                // below reattaches the length it forwards.
+                read_host_frame(&mut read_half).await.map(|o| {
+                    o.map(|(id, env)| {
+                        let mut framed = Vec::with_capacity(8 + env.len());
+                        framed.extend_from_slice(&id.to_le_bytes());
+                        framed.extend_from_slice(&env);
+                        framed
+                    })
+                })
+            } else {
+                read_frame(&mut read_half).await
+            };
+            // A frame or an error ends this peer; the channel closing is
+            // what the loop below sees.
+            let terminal = !matches!(next, Ok(Some(_)));
+            if in_tx.send(next).await.is_err() || terminal {
+                break;
+            }
+        }
+    });
+
     loop {
         tokio::select! {
-            // Inbound: forward to the counterpart(s).
-            inbound = async {
-                if host_channel {
-                    // Split `[len][id][env]` into its parts; the unicast
-                    // arm below reattaches the length it forwards.
-                    read_host_frame(&mut read_half).await.map(|o| {
-                        o.map(|(id, env)| {
-                            let mut framed = Vec::with_capacity(8 + env.len());
-                            framed.extend_from_slice(&id.to_le_bytes());
-                            framed.extend_from_slice(&env);
-                            framed
-                        })
-                    })
-                } else {
-                    read_frame(&mut read_half).await
-                }
-            } => {
+            // Inbound: forward to the counterpart(s). The read itself is
+            // in the task above, so this arm only awaits the channel.
+            inbound = in_rx.recv() => {
+                let Some(inbound) = inbound else { break };
                 let Some(framed) = inbound? else { break }; // EOF
                 let len = framed.len();
 

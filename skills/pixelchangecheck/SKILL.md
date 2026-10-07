@@ -246,7 +246,9 @@ line; they paste it into `pcc menu`.
 | Symptom | Cause and fix |
 |---|---|
 | `clang: error: no input files` | You are running Homebrew's Portable C Compiler. Fix PATH (above). |
-| `bad credential` | The sharer's `--token` does not equal the **relay's** `--token`. It is one value across all three sides. |
+| Viewer is dropped a second after its first snapshot, relay logs `Framed message too large` | A framing bug, not a network one: a read that is not cancel-safe left the stream mid-frame. Fixed in 0.1.10 — the relay's read runs in its own task and the loop awaits a channel. `select!` cancels the loser of each race, so never await a partially-completed `read_exact` inside one. |
+| `bad credential` | The sharer's `--token` does not equal the **relay's** `--token`. It is one value across all three sides. Prefer `pcc relay --remember <name>` + `pcc share --use <name>`, which make the mismatch impossible. |
+| Relay works in one direction only / a host cannot reach its own relay | The relay was dialed at the machine's own public address. `reach::prefer_local` rewrites an address that names this host to loopback before connecting. |
 | `token too short: N chars (min 8)` | `--token` has a minimum length. |
 | Certificate/pin error | You used the **sharer's** pin where the **relay's** belongs (or vice versa). They are both 64 hex characters. |
 | Browser warns about the certificate | The relay generated a self-signed identity. Pass `--cert`/`--cert-key`. |

@@ -480,8 +480,12 @@ pub fn read_len_prefix_with_slack(len_buf: &[u8; 4], slack: usize) -> Result<usi
     let len = u32::from_le_bytes(*len_buf);
     let cap = MAX_MESSAGE_SIZE + 5 + slack as u32;
     if len > cap {
+        // The raw bytes, not only the decoded length: the usual cause is a
+        // stream that is misaligned rather than a peer sending something
+        // absurd, and the bytes are what tell the two apart.
         anyhow::bail!(
-            "Framed message too large: {len} bytes (max_message_size={MAX_MESSAGE_SIZE})"
+            "Framed message too large: {len} bytes (max_message_size={MAX_MESSAGE_SIZE}; \
+             prefix bytes {len_buf:02x?})"
         );
     }
     Ok(len as usize)

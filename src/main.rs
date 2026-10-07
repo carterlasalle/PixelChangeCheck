@@ -332,10 +332,12 @@ fn resolve_menu(cli: Cli) -> Result<Option<Cli>> {
         Some(_) => return Ok(Some(cli)),
     }
 
+    let saved = pixel_change_check_client::relays::load().unwrap_or_default();
     let outcome = pixel_change_check_client::menu::run(
         &mut std::io::stdin().lock(),
         &mut std::io::stdout(),
         pixel_change_check_client::menu::Style::auto(),
+        &saved,
     )?;
     match outcome {
         pixel_change_check_client::menu::Outcome::Quit => Ok(None),

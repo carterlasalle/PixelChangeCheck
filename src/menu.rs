@@ -17,7 +17,9 @@
 //! which the smoke suite relies on.
 
 use crate::network::SessionToken;
+use crate::relays::SavedRelay;
 use anyhow::Result;
+use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 
 /// What the caller should do once the interview finishes.
@@ -194,16 +196,32 @@ fn panel<W: Write>(out: &mut W, s: Style, title: &str, body: &[String]) {
 // ------------------------------------------------------------------- run
 
 /// Run the interview. `input`/`output` are injected so this is testable
-/// without a terminal; `style` decides whether escape codes are emitted.
-pub fn run<R: BufRead, W: Write>(input: &mut R, out: &mut W, style: Style) -> Result<Outcome> {
-    let result = interview(input, out, style);
+/// without a terminal; `style` decides whether escape codes are emitted;
+/// `saved` is the relay store to offer.
+///
+/// The store is a parameter rather than a lookup inside so this stays
+/// hermetic: a test on a machine with a real `relays.json` must not behave
+/// differently from one without, which is exactly what happened the first
+/// time the picker was added.
+pub fn run<R: BufRead, W: Write>(
+    input: &mut R,
+    out: &mut W,
+    style: Style,
+    saved: &BTreeMap<String, SavedRelay>,
+) -> Result<Outcome> {
+    let result = interview(input, out, style, saved);
     match result {
         Err(e) if e.downcast_ref::<Eof>().is_some() => Ok(Outcome::Quit),
         other => other,
     }
 }
 
-fn interview<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Result<Outcome> {
+fn interview<R: BufRead, W: Write>(
+    input: &mut R,
+    out: &mut W,
+    s: Style,
+    saved: &BTreeMap<String, SavedRelay>,
+) -> Result<Outcome> {
     banner(out, s);
     let choice = choose(
         input,
@@ -229,7 +247,7 @@ fn interview<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Resu
     };
 
     match choice {
-        0 => share(input, out, s),
+        0 => share(input, out, s, saved),
         1 => view(input, out, s),
         2 => relay(input, out, s),
         3 => diagnose(input, out, s),
@@ -468,7 +486,12 @@ fn hint<W: Write>(out: &mut W, s: Style, text: &str) {
 
 // ------------------------------------------------------------------ share
 
-fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Result<Outcome> {
+fn share<R: BufRead, W: Write>(
+    input: &mut R,
+    out: &mut W,
+    s: Style,
+    saved: &BTreeMap<String, SavedRelay>,
+) -> Result<Outcome> {
     let target = choose(
         input,
         out,
@@ -585,7 +608,6 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Result<O
         );
         // A remembered relay removes the paste entirely — that is the whole
         // point of the store.
-        let saved = crate::relays::load().unwrap_or_default();
         if !saved.is_empty() {
             let mut opts: Vec<(&str, &str)> = saved
                 .iter()
@@ -1218,9 +1240,14 @@ mod tests {
     use std::io::Cursor;
 
     fn drive(input: &str) -> (Outcome, String) {
+        drive_with(input, &BTreeMap::new())
+    }
+
+    fn drive_with(input: &str, saved: &BTreeMap<String, SavedRelay>) -> (Outcome, String) {
         let mut cursor = Cursor::new(input.to_string());
         let mut out = Vec::new();
-        let outcome = run(&mut cursor, &mut out, Style::PLAIN).expect("menu should not error");
+        let outcome =
+            run(&mut cursor, &mut out, Style::PLAIN, saved).expect("menu should not error");
         (outcome, String::from_utf8(out).unwrap())
     }
 
@@ -1354,6 +1381,33 @@ mod tests {
         }
     }
 
+    /// Picking a saved relay must fill in all three values with no paste.
+    #[test]
+    fn a_saved_relay_is_selected_rather_than_typed() {
+        let mut saved = BTreeMap::new();
+        saved.insert(
+            "hetzner".to_string(),
+            SavedRelay {
+                addr: "203.0.113.5:5900".into(),
+                pin: "c".repeat(64),
+                token: "SAVEDTOKEN12".into(),
+            },
+        );
+        // share → whole screen → through a relay → pick #1 → session →
+        // no audio → browser on → no approval → run.
+        let (outcome, text) = drive_with("1\n1\n2\n1\nSESS\n1\ny\nn\ny\n", &saved);
+        match outcome {
+            Outcome::Run(args) => {
+                let value =
+                    |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
+                assert_eq!(value("--relay"), "203.0.113.5:5900");
+                assert_eq!(value("--token"), "SAVEDTOKEN12");
+                assert!(text.contains("nothing to paste"));
+            }
+            _ => panic!("expected a share command"),
+        }
+    }
+
     /// Quoting: a window title with spaces must come back paste-able.
     #[test]
     fn args_are_quoted_for_the_shell() {
@@ -1390,7 +1444,7 @@ mod tests {
         let mut cursor = Cursor::new(b"q\n".to_vec());
         let mut out = Vec::new();
         let style = Style { color: true };
-        let _ = run(&mut cursor, &mut out, style).unwrap();
+        let _ = run(&mut cursor, &mut out, style, &BTreeMap::new()).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains('\x1b'), "styled output should carry codes");
         assert!(!text.contains("\x1b\x1b"), "no doubled codes");
