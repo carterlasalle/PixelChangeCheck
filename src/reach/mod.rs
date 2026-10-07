@@ -340,6 +340,101 @@ pub fn parse_pair_url(raw: &str) -> Result<PairInvite, String> {
     })
 }
 
+/// The three values a sharer needs from a relay, in one paste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayHint {
+    /// The relay's address, as the relay printed it.
+    pub relay: String,
+    /// The relay's certificate fingerprint.
+    pub pin: String,
+    /// The relay's token — the value that must be identical on all three
+    /// sides, and the one nobody can guess.
+    pub token: String,
+}
+
+/// Pull the relay's address, pin and token out of **whatever the operator
+/// pasted**.
+///
+/// The relay prints a full `pcc share --relay … --relay-pin … --token …`
+/// line, and a human may also paste just the flags, or a `pcc://relay?...`
+/// URL. Requiring one exact shape is what turned a one-value copy into a
+/// hunt through a terminal scrollback, so this accepts all of them and
+/// says precisely which value is missing when something is.
+pub fn parse_relay_hint(raw: &str) -> Result<RelayHint, String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("nothing pasted".to_string());
+    }
+
+    // The URL form, for when one is copied on its own.
+    if let Some(query) = text.strip_prefix("pcc://relay?") {
+        let mut relay = None;
+        let mut pin = None;
+        let mut token = None;
+        for field in query.split('&') {
+            match field.split_once('=') {
+                Some(("addr" | "relay", v)) => relay = Some(v.to_string()),
+                Some(("pin", v)) => pin = Some(v.to_string()),
+                Some(("token", v)) => token = Some(v.to_string()),
+                _ => return Err(format!("unknown relay field '{field}'")),
+            }
+        }
+        return assemble(relay, pin, token);
+    }
+
+    // The flag form, taken from any surrounding text so a whole pasted
+    // command line — with or without the leading `pcc share` — works.
+    let mut relay = None;
+    let mut pin = None;
+    let mut token = None;
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut i = 0;
+    while i < words.len() {
+        let value = words.get(i + 1).map(|v| v.trim_matches('\'').to_string());
+        match words[i] {
+            "--relay" | "--addr" => relay = value,
+            "--relay-pin" | "--pin" => pin = value,
+            "--token" => token = value,
+            _ => {}
+        }
+        if matches!(
+            words[i],
+            "--relay" | "--addr" | "--relay-pin" | "--pin" | "--token"
+        ) {
+            i += 1;
+        }
+        i += 1;
+    }
+
+    assemble(relay, pin, token)
+}
+
+fn assemble(
+    relay: Option<String>,
+    pin: Option<String>,
+    token: Option<String>,
+) -> Result<RelayHint, String> {
+    let missing = [
+        (relay.is_none(), "--relay <host:port>"),
+        (pin.is_none(), "--relay-pin <64 hex>"),
+        (token.is_none(), "--token <the relay's token>"),
+    ]
+    .into_iter()
+    .filter_map(|(missing, name)| missing.then_some(name))
+    .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "that line is missing {} — paste the whole line the relay printed",
+            missing.join(", ")
+        ));
+    }
+    Ok(RelayHint {
+        relay: relay.expect("checked"),
+        pin: pin.expect("checked"),
+        token: token.expect("checked"),
+    })
+}
+
 /// The `pcc doctor` output: reachability, plus whether audio is available.
 pub fn render_doctor(reach: &Report, audio: Option<String>) -> String {
     let mut out = render(reach);
@@ -543,6 +638,50 @@ pub fn outbound_address_for(port: u16) -> Option<SocketAddr> {
     Some(SocketAddr::new(local.ip(), port))
 }
 
+/// The address a peer should be told to dial for a listener bound at
+/// `bound`: the bound address when it is specific, or the interface the
+/// default route uses when it is a wildcard — which is not an address
+/// anybody can dial.
+///
+/// One function so the relay's printed invite and a `--remember` save can
+/// never disagree about what the relay's address is.
+pub fn dial_address_for_bind(bound: SocketAddr) -> SocketAddr {
+    if bound.ip().is_unspecified() {
+        outbound_address_for(bound.port()).unwrap_or(bound)
+    } else {
+        bound
+    }
+}
+
+/// Rewrite an address that points at *this* machine into its loopback form.
+///
+/// A host frequently cannot dial its own public or LAN address: clouds
+/// route the packet out and back, or drop it, and NAT hairpinning is
+/// inconsistent. Sharing to a relay running on the same machine is one of
+/// the first things anyone tries, and it failed with "could not connect to
+/// the relay" while a perfectly healthy relay was listening — so this is
+/// where that gets decided, rather than in a doc note the user has to find.
+///
+/// A hostname is left alone: resolving it here would be a second guess on
+/// top of the resolver's.
+pub fn prefer_local(addr: &str) -> String {
+    let Ok(sock) = addr.parse::<SocketAddr>() else {
+        return addr.to_string();
+    };
+    if sock.ip().is_loopback() {
+        return addr.to_string();
+    }
+    if !interface_addresses().iter().any(|a| a.ip() == sock.ip()) {
+        return addr.to_string();
+    }
+    let loopback = if sock.is_ipv4() {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    } else {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+    };
+    SocketAddr::new(loopback, sock.port()).to_string()
+}
+
 /// A UDP "connect" to a public address and a zero-length send is the
 /// portable way to ask the routing table whether a default route exists,
 /// without parsing platform routing tables.
@@ -684,5 +823,81 @@ mod tests {
         assert!(parse_pair_url("pcc://view?connect=a&pin=p&token=T&typo=1")
             .unwrap_err()
             .contains("unknown"));
+    }
+
+    /// The whole point: whatever the operator pasted, the three values come
+    /// out. Requiring one exact shape is what turned a one-value copy into a
+    /// hunt through a terminal's scrollback.
+    #[test]
+    fn a_relay_line_is_understood_in_every_shape_it_is_pasted() {
+        let pin = "a".repeat(64);
+        // The full line the relay prints.
+        let printed = format!(
+            "On the machine being shared, run:\n  \
+             pcc share --relay 203.0.113.5:5900 --relay-pin {pin} --token TTTOKEN1234"
+        );
+        let h = parse_relay_hint(&printed).expect("the printed line should parse");
+        assert_eq!(h.relay, "203.0.113.5:5900");
+        assert_eq!(h.pin, pin);
+        assert_eq!(h.token, "TTTOKEN1234");
+
+        // Just the flags.
+        let h = parse_relay_hint(&format!(
+            "--relay 1.2.3.4:5900 --relay-pin {pin} --token T1"
+        ))
+        .expect("bare flags should parse");
+        assert_eq!(h.relay, "1.2.3.4:5900");
+
+        // The URL form.
+        let h = parse_relay_hint(&format!("pcc://relay?addr=5.6.7.8:5900&pin={pin}&token=T2"))
+            .expect("the url form should parse");
+        assert_eq!(h.relay, "5.6.7.8:5900");
+        assert_eq!(h.token, "T2");
+    }
+
+    /// A half-pasted line must name what is missing rather than silently
+    /// starting a share that cannot register.
+    #[test]
+    fn a_partial_relay_line_names_what_is_missing() {
+        let e = parse_relay_hint("--relay 1.2.3.4:5900 --relay-pin aa").unwrap_err();
+        assert!(e.contains("--token"), "should name the token: {e}");
+        let e = parse_relay_hint("--token T").unwrap_err();
+        assert!(
+            e.contains("--relay") && e.contains("--relay-pin"),
+            "got {e}"
+        );
+        assert!(parse_relay_hint("").unwrap_err().contains("nothing"));
+    }
+
+    /// The same-machine rewrite must leave everything that is *not* this
+    /// host alone. Getting that wrong would silently redirect a real remote
+    /// relay to loopback and break it for everyone.
+    #[test]
+    fn prefer_local_only_rewrites_this_host() {
+        assert_eq!(prefer_local("127.0.0.1:5900"), "127.0.0.1:5900");
+        assert_eq!(prefer_local("[::1]:5900"), "[::1]:5900");
+        // A hostname is the resolver's job, not ours.
+        assert_eq!(
+            prefer_local("relay.example.com:5900"),
+            "relay.example.com:5900"
+        );
+        // TEST-NET-3 is guaranteed never to be a local address.
+        assert_eq!(prefer_local("203.0.113.5:5900"), "203.0.113.5:5900");
+        // Garbage passes through rather than panicking.
+        assert_eq!(prefer_local("not an address"), "not an address");
+    }
+
+    /// And it does rewrite this host's own address, which is the point:
+    /// dialing your own public address is what failed.
+    #[test]
+    fn prefer_local_rewrites_an_address_this_machine_holds() {
+        let mine = interface_addresses()
+            .into_iter()
+            .find(|a| !a.ip().is_loopback() && !a.ip().is_unspecified());
+        let Some(mine) = mine else {
+            return; // no external interface in this environment
+        };
+        let dial = SocketAddr::new(mine.ip(), 5900).to_string();
+        assert_eq!(prefer_local(&dial), "127.0.0.1:5900");
     }
 }

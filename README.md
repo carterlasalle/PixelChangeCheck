@@ -122,10 +122,30 @@ Run that on the machine being shared. It prints a `Viewer link: pcc://…` and a
 `Browser link: https://…`; send either one. The browser link needs nothing
 installed on the other end — just open it.
 
+**Do that once.** Add `--remember <name>` to the relay and none of it is
+copied again:
+
+```sh
+# on the relay host, once
+pcc relay --listen 0.0.0.0:5900 --web --remember hetzner
+
+# on the machine being shared, from then on
+pcc share --use hetzner
+```
+
+The address, the pin and the token are remembered
+(`$XDG_CONFIG_HOME/pcc/relays.json`, `0600` because it holds a token;
+`PCC_RELAYS` overrides the path). It is the `~/.ssh/config` + `known_hosts`
+pattern rather than a certificate authority: the pin is recorded when you
+save and is still checked against the live certificate on every connection,
+so a relay that changes identity is refused. `pcc` with no arguments lists
+saved relays as a numbered choice, so you pick one instead of pasting.
+
 Two things that will otherwise cost you a round trip:
 
 - The share's `--token` must be the **relay's** token, exactly as printed. One
-  value across all three sides; a mismatch closes with `bad credential`.
+  value across all three sides; a mismatch closes with `bad credential`. This
+  is the thing `--use` exists to remove.
 - Without `--cert`/`--cert-key` the relay generates a certificate per process,
   so browsers warn and the fingerprint changes on restart. Supply a real
   certificate for anything beyond a test.

@@ -73,6 +73,10 @@ enum Commands {
         /// printed it when it started. Required with --relay.
         #[arg(long)]
         relay_pin: Option<String>,
+        /// Use a relay saved by `pcc relay --remember <name>`: its address,
+        /// pin and token all come from the store, so none is pasted.
+        #[arg(long = "use", value_name = "NAME", conflicts_with_all = ["relay", "relay_pin", "token"])]
+        use_relay: Option<String>,
         /// Rendezvous code for the relay session. Auto-generated and
         /// printed if omitted. This is not the secret: --token is.
         #[arg(long)]
@@ -176,11 +180,15 @@ enum Commands {
         /// for quic paths (it authenticates the connection); unused with
         /// `--transport iroh` (endpoint id in the ticket is self-certifying)
         /// or webrtc (DTLS fingerprints ride in the SDP).
-        #[arg(long, required_unless_present_any = ["ticket", "offer"])]
+        #[arg(long, required_unless_present_any = ["ticket", "offer", "use_relay"])]
         pin: Option<String>,
         /// The token the sharer printed. Without it the sharer refuses.
-        #[arg(long)]
-        token: String,
+        #[arg(long, required_unless_present_any = ["use_relay", "ticket", "offer"])]
+        token: Option<String>,
+        /// Use a relay saved by `pcc relay --remember <name>`: its address,
+        /// pin and token come from the store, so none is pasted.
+        #[arg(long = "use", value_name = "NAME", conflicts_with_all = ["relay", "pin", "token"])]
+        use_relay: Option<String>,
         /// Don't try to open a window; just print periodic status.
         #[arg(long)]
         no_window: bool,
@@ -264,10 +272,25 @@ enum Commands {
         /// browsers to trust it.
         #[arg(long)]
         web: bool,
+        /// Save this relay's address, pin and token under <name>, so a
+        /// later `pcc share --use <name>` needs nothing pasted.
+        #[arg(long, value_name = "NAME")]
+        remember: Option<String>,
     },
     /// Walk through the options interactively, printing (and optionally
     /// running) the exact command. This is what bare `pcc` does.
     Menu,
+}
+
+/// Rewrite each address in a comma-separated relay list to its loopback
+/// form when it names this machine. Sharing to a relay on the same host is
+/// the first thing anyone tries, and dialing your own public address does
+/// not reliably work.
+fn prefer_local_relays(list: String) -> String {
+    list.split(',')
+        .map(|a| reach::prefer_local(a.trim()))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn token_from(arg: Option<&String>, what: &str) -> Result<SessionToken> {
@@ -309,8 +332,11 @@ fn resolve_menu(cli: Cli) -> Result<Option<Cli>> {
         Some(_) => return Ok(Some(cli)),
     }
 
-    let outcome =
-        pixel_change_check_client::menu::run(&mut std::io::stdin().lock(), &mut std::io::stdout())?;
+    let outcome = pixel_change_check_client::menu::run(
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout(),
+        pixel_change_check_client::menu::Style::auto(),
+    )?;
     match outcome {
         pixel_change_check_client::menu::Outcome::Quit => Ok(None),
         pixel_change_check_client::menu::Outcome::Run(argv) => {
@@ -375,6 +401,7 @@ fn run(cli: Cli) -> Result<()> {
             no_listen,
             relay: relay_addr,
             relay_pin,
+            use_relay,
             session,
             web,
             no_web,
@@ -397,6 +424,18 @@ fn run(cli: Cli) -> Result<()> {
             approve,
             broadcast_above,
         } => {
+            // `--use <name>` supplies the relay's address, pin and token
+            // from the store, so none of them is pasted.
+            let (relay_addr, relay_pin, token) = match use_relay {
+                Some(name) => {
+                    let saved = pixel_change_check_client::relays::get(&name)?.with_context(|| {
+                        format!("no relay saved as '{name}' — `pcc relay --remember <name>` saves one")
+                    })?;
+                    (Some(saved.addr), Some(saved.pin), Some(saved.token))
+                }
+                None => (relay_addr, relay_pin, token),
+            };
+            let relay_addr = relay_addr.map(prefer_local_relays);
             let token = token_from(token.as_ref(), "viewer token")?;
             let transport_kind =
                 pixel_change_check_client::network::TransportKind::parse(&transport)
@@ -470,12 +509,25 @@ fn run(cli: Cli) -> Result<()> {
             session,
             pin,
             token,
+            use_relay,
             no_window,
             reconnect,
             transport,
             ticket,
             offer,
         } => {
+            // `--use <name>` supplies the relay's address, pin and token
+            // from the store, so a viewer pastes nothing either.
+            let (relay_addr, pin, token) = match use_relay {
+                Some(name) => {
+                    let saved = pixel_change_check_client::relays::get(&name)?
+                        .with_context(|| format!("no relay saved as '{name}'"))?;
+                    (Some(saved.addr), Some(saved.pin), Some(saved.token))
+                }
+                None => (relay_addr, pin, token),
+            };
+            let relay_addr = relay_addr.map(prefer_local_relays);
+            let token = token.context("--token is required")?;
             let args = view::ViewArgs {
                 connect,
                 relay: relay_addr,
@@ -563,6 +615,7 @@ fn run(cli: Cli) -> Result<()> {
             cert,
             cert_key,
             web,
+            remember,
         } => {
             // Print the token only when it was generated: an operator
             // who passed --token already knows it, and echoing a
@@ -596,7 +649,7 @@ fn run(cli: Cli) -> Result<()> {
                 // once, after it has its identity: it owns the pin, the
                 // token and the bound port, so it is the only place that
                 // can print them together and correctly.
-                relay::run_relay_server_with(listener, identity, token, web).await
+                relay::run_relay_server_with(listener, identity, token, web, remember).await
             })
         }
     }

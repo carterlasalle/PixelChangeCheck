@@ -168,6 +168,30 @@ and, with `--web`, the browser link.
 The one value that must match across all three sides is `--token`: the relay's,
 the sharer's, and every viewer's. A mismatch is refused as `bad credential`.
 
+### Remember a relay so nothing is pasted
+
+```sh
+# on the relay host, once
+pcc relay --listen 0.0.0.0:5900 --web --remember hetzner
+# anywhere after that
+pcc share --use hetzner
+pcc view --use hetzner --session <code>
+```
+
+`--use` supplies the address, the pin **and** the token, which is the value
+nobody can guess. Store: `$XDG_CONFIG_HOME/pcc/relays.json` (`PCC_RELAYS`
+overrides), mode `0600`. The pin is recorded at save time and still verified
+against the live certificate, so a relay that changes identity is refused.
+`pcc` with no arguments lists saved relays as a numbered pick.
+
+If a paste is unavoidable, `reach::parse_relay_hint` accepts the relay's full
+printed line, bare `--relay/--relay-pin/--token` flags, or a
+`pcc://relay?...` URL, and names whichever value is missing.
+
+**Same-machine relays:** an address naming this host is rewritten to loopback
+before connecting (`reach::prefer_local`), because a machine frequently cannot
+dial its own public address. Both forms are printed.
+
 ### `pcc pair` — one line instead of retyped hex
 
 ```sh

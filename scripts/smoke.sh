@@ -296,6 +296,30 @@ GATE=$(printf '%s' "$RELAY_INVITE" | grep -c '<this-host>\|<token>\|<session>')
 check "that line contains no placeholders" \
   "$([ "$GATE" -eq 0 ] && echo 0 || echo 1)" "got: $RELAY_INVITE"
 
+# Remembering a relay is what removes the pasting entirely, so it gets a
+# check: save one, then use it with no address, pin or token given. Both
+# processes are long-lived, so both are backgrounded — capturing a running
+# share's output with $( ) would block until it exits, which it never does.
+REMEMBER_PORT=$(( RELAY_PORT + 40 ))
+PCC_RELAYS="$LOG_DIR/relays.json" $BIN relay --listen "127.0.0.1:$REMEMBER_PORT" \
+  --remember smoke > "$LOG_DIR/relay-remember.log" 2>&1 &
+REMEMBER_PID=$!
+sleep 1
+STORE=$(cat "$LOG_DIR/relays.json" 2>/dev/null)
+GATE=$(printf '%s' "$STORE" | grep -c '"smoke"')
+check "the relay saved itself under a name" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "no store entry: $STORE"
+
+PCC_RELAYS="$LOG_DIR/relays.json" $BIN share --use smoke --synthetic --no-listen --no-web \
+  --fps 5 > "$LOG_DIR/share-use.log" 2>&1 &
+USE_PID=$!
+sleep 2
+GATE=$(grep -c "Relay 127.0.0.1:$REMEMBER_PORT" "$LOG_DIR/share-use.log")
+check "sharing by saved name needs nothing pasted" \
+  "$([ "$GATE" -ge 1 ] && echo 0 || echo 1)" "$(tail -2 "$LOG_DIR/share-use.log")"
+kill $USE_PID $REMEMBER_PID 2>/dev/null
+wait $USE_PID $REMEMBER_PID 2>/dev/null
+
 $BIN share --synthetic --no-listen --no-web \
   --relay "127.0.0.1:$RELAY_PORT" --relay-pin "$RELAY_PIN" \
   --session SMOKE --token "$TOKEN" --fps 10 > "$LOG_DIR/share2.log" 2>&1 &

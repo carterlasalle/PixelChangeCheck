@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.1.9 — pick a relay, paste nothing
+
+### Added
+
+- **Remembered relays.** `pcc relay --remember <name>` saves the relay's
+  address, certificate pin and token; `pcc share --use <name>` (and
+  `pcc view --use <name>`) then need none of them pasted. The store lives at
+  `$XDG_CONFIG_HOME/pcc/relays.json` (`PCC_RELAYS` overrides it), is written
+  `0600` because it holds a token, and is the `~/.ssh/config` +
+  `known_hosts` pattern rather than a certificate authority: the pin is
+  recorded at save time and still re-checked against the live certificate,
+  so a relay that changes identity is refused. The menu lists saved relays
+  as a numbered pick before offering to paste anything.
+- **One paste instead of four values.** `reach::parse_relay_hint` accepts
+  whatever the operator copied — the relay's full printed line, bare
+  `--relay/--relay-pin/--token` flags, or a `pcc://relay?...` URL — and
+  names exactly which value is missing when the paste is partial. Sharing
+  through a relay used to mean hunting four separate values out of another
+  terminal's scrollback.
+
+### Fixed
+
+- **A relay on the same machine was unreachable.** Sharing to a relay
+  running on the same host dialed that host's own public address, which
+  clouds route out and back or drop outright: the session failed with
+  "could not connect to the relay" while a healthy relay was listening.
+  Addresses that name this machine are now rewritten to loopback before
+  connecting, and the relay prints the loopback form alongside the public
+  one. Verified on a Hetzner VPS, which is where it was hit.
+
+### Changed
+
+- **The menu is presentable.** A wordmark banner, framed panels around the
+  command and the instructions for the other side, a `❯` marker on the
+  default answer, bold labels separated from dim explanations, and colour
+  for warnings and the command itself. Colour is opt-out: it appears only
+  on a terminal with `NO_COLOR` unset and `TERM` not `dumb`, so piping the
+  menu still yields clean greppable text (the smoke suite relies on it).
+
 ## 0.1.8 — the relay prints the command for you
 
 ### Fixed

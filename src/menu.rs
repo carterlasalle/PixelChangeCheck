@@ -10,10 +10,15 @@
 //! token, and a pin that is the *relay's* in one form and the *sharer's* in
 //! the other) are easy to transcribe wrongly and impossible to tell apart
 //! once you have.
+//!
+//! Presentation is opt-out, not opt-in: [`Style`] emits escape codes only
+//! when the stream is a terminal, `NO_COLOR` is unset and the terminal is
+//! not `dumb`. Piping the menu therefore produces clean, greppable text —
+//! which the smoke suite relies on.
 
 use crate::network::SessionToken;
 use anyhow::Result;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 /// What the caller should do once the interview finishes.
 pub enum Outcome {
@@ -43,28 +48,177 @@ fn eof<T>() -> Result<T> {
     Err(Eof.into())
 }
 
+// ------------------------------------------------------------------ style
+
+/// Whether to emit ANSI escape codes.
+///
+/// A one-field struct rather than a bool so the call sites read as
+/// `s.bold()` and cannot be silently transposed with any other flag.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Style {
+    color: bool,
+}
+
+impl Style {
+    /// Never emit escape codes. What tests and any non-terminal caller use.
+    pub const PLAIN: Self = Self { color: false };
+
+    /// Colour when this is a real terminal and the environment has not
+    /// asked for plain output. `NO_COLOR` is the widely-implemented opt-out
+    /// (https://no-color.org); `TERM=dumb` is the older convention for a
+    /// terminal that cannot interpret escapes.
+    pub fn auto() -> Self {
+        let opted_out = std::env::var_os("NO_COLOR").is_some()
+            || std::env::var("TERM").is_ok_and(|t| t == "dumb");
+        Self {
+            color: std::io::stdout().is_terminal() && !opted_out,
+        }
+    }
+
+    fn code(self, code: &'static str) -> &'static str {
+        if self.color {
+            code
+        } else {
+            ""
+        }
+    }
+
+    fn bold(self) -> &'static str {
+        self.code("\x1b[1m")
+    }
+
+    fn dim(self) -> &'static str {
+        self.code("\x1b[2m")
+    }
+
+    fn reset(self) -> &'static str {
+        self.code("\x1b[0m")
+    }
+
+    /// The brand colour: bold bright cyan.
+    fn brand(self) -> &'static str {
+        self.code("\x1b[1;96m")
+    }
+
+    /// A heading or a question.
+    fn head(self) -> &'static str {
+        self.code("\x1b[1;97m")
+    }
+
+    /// The thing the user is about to run.
+    fn good(self) -> &'static str {
+        self.code("\x1b[1;32m")
+    }
+
+    /// A caveat worth reading.
+    fn warn(self) -> &'static str {
+        self.code("\x1b[1;33m")
+    }
+
+    /// A refusal.
+    fn bad(self) -> &'static str {
+        self.code("\x1b[1;31m")
+    }
+
+    /// Wrap `text` in `code`, resetting after. No-op when colour is off.
+    fn paint(self, code: &str, text: &str) -> String {
+        if self.color {
+            format!("{code}{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+}
+
+/// The printed width of `s`, ignoring ANSI escape sequences.
+///
+/// Box drawing pads to the widest line, and a styled line is longer than it
+/// looks; measuring the raw bytes would make every panel ragged.
+fn visible_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip to the end of the sequence. All we emit are SGR
+            // sequences, which terminate with 'm'.
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+/// A framed panel: a title rule, body lines, and a closing rule.
+///
+/// Body lines may carry styling; `visible_len` keeps the right edge
+/// straight regardless.
+fn panel<W: Write>(out: &mut W, s: Style, title: &str, body: &[String]) {
+    let title_len = visible_len(title) + 4;
+    let inner = body
+        .iter()
+        .map(|l| visible_len(l) + 2)
+        .chain(std::iter::once(title_len))
+        .max()
+        .unwrap_or(0)
+        .max(40);
+
+    let frame = |c: &str, n: usize| s.paint(s.dim(), &c.repeat(n));
+    let _ = writeln!(
+        out,
+        "\n  {}{}─ {}{} {}",
+        frame("╭", 1),
+        frame("─", 1),
+        s.paint(s.brand(), title),
+        frame("─", inner.saturating_sub(title_len)),
+        frame("╮", 1)
+    );
+    for l in body {
+        let pad = inner.saturating_sub(visible_len(l) + 2);
+        let _ = writeln!(
+            out,
+            "  {} {}{} {}",
+            frame("│", 1),
+            l,
+            " ".repeat(pad),
+            frame("│", 1)
+        );
+    }
+    let _ = writeln!(out, "  {}{}", frame("╰", 1), frame("─", inner + 1));
+}
+
+// ------------------------------------------------------------------- run
+
 /// Run the interview. `input`/`output` are injected so this is testable
-/// without a terminal.
-pub fn run<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
-    let result = interview(input, out);
+/// without a terminal; `style` decides whether escape codes are emitted.
+pub fn run<R: BufRead, W: Write>(input: &mut R, out: &mut W, style: Style) -> Result<Outcome> {
+    let result = interview(input, out, style);
     match result {
         Err(e) if e.downcast_ref::<Eof>().is_some() => Ok(Outcome::Quit),
         other => other,
     }
 }
 
-fn interview<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
-    banner(out);
+fn interview<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Result<Outcome> {
+    banner(out, s);
     let choice = choose(
         input,
         out,
+        s,
         "What would you like to do?",
         &[
-            "Share this screen            (you are the host)",
-            "View someone else's screen   (you are the viewer)",
-            "Run a relay                  (for two people who cannot reach each other)",
-            "Check this machine           (what can it capture, is audio available)",
-            "Show every command",
+            ("Share this screen", "you are the host"),
+            ("View someone else's screen", "you are the viewer"),
+            ("Run a relay", "for two people who cannot reach each other"),
+            (
+                "Check this machine",
+                "what it can capture, whether audio is available",
+            ),
+            ("Show every command", ""),
         ],
         1,
         true,
@@ -75,22 +229,46 @@ fn interview<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome
     };
 
     match choice {
-        0 => share(input, out),
-        1 => view(input, out),
-        2 => relay(input, out),
-        3 => diagnose(input, out),
+        0 => share(input, out, s),
+        1 => view(input, out, s),
+        2 => relay(input, out, s),
+        3 => diagnose(input, out, s),
         _ => Ok(Outcome::Run(vec!["help".to_string()])),
     }
 }
 
-fn banner<W: Write>(out: &mut W) {
+fn banner<W: Write>(out: &mut W, s: Style) {
+    let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "\n  PixelChangeCheck — exact, lossless screen sharing\n  \
-         ────────────────────────────────────────────────────\n  \
-         Answer the questions and this prints (and optionally runs) the\n  \
-         exact command. Press Enter to accept the [default].\n"
+        "  {}▀▀█ █▀▀ █▀▀{}   {}PixelChangeCheck{}",
+        s.brand(),
+        s.reset(),
+        s.bold(),
+        s.reset()
     );
+    let _ = writeln!(
+        out,
+        "  {}  █ █▀▀ █▀▀{}   {}exact, lossless screen sharing{}",
+        s.brand(),
+        s.reset(),
+        s.dim(),
+        s.reset()
+    );
+    let _ = writeln!(out, "  {}{}{}", s.dim(), "─".repeat(58), s.reset());
+    let _ = writeln!(
+        out,
+        "  {}Answer the questions and this prints — and can run — the exact{}",
+        s.dim(),
+        s.reset()
+    );
+    let _ = writeln!(
+        out,
+        "{}command. Press Enter to accept a [default].{}",
+        s.dim(),
+        s.reset()
+    );
+    let _ = writeln!(out);
 }
 
 // ---------------------------------------------------------------- prompts
@@ -108,13 +286,25 @@ fn line<R: BufRead>(input: &mut R) -> Option<String> {
 fn ask<R: BufRead, W: Write>(
     input: &mut R,
     out: &mut W,
+    s: Style,
     prompt: &str,
     default: &str,
 ) -> Result<String> {
+    // The caret marks where typing happens; without it the prompt and the
+    // hint run together on a busy line.
+    let caret = s.paint(s.brand(), "›");
     if default.is_empty() {
-        let _ = write!(out, "{prompt}: ");
+        let _ = write!(out, "  {}{}{} {caret} ", s.bold(), prompt, s.reset());
     } else {
-        let _ = write!(out, "{prompt} [{default}]: ");
+        let _ = write!(
+            out,
+            "  {}{}{} {}[{default}]{} {caret} ",
+            s.bold(),
+            prompt,
+            s.reset(),
+            s.dim(),
+            s.reset()
+        );
     }
     let _ = out.flush();
     match line(input) {
@@ -128,9 +318,19 @@ fn ask<R: BufRead, W: Write>(
 fn ask_optional<R: BufRead, W: Write>(
     input: &mut R,
     out: &mut W,
+    s: Style,
     prompt: &str,
 ) -> Result<Option<String>> {
-    let _ = write!(out, "{prompt} (blank to skip): ");
+    let _ = write!(
+        out,
+        "  {}{}{} {}— blank to skip —{} {} ",
+        s.bold(),
+        prompt,
+        s.reset(),
+        s.dim(),
+        s.reset(),
+        s.paint(s.brand(), "›")
+    );
     let _ = out.flush();
     match line(input) {
         None => eof(),
@@ -144,19 +344,61 @@ fn ask_optional<R: BufRead, W: Write>(
 fn choose<R: BufRead, W: Write>(
     input: &mut R,
     out: &mut W,
+    s: Style,
     question: &str,
-    options: &[&str],
+    options: &[(&str, &str)],
     default: usize,
     allow_quit: bool,
 ) -> Result<Option<usize>> {
-    let _ = writeln!(out, "\n{question}");
-    for (i, opt) in options.iter().enumerate() {
-        let _ = writeln!(out, "  {}) {opt}", i + 1);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  {}{}{}", s.head(), question, s.reset());
+    let width = options
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
+    let bar = s.paint(s.dim(), "│");
+    for (i, (label, hint)) in options.iter().enumerate() {
+        let chosen = i + 1 == default;
+        let marker = if chosen {
+            s.paint(s.brand(), "❯")
+        } else {
+            " ".to_string()
+        };
+        let number = s.paint(
+            if chosen { s.brand() } else { s.dim() },
+            &format!("{}", i + 1),
+        );
+        let text = if chosen {
+            s.paint(s.bold(), &format!("{label:<width$}"))
+        } else {
+            format!("{label:<width$}")
+        };
+        let tail = if hint.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", s.paint(s.dim(), hint))
+        };
+        let _ = writeln!(out, "   {marker} {number} {bar} {text}{tail}");
     }
     if allow_quit {
-        let _ = writeln!(out, "  q) Quit");
+        let _ = writeln!(
+            out,
+            "     {} {} {}",
+            s.paint(s.dim(), "q"),
+            bar,
+            s.paint(s.dim(), "quit")
+        );
     }
-    let _ = write!(out, "Choose [{default}]: ");
+    let _ = write!(
+        out,
+        "\n  {}Choose{} {}{default}{} {} ",
+        s.dim(),
+        s.reset(),
+        s.bold(),
+        s.reset(),
+        s.paint(s.brand(), "›")
+    );
     let _ = out.flush();
 
     match line(input) {
@@ -168,9 +410,11 @@ fn choose<R: BufRead, W: Write>(
             _ => {
                 let _ = writeln!(
                     out,
-                    "  (that is not one of the numbers above — starting over)\n"
+                    "\n  {}That is not one of the numbers above — starting over.{}",
+                    s.warn(),
+                    s.reset()
                 );
-                choose(input, out, question, options, default, allow_quit)
+                choose(input, out, s, question, options, default, allow_quit)
             }
         },
     }
@@ -179,11 +423,22 @@ fn choose<R: BufRead, W: Write>(
 fn confirm<R: BufRead, W: Write>(
     input: &mut R,
     out: &mut W,
+    s: Style,
     question: &str,
     default_yes: bool,
 ) -> Result<bool> {
     let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
-    let _ = write!(out, "{question} {suffix}: ");
+    let _ = write!(
+        out,
+        "  {}{}{} {}{}{} {} ",
+        s.bold(),
+        question,
+        s.reset(),
+        s.dim(),
+        suffix,
+        s.reset(),
+        s.paint(s.brand(), "›")
+    );
     let _ = out.flush();
     match line(input) {
         None => eof(),
@@ -192,19 +447,39 @@ fn confirm<R: BufRead, W: Write>(
     }
 }
 
+/// A caveat that has cost people a round trip before.
+fn note<W: Write>(out: &mut W, s: Style, text: &str) {
+    let _ = writeln!(out);
+    for (i, l) in text.lines().enumerate() {
+        let lead = if i == 0 {
+            s.paint(s.warn(), "!")
+        } else {
+            " ".to_string()
+        };
+        let _ = writeln!(out, "  {lead} {}", s.paint(s.warn(), l));
+    }
+}
+
+fn hint<W: Write>(out: &mut W, s: Style, text: &str) {
+    for l in text.lines() {
+        let _ = writeln!(out, "  {}{}{}", s.dim(), l, s.reset());
+    }
+}
+
 // ------------------------------------------------------------------ share
 
-fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
+fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Result<Outcome> {
     let target = choose(
         input,
         out,
+        s,
         "What do you want to share?",
         &[
-            "The whole screen      (the primary display)",
-            "A specific display",
-            "A region of the screen",
-            "A window              (matched by its title)",
-            "An application        (matched by its name)",
+            ("The whole screen", "the primary display"),
+            ("A specific display", ""),
+            ("A region of the screen", "e.g. 100,200,1280,720"),
+            ("A window", "matched by its title"),
+            ("An application", "matched by its name"),
         ],
         1,
         true,
@@ -220,6 +495,7 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
             let n = ask(
                 input,
                 out,
+                s,
                 "Display number (see `pcc diagnose --displays`)",
                 "0",
             )?;
@@ -227,27 +503,42 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
             args.push(n);
         }
         2 => {
-            let r = ask(input, out, "Region as x,y,w,h (e.g. 100,200,1280,720)", "")?;
+            let r = ask(input, out, s, "Region as x,y,w,h", "100,200,1280,720")?;
             if r.is_empty() {
-                let _ = writeln!(out, "  (a region is required — stopping)");
+                let _ = writeln!(
+                    out,
+                    "  {}A region is required — stopping.{}",
+                    s.bad(),
+                    s.reset()
+                );
                 return Ok(Outcome::Quit);
             }
             args.push("--region".into());
             args.push(r);
         }
         3 => {
-            let t = ask(input, out, "Part of the window title", "")?;
+            let t = ask(input, out, s, "Part of the window title", "")?;
             if t.is_empty() {
-                let _ = writeln!(out, "  (a title is required — stopping)");
+                let _ = writeln!(
+                    out,
+                    "  {}A title is required — stopping.{}",
+                    s.bad(),
+                    s.reset()
+                );
                 return Ok(Outcome::Quit);
             }
             args.push("--window".into());
             args.push(t);
         }
         _ => {
-            let a = ask(input, out, "Application name", "")?;
+            let a = ask(input, out, s, "Application name", "")?;
             if a.is_empty() {
-                let _ = writeln!(out, "  (a name is required — stopping)");
+                let _ = writeln!(
+                    out,
+                    "  {}A name is required — stopping.{}",
+                    s.bad(),
+                    s.reset()
+                );
                 return Ok(Outcome::Quit);
             }
             args.push("--application".into());
@@ -259,11 +550,15 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
     let route = choose(
         input,
         out,
+        s,
         "How will viewers connect?",
         &[
-            "Directly             (same network or VPN — nothing to set up)",
-            "Through a relay      (works over the internet, no port forwarding)",
-            "Both                 (direct when possible, relay as the fallback)",
+            ("Directly", "same network or VPN — nothing to set up"),
+            (
+                "Through a relay",
+                "works over the internet, no port forwarding",
+            ),
+            ("Both", "direct when possible, relay as the fallback"),
         ],
         1,
         true,
@@ -274,52 +569,145 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
 
     let mut relay_addr = None;
     let mut relay_pin = None;
+    let mut relay_token = None;
     let mut session = String::new();
     if route >= 1 {
-        let _ = writeln!(
+        let _ = writeln!(out);
+        hint(
             out,
-            "\n  Use the address the relay printed when it started — its\n  \
-             `relay listening on …` line, or the `pcc share --relay …` line it\n  \
-             printed for you to copy. If the relay runs on this machine, that\n  \
-             is 127.0.0.1:5900.\n  \
-             No relay yet? Quit here and run `pcc` → \"Run a relay\" in another\n  \
-             terminal; it prints a complete `pcc share …` line you can paste\n  \
-             straight back into this one."
+            s,
+            "A relay prints one line when it starts. Pasting that whole line\n\
+             fills in the address, the pin and the token at once — the token is\n\
+             the value nobody can guess, and the usual reason a session is\n\
+             refused with `bad credential`.\n\
+             No relay yet? Quit, run `pcc` → \"Run a relay\" in another terminal,\n\
+             then paste the line it prints into this one.",
         );
-        let addr = ask(input, out, "Relay address as host:port", "127.0.0.1:5900")?;
-        if addr.is_empty() {
-            let _ = writeln!(out, "  (a relay address is required — stopping)");
-            return Ok(Outcome::Quit);
-        }
-        let pin = match ask_optional(
-            input,
-            out,
-            "Relay pin (64 hex characters; blank tries to fetch it from the relay)",
-        )? {
-            Some(p) => p,
-            None => match fetch_relay_pin(&addr) {
-                Ok(p) => {
-                    let _ = writeln!(out, "  fetched: {p}");
+        // A remembered relay removes the paste entirely — that is the whole
+        // point of the store.
+        let saved = crate::relays::load().unwrap_or_default();
+        if !saved.is_empty() {
+            let mut opts: Vec<(&str, &str)> = saved
+                .iter()
+                .map(|(name, r)| (name.as_str(), r.addr.as_str()))
+                .collect();
+            opts.push(("some other relay", "paste or type its details"));
+            match choose(input, out, s, "Which relay?", &opts, 1, true)? {
+                Some(i) if i < saved.len() => {
+                    let r = saved
+                        .iter()
+                        .nth(i)
+                        .map(|(_, v)| v.clone())
+                        .expect("index came from the same map");
                     let _ = writeln!(
                         out,
-                        "  compare this against whatever the relay operator published"
+                        "  {}using saved relay {}{}{} — nothing to paste{}",
+                        s.good(),
+                        s.bold(),
+                        r.addr,
+                        s.reset(),
+                        s.reset()
                     );
-                    p
+                    relay_addr = Some(r.addr);
+                    relay_pin = Some(r.pin);
+                    relay_token = Some(r.token);
+                }
+                Some(_) => {}
+                None => return Ok(Outcome::Quit),
+            }
+        }
+
+        let pasted = if relay_addr.is_none() {
+            ask_optional(
+                input,
+                out,
+                s,
+                "Paste the relay's line (blank to type the values instead)",
+            )?
+        } else {
+            None
+        };
+        if let Some(text) = pasted {
+            match crate::reach::parse_relay_hint(&text) {
+                Ok(h) => {
+                    let _ = writeln!(
+                        out,
+                        "  {}got it — relay {}{}{}",
+                        s.good(),
+                        s.bold(),
+                        h.relay,
+                        s.reset()
+                    );
+                    relay_addr = Some(h.relay);
+                    relay_pin = Some(h.pin);
+                    relay_token = Some(h.token);
                 }
                 Err(e) => {
-                    let _ = writeln!(out, "  could not fetch it: {e}");
                     let _ = writeln!(
                         out,
-                        "  run `pcc pair --relay {addr} --session <code> --token <token>` later, \
-                         or paste the pin from the relay's own output"
+                        "  {}That line did not parse: {e}{}",
+                        s.warn(),
+                        s.reset()
                     );
-                    return Ok(Outcome::Quit);
+                    let _ = writeln!(
+                        out,
+                        "  {}Answer the questions below instead.{}",
+                        s.dim(),
+                        s.reset()
+                    );
                 }
-            },
-        };
+            }
+        }
+
+        if relay_addr.is_none() {
+            let addr = ask(input, out, s, "Relay address", "127.0.0.1:5900")?;
+            if addr.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  {}A relay address is required — stopping.{}",
+                    s.bad(),
+                    s.reset()
+                );
+                return Ok(Outcome::Quit);
+            }
+            let pin = match ask_optional(
+                input,
+                out,
+                s,
+                "Relay pin (64 hex characters; blank fetches it from the relay)",
+            )? {
+                Some(p) => p,
+                None => match fetch_relay_pin(&addr) {
+                    Ok(p) => {
+                        let _ = writeln!(out, "  {}fetched {p}{}", s.good(), s.reset());
+                        let _ = writeln!(
+                            out,
+                            "  {}Compare it against whatever the relay operator published.{}",
+                            s.dim(),
+                            s.reset()
+                        );
+                        p
+                    }
+                    Err(e) => {
+                        let _ = writeln!(out, "  {}Could not fetch it: {e}{}", s.bad(), s.reset());
+                        let _ = writeln!(
+                            out,
+                            "  {}Later: pcc pair --relay {addr} --session <code> --token <token>{}",
+                            s.dim(),
+                            s.reset()
+                        );
+                        return Ok(Outcome::Quit);
+                    }
+                },
+            };
+            relay_addr = Some(addr);
+            relay_pin = Some(pin);
+        }
+
         let code = ask(
             input,
             out,
+            s,
             "Session code (viewers need it; blank generates one)",
             "",
         )?;
@@ -328,20 +716,22 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
         } else {
             code
         };
-        relay_addr = Some(addr);
-        relay_pin = Some(pin);
     }
 
     // ---- audio ----
     let audio = choose(
         input,
         out,
+        s,
         "Audio?",
         &[
-            "No audio",
-            "Microphone",
-            "System sound     (needs a loopback device; `pcc diagnose --audio` lists them)",
-            "Both microphone and system sound",
+            ("No audio", ""),
+            ("Microphone", ""),
+            (
+                "System sound",
+                "needs a loopback device; `pcc diagnose --audio` lists them",
+            ),
+            ("Both", "microphone and system sound together"),
         ],
         1,
         true,
@@ -354,10 +744,11 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
     let browser = confirm(
         input,
         out,
-        "Serve the browser viewer too (a phone can open a link)?",
+        s,
+        "Serve the browser viewer too (a phone can then watch from a link)?",
         true,
     )?;
-    let approve = confirm(input, out, "Ask before admitting each viewer?", false)?;
+    let approve = confirm(input, out, s, "Ask before admitting each viewer?", false)?;
 
     // ---- assemble ----
     if let (Some(addr), Some(pin)) = (&relay_addr, &relay_pin) {
@@ -383,82 +774,106 @@ fn share<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
     // Through a relay the token is not ours to choose. The share's --token
     // must equal the *relay's* --token or registration is refused with
     // `bad credential`, so generating one here would guarantee failure on
-    // the one path this menu exists to make easy. Only a direct share gets
-    // a generated token, and then it is generated so the viewer
-    // instructions below are complete rather than "read it off the output".
-    let token = if relay_addr.is_some() {
-        let t = ask(
-            input,
-            out,
-            "Relay token (the `relay token:` line the relay printed)",
-            "",
-        )?;
-        if t.is_empty() {
+    // the one path this menu exists to make easy. A pasted relay line
+    // already carried it; asking again would invite the very mismatch this
+    // avoids. Only a direct share gets a generated token.
+    let token = match (&relay_addr, relay_token) {
+        (Some(_), Some(t)) => {
             let _ = writeln!(
                 out,
-                "\n  A relay share must use the relay's own token, and the relay\n  \
-                 refuses to register without it. Stopping rather than starting a\n  \
-                 session that cannot connect."
+                "  {}token taken from the pasted line{}",
+                s.dim(),
+                s.reset()
             );
-            return Ok(Outcome::Quit);
+            t
         }
-        t
-    } else {
-        SessionToken::generate().as_str().to_string()
+        (Some(_), None) => {
+            let t = ask(
+                input,
+                out,
+                s,
+                "Relay token (the `relay token:` line it printed)",
+                "",
+            )?;
+            if t.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  {}A relay share must use the relay's own token, and the relay\n  \
+                     refuses to register without it. Stopping rather than starting a\n  \
+                     session that cannot connect.{}",
+                    s.bad(),
+                    s.reset()
+                );
+                return Ok(Outcome::Quit);
+            }
+            t
+        }
+        (None, _) => SessionToken::generate().as_str().to_string(),
     };
     args.push("--token".into());
     args.push(token.clone());
 
-    show(out, "Command", &args);
-    let _ = writeln!(
-        out,
-        "\n  This machine is the host. When it starts it prints the exact\n  \
-         viewer command and, for the browser, a link — send one of those.\n"
-    );
+    show(out, s, "Now run this for the sharing side", &args);
+
+    let mut body = vec![format!(
+        "{}This machine is the host.{} Start it and it prints the exact",
+        s.bold(),
+        s.reset()
+    )];
+    body.push(format!(
+        "{}viewer command — send that to whoever is watching.{}",
+        s.bold(),
+        s.reset()
+    ));
     if let Some(addr) = &relay_addr {
         if let Some(pin) = &relay_pin {
-            let _ = writeln!(out, "  Viewer (another machine, nothing else needed):");
-            let _ = writeln!(
-                out,
-                "    pcc view --relay {addr} --pin {pin} --session {session} --token {token}"
-            );
+            body.push(String::new());
+            body.push(format!("{}Viewer, any machine:{}", s.head(), s.reset()));
+            body.push(format!(
+                "  {}pcc view --relay {addr} --pin {pin}{}",
+                s.good(),
+                s.reset()
+            ));
+            body.push(format!("     --session {session} --token {token}"));
             if browser {
-                let _ = writeln!(
-                    out,
-                    "\n  Viewer (any browser — needs `pcc relay --web` on the relay):"
-                );
-                let _ = writeln!(out, "    https://{addr}/v/{session}/#token={token}");
+                body.push(String::new());
+                body.push(format!(
+                    "{}Viewer, any browser (needs `pcc relay --web`):{}",
+                    s.head(),
+                    s.reset()
+                ));
+                body.push(format!(
+                    "  {}https://{addr}/v/{session}/#token={token}{}",
+                    s.good(),
+                    s.reset()
+                ));
             }
         }
     } else {
-        let _ = writeln!(
-            out,
-            "  Viewers run: pcc view --connect <this-machine-ip>:5800 --token {} --pin <pin>",
-            token.as_str()
-        );
-        let _ = writeln!(
-            out,
-            "  The pin is created when the sharer starts, so copy the line it\n  \
-             prints — it fills the pin in for you."
-        );
+        body.push(String::new());
+        body.push("Viewers run the line it prints; it carries this machine's".to_string());
+        body.push("address and the certificate pin, which is created at".to_string());
+        body.push("startup. Copy that line — do not assemble your own.".to_string());
     }
+    panel(out, s, "What the other side runs", &body);
 
-    run_now(input, out, args)
+    run_now(input, out, s, args)
 }
 
 // ------------------------------------------------------------------- view
 
-fn view<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
+fn view<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Result<Outcome> {
     let how = choose(
         input,
         out,
+        s,
         "How do you have the connection details?",
         &[
-            "A link            (pcc://view?... — paste it whole)",
-            "Direct address    (host:port + pin + token)",
-            "Through a relay   (relay address + session + pin + token)",
-            "An iroh ticket",
-            "A WebRTC offer blob",
+            ("A link", "pcc://view?... — paste it whole"),
+            ("Direct address", "host:port + pin + token"),
+            ("Through a relay", "relay address + session + pin + token"),
+            ("An iroh ticket", "no ports, no relay to run"),
+            ("A WebRTC offer blob", "manual signalling"),
         ],
         1,
         true,
@@ -470,12 +885,22 @@ fn view<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
     let mut args: Vec<String> = vec!["view".into()];
     match how {
         0 => {
-            let link = ask(input, out, "Paste the link", "")?;
+            let link = ask(input, out, s, "Paste the link", "")?;
             if link.starts_with("http://") || link.starts_with("https://") {
-                let _ = writeln!(
+                panel(
                     out,
-                    "\n  That is a *browser* link. Just open it — no command needed,\n  \
-                     and nothing has to be installed."
+                    s,
+                    "Nothing to run",
+                    &[
+                        format!("{}That is a *browser* link.{}", s.bold(), s.reset()),
+                        String::new(),
+                        format!(
+                            "{}Open it in any browser — no command, and nothing{}",
+                            s.dim(),
+                            s.reset()
+                        ),
+                        format!("{}has to be installed.{}", s.dim(), s.reset()),
+                    ],
                 );
                 return Ok(Outcome::Quit);
             }
@@ -487,21 +912,31 @@ fn view<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
                     } else {
                         "direct"
                     };
-                    let _ = writeln!(out, "  (parsed a {via} invite)");
+                    let _ = writeln!(
+                        out,
+                        "  {}parsed a {via} invite — pin and token filled in{}",
+                        s.good(),
+                        s.reset()
+                    );
                 }
                 Err(e) => {
-                    let _ = writeln!(out, "\n  That link did not parse: {e}");
+                    let _ = writeln!(
+                        out,
+                        "\n  {}That link did not parse: {e}{}",
+                        s.bad(),
+                        s.reset()
+                    );
                     return Ok(Outcome::Quit);
                 }
             }
         }
         1 => {
-            let addr = ask(input, out, "Sharer address as host:port", "")?;
+            let addr = ask(input, out, s, "Sharer address as host:port", "")?;
             if addr.is_empty() {
                 return Ok(Outcome::Quit);
             }
-            let pin = ask(input, out, "Sharer's certificate pin (64 hex)", "")?;
-            let token = ask(input, out, "Token", "")?;
+            let pin = ask(input, out, s, "Sharer's certificate pin (64 hex)", "")?;
+            let token = ask(input, out, s, "Token", "")?;
             args.extend([
                 "--connect".into(),
                 addr,
@@ -512,10 +947,10 @@ fn view<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
             ]);
         }
         2 => {
-            let addr = ask(input, out, "Relay address as host:port", "")?;
-            let code = ask(input, out, "Session code", "")?;
-            let pin = ask(input, out, "Relay's certificate pin (64 hex)", "")?;
-            let token = ask(input, out, "Token", "")?;
+            let addr = ask(input, out, s, "Relay address as host:port", "")?;
+            let code = ask(input, out, s, "Session code", "")?;
+            let pin = ask(input, out, s, "Relay's certificate pin (64 hex)", "")?;
+            let token = ask(input, out, s, "Token", "")?;
             args.extend([
                 "--relay".into(),
                 addr,
@@ -528,8 +963,8 @@ fn view<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
             ]);
         }
         3 => {
-            let ticket = ask(input, out, "Ticket", "")?;
-            let token = ask(input, out, "Token", "")?;
+            let ticket = ask(input, out, s, "Ticket", "")?;
+            let token = ask(input, out, s, "Token", "")?;
             args.extend([
                 "--transport".into(),
                 "iroh".into(),
@@ -540,8 +975,8 @@ fn view<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
             ]);
         }
         _ => {
-            let offer = ask(input, out, "Offer blob", "")?;
-            let token = ask(input, out, "Token", "")?;
+            let offer = ask(input, out, s, "Offer blob", "")?;
+            let token = ask(input, out, s, "Token", "")?;
             args.extend([
                 "--transport".into(),
                 "webrtc".into(),
@@ -553,40 +988,50 @@ fn view<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
         }
     }
 
-    if !confirm(input, out, "Open a window?", true)? {
+    if !confirm(input, out, s, "Open a window?", true)? {
         args.push("--no-window".into());
     }
     if confirm(
         input,
         out,
+        s,
         "Reconnect automatically if the connection drops?",
         true,
     )? {
         args.push("--reconnect".into());
     }
 
-    show(out, "Command", &args);
-    run_now(input, out, args)
+    show(out, s, "Now run this on the viewing side", &args);
+    run_now(input, out, s, args)
 }
 
 // ------------------------------------------------------------------ relay
 
-fn relay<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
-    let _ = writeln!(
+fn relay<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Result<Outcome> {
+    let _ = writeln!(out);
+    hint(
         out,
-        "\n  A relay is a small server both sides dial out to. You need one when\n  \
-         neither machine can accept an incoming connection. Run it anywhere both\n  \
-         sides can reach: a VPS, a home server, or this machine for a test.\n"
+        s,
+        "A relay is a small server both sides dial out to. You need one when\n\
+         neither machine can accept an incoming connection. Run it anywhere\n\
+         both sides can reach: a VPS, a home server, or this machine.",
     );
-    let listen = ask(input, out, "Listen address", "0.0.0.0:5900")?;
+
+    let listen = ask(input, out, s, "Listen address", "0.0.0.0:5900")?;
     let web = confirm(
         input,
         out,
-        "Serve the browser viewer on the same port (a phone can then watch with only a link)?",
+        s,
+        "Serve the browser viewer on the same port (a phone can then watch from a link)?",
         true,
     )?;
-    let cert = ask_optional(input, out, "PEM certificate path (for a stable identity)")?;
-    let key = ask_optional(input, out, "PEM key path")?;
+    let cert = ask_optional(
+        input,
+        out,
+        s,
+        "PEM certificate path (for a stable identity)",
+    )?;
+    let key = ask_optional(input, out, s, "PEM key path")?;
 
     let mut args: Vec<String> = vec!["relay".into(), "--listen".into(), listen.clone()];
     if web {
@@ -599,45 +1044,88 @@ fn relay<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
         args.push(k.clone());
     }
 
-    show(out, "Command", &args);
-    let _ = writeln!(
-        out,
-        "\n  Leave it running: it stays in the foreground of this terminal, so\n  \
-         open a second terminal on this machine for the sharer.\n\n  \
-         The moment it starts, the relay prints a complete line beginning\n  \
-         `pcc share --relay …` with its own token and pin already filled in.\n  \
-         Copy that whole line to the machine being shared and run it there.\n  \
-         Nothing needs retyping, and the token is guaranteed to be the right\n  \
-         one — a share whose token disagrees with the relay's is refused with\n  \
-         `bad credential`."
-    );
+    show(out, s, "Now run this for the relay", &args);
+
+    let mut body = vec![format!(
+        "{}Leave it running.{} It holds this terminal, so open a second one",
+        s.bold(),
+        s.reset()
+    )];
+    body.push("for the sharing side.".to_string());
+    body.push(String::new());
+    body.push(format!(
+        "{}The moment it starts it prints a complete line beginning{}",
+        s.dim(),
+        s.reset()
+    ));
+    body.push(format!(
+        "{}{}pcc share --relay …{}{}",
+        s.dim(),
+        s.good(),
+        s.reset(),
+        s.reset()
+    ));
+    body.push(format!(
+        "{}with its own token and pin already filled in. Copy that whole{}",
+        s.dim(),
+        s.reset()
+    ));
+    body.push(format!(
+        "{}line to the machine being shared.{}",
+        s.dim(),
+        s.reset()
+    ));
     if web {
-        let _ = writeln!(
-            out,
-            "\n  It also prints the browser link, so a viewer can watch with only\n  \
-             a URL once the sharer is running."
-        );
+        body.push(String::new());
+        body.push(format!(
+            "{}It prints the browser link too, so a viewer can watch with{}",
+            s.dim(),
+            s.reset()
+        ));
+        body.push(format!(
+            "{}only a URL once the sharer is running.{}",
+            s.dim(),
+            s.reset()
+        ));
     } else {
-        let _ = writeln!(
-            out,
-            "\n  You chose not to serve the browser viewer, so viewers need the\n  \
-             `pcc` binary installed."
-        );
+        body.push(String::new());
+        body.push(format!(
+            "{}You turned the browser viewer off, so viewers need the `pcc`{}",
+            s.dim(),
+            s.reset()
+        ));
+        body.push(format!("{}binary installed.{}", s.dim(), s.reset()));
     }
-    run_now(input, out, args)
+    panel(out, s, "After it starts", &body);
+
+    note(
+        out,
+        s,
+        "The token is one value across all three sides. A share whose token\n  \
+         disagrees with the relay's is refused with `bad credential`.",
+    );
+
+    run_now(input, out, s, args)
 }
 
 // --------------------------------------------------------------- diagnose
 
-fn diagnose<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome> {
+fn diagnose<R: BufRead, W: Write>(input: &mut R, out: &mut W, s: Style) -> Result<Outcome> {
     let what = choose(
         input,
         out,
+        s,
         "What should it report?",
         &[
-            "Everything          (reachability, audio, and the path it would take)",
-            "Displays            (which screens can be shared, and their sizes)",
-            "Audio devices       (marking the loopback taps system audio needs)",
+            (
+                "Everything",
+                "reachability, audio, and the path it would take",
+            ),
+            ("Displays", "which screens can be shared, and their sizes"),
+            (
+                "Audio devices",
+                "marking the loopback taps system audio needs",
+            ),
         ],
         1,
         true,
@@ -651,17 +1139,26 @@ fn diagnose<R: BufRead, W: Write>(input: &mut R, out: &mut W) -> Result<Outcome>
         2 => args.push("--audio".into()),
         _ => {}
     }
-    show(out, "Command", &args);
-    run_now(input, out, args)
+    show(out, s, "Now run this", &args);
+    run_now(input, out, s, args)
 }
 
 // ----------------------------------------------------------------- shared
 
 /// Show the command exactly as it would be typed.
-fn show<W: Write>(out: &mut W, label: &str, args: &[String]) {
-    let _ = writeln!(out, "\n  {label}:\n");
-    let _ = writeln!(out, "    pcc {}", render_args(args));
-    let _ = writeln!(out);
+fn show<W: Write>(out: &mut W, s: Style, label: &str, args: &[String]) {
+    panel(
+        out,
+        s,
+        label,
+        &[format!(
+            "{}{}pcc {}{}",
+            s.good(),
+            s.bold(),
+            render_args(args),
+            s.reset()
+        )],
+    );
 }
 
 /// Render argv the way a shell would need it: quote anything that is not
@@ -682,13 +1179,21 @@ fn render_args(args: &[String]) -> String {
         .join(" ")
 }
 
-fn run_now<R: BufRead, W: Write>(input: &mut R, out: &mut W, args: Vec<String>) -> Result<Outcome> {
-    if confirm(input, out, "Run it now?", true)? {
+fn run_now<R: BufRead, W: Write>(
+    input: &mut R,
+    out: &mut W,
+    s: Style,
+    args: Vec<String>,
+) -> Result<Outcome> {
+    if confirm(input, out, s, "Run it now?", true)? {
+        let _ = writeln!(out, "  {}Starting…{}", s.good(), s.reset());
         Ok(Outcome::Run(args))
     } else {
         let _ = writeln!(
             out,
-            "\n  Not started. Copy the line above whenever you are ready."
+            "  {}Not started — copy the line above whenever you are ready.{}",
+            s.dim(),
+            s.reset()
         );
         Ok(Outcome::Quit)
     }
@@ -715,7 +1220,7 @@ mod tests {
     fn drive(input: &str) -> (Outcome, String) {
         let mut cursor = Cursor::new(input.to_string());
         let mut out = Vec::new();
-        let outcome = run(&mut cursor, &mut out).expect("menu should not error");
+        let outcome = run(&mut cursor, &mut out, Style::PLAIN).expect("menu should not error");
         (outcome, String::from_utf8(out).unwrap())
     }
 
@@ -750,7 +1255,7 @@ mod tests {
     fn a_browser_link_runs_nothing() {
         let (outcome, text) = drive("2\n1\nhttps://relay.example:5900/v/S1/#token=TOK\n");
         assert!(matches!(outcome, Outcome::Quit));
-        assert!(text.contains("Just open it"));
+        assert!(text.contains("Open it in any browser"));
     }
 
     /// Empty input must not fall through to the first option.
@@ -765,8 +1270,10 @@ mod tests {
     /// `bad credential` on the one path this menu exists to make easy.
     #[test]
     fn relay_share_uses_the_relay_token_not_a_generated_one() {
+        // The blank line skips the paste shortcut so this exercises the
+        // typed-answers path.
         let (outcome, text) =
-            drive("1\n1\n2\nrelay.example:5900\ndeadbeef\nSESS\n1\ny\nn\nRELAYTOKEN\ny\n");
+            drive("1\n1\n2\n\nrelay.example:5900\ndeadbeef\nSESS\n1\ny\nn\nRELAYTOKEN\ny\n");
         match outcome {
             Outcome::Run(args) => {
                 assert_eq!(args[0], "share");
@@ -784,7 +1291,8 @@ mod tests {
     /// start a session that will be refused.
     #[test]
     fn a_relay_share_without_a_token_stops() {
-        let (outcome, text) = drive("1\n1\n2\nrelay.example:5900\ndeadbeef\nSESS\n1\ny\nn\n\nn\n");
+        let (outcome, text) =
+            drive("1\n1\n2\n\nrelay.example:5900\ndeadbeef\nSESS\n1\ny\nn\n\nn\n");
         assert!(matches!(outcome, Outcome::Quit));
         assert!(text.contains("relay's own token"));
     }
@@ -808,6 +1316,44 @@ mod tests {
         }
     }
 
+    /// One paste must replace the hunt for four separate values.
+    #[test]
+    fn pasting_the_relay_line_fills_in_address_pin_and_token() {
+        let pin = "b".repeat(64);
+        let line =
+            format!("pcc share --relay 203.0.113.5:5900 --relay-pin {pin} --token RELAYTOK123");
+        // share → whole screen → through a relay → the pasted line →
+        // session → no audio → browser on → no approval → run.
+        let (outcome, text) = drive(&format!("1\n1\n2\n{line}\nSESS\n1\ny\nn\ny\n"));
+        match outcome {
+            Outcome::Run(args) => {
+                let value =
+                    |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
+                assert_eq!(value("--relay"), "203.0.113.5:5900");
+                assert_eq!(value("--relay-pin"), pin);
+                assert_eq!(value("--token"), "RELAYTOK123");
+                // The token was never asked for: the pasted line had it.
+                assert!(text.contains("token taken from the pasted line"));
+            }
+            _ => panic!("expected a share command"),
+        }
+    }
+
+    /// A line that does not parse falls back to the questions rather than
+    /// failing the whole flow.
+    #[test]
+    fn an_unparseable_relay_line_falls_back_to_the_questions() {
+        let (outcome, text) =
+            drive("1\n1\n2\ngarbage that is not a relay line\n127.0.0.1:5900\ndeadbeef\nSESS\n1\ny\nn\nTOK12345678\ny\n");
+        match outcome {
+            Outcome::Run(args) => {
+                assert!(args.contains(&"--relay".to_string()));
+                assert!(text.contains("did not parse"));
+            }
+            _ => panic!("expected the questions to still work"),
+        }
+    }
+
     /// Quoting: a window title with spaces must come back paste-able.
     #[test]
     fn args_are_quoted_for_the_shell() {
@@ -815,5 +1361,38 @@ mod tests {
             render_args(&["share".into(), "--window".into(), "My Editor".into()]),
             "share --window 'My Editor'"
         );
+    }
+
+    /// Panels pad to the widest line, so a styled line must measure as its
+    /// visible text, not as its bytes — otherwise every box is ragged.
+    #[test]
+    fn styling_does_not_count_toward_the_printed_width() {
+        assert_eq!(visible_len("abc"), 3);
+        assert_eq!(visible_len("\x1b[1;96mabc\x1b[0m"), 3);
+        assert_eq!(visible_len(""), 0);
+        assert_eq!(visible_len("\x1b[1m"), 0);
+    }
+
+    /// Colour is opt-out: piping the menu must not emit escape codes, or
+    /// every greppable line and every logged transcript gets polluted.
+    #[test]
+    fn plain_style_emits_no_escape_codes() {
+        let (_, text) = drive("q\n");
+        assert!(
+            !text.contains('\x1b'),
+            "plain output must be escape-free, got: {text:?}"
+        );
+    }
+
+    /// And when it is on, the styling actually reaches the output.
+    #[test]
+    fn styled_output_carries_escape_codes() {
+        let mut cursor = Cursor::new(b"q\n".to_vec());
+        let mut out = Vec::new();
+        let style = Style { color: true };
+        let _ = run(&mut cursor, &mut out, style).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains('\x1b'), "styled output should carry codes");
+        assert!(!text.contains("\x1b\x1b"), "no doubled codes");
     }
 }

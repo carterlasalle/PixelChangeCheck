@@ -500,7 +500,7 @@ pub async fn run_relay_server(
     identity: Arc<ServerIdentity>,
     token: SessionToken,
 ) -> Result<()> {
-    run_relay_server_with(listener, identity, token, false).await
+    run_relay_server_with(listener, identity, token, false, None).await
 }
 
 /// The same server, with the browser-viewer surface switched on.
@@ -508,11 +508,15 @@ pub async fn run_relay_server(
 /// `serve_web` only changes which ALPN protocols the TLS listener
 /// advertises: with it, a browser reaches the viewer page on the relay's
 /// own certificate, and `pcc` clients are unaffected.
+///
+/// `remember` saves this relay — address, pin and token — under a name, so
+/// a later `pcc share --use <name>` needs no pasting at all.
 pub async fn run_relay_server_with(
     listener: TcpListener,
     identity: Arc<ServerIdentity>,
     token: SessionToken,
     serve_web: bool,
+    remember: Option<String>,
 ) -> Result<()> {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(NetworkConfig::relay_server_config(
         &identity, serve_web,
@@ -532,12 +536,22 @@ pub async fn run_relay_server_with(
     // game: the operator had the values on screen and still had to
     // reassemble them by hand.
     let bound = listener.local_addr()?;
-    let dial = if bound.ip().is_unspecified() {
-        // A wildcard bind is not an address anyone can dial.
-        crate::reach::outbound_address_for(bound.port()).unwrap_or(bound)
-    } else {
-        bound
-    };
+    let dial = crate::reach::dial_address_for_bind(bound);
+    if let Some(name) = &remember {
+        match crate::relays::remember(
+            name,
+            &dial.to_string(),
+            &identity.fingerprint,
+            token.as_str(),
+        ) {
+            Ok(path) => {
+                println!();
+                println!("Saved as '{name}' in {}", path.display());
+                println!("  Next time, on the machine being shared:  pcc share --use {name}");
+            }
+            Err(e) => eprintln!("Could not save the relay as '{name}': {e}"),
+        }
+    }
     println!();
     println!("On the machine being shared, run:");
     println!(
@@ -545,6 +559,21 @@ pub async fn run_relay_server_with(
         identity.fingerprint,
         token.as_str()
     );
+    if !dial.ip().is_loopback() {
+        // A host frequently cannot dial its own public address: clouds
+        // route it out and back, or drop it. Printing only the public form
+        // is what made a same-machine test fail with "failed to connect to
+        // the relay" while a working relay was right there.
+        println!();
+        println!("If the sharer runs on this same machine, use 127.0.0.1 instead —");
+        println!("a machine often cannot reach its own public address:");
+        println!(
+            "  pcc share --relay 127.0.0.1:{} --relay-pin {} --token {}",
+            bound.port(),
+            identity.fingerprint,
+            token.as_str()
+        );
+    }
     println!();
     println!("Viewers then run (using the session code the sharer prints):");
     println!(
