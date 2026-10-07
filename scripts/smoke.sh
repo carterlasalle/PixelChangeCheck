@@ -338,7 +338,10 @@ fi
 # A frame the relay refuses to forward is a framing bug, and the usual cause
 # is a stream that was left mid-frame — which is what a cancel-unsafe read
 # under `select!` produces. Nothing valid should ever trip it.
-GATE=$(grep -c "too large" "$LOG_DIR/relay.log" 2>/dev/null || echo 0)
+# `grep -c` prints 0 *and* exits non-zero when there is no match, so the
+# count is taken as printed and only defaulted when it is absent.
+GATE=$(grep -c "too large" "$LOG_DIR/relay.log" 2>/dev/null)
+GATE=${GATE:-0}
 check "the relay refused no frames it forwarded" \
   "$([ "$GATE" -eq 0 ] && echo 0 || echo 1)" "$GATE oversized frame(s) in relay.log"
 
