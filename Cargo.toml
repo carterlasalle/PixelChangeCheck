@@ -94,7 +94,7 @@ rgb = "0.8"
 jpeg-encoder = { version = "0.5", features = ["simd"] }
 
 # Compression
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 
 # Async runtime: the named set is what this crate uses (runtime, net,
 # sync, time, io, macros for `#[tokio::main/test]`). `process`/`signal`
